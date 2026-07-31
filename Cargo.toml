@@ -2,12 +2,11 @@
 resolver = "3"
 members = [
     "xtask",
-    # M0 adds the five library crates here:
-    #   "crates/testkit",
-    #   "crates/kafka-conn",
-    #   "crates/kafka-meta",
-    #   "crates/kafka-admin",
-    #   "crates/kafka-read",
+    "crates/testkit",
+    "crates/kafka-conn",
+    "crates/kafka-meta",
+    "crates/kafka-admin",
+    "crates/kafka-read",
 ]
 
 [workspace.package]
