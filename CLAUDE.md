@@ -4,7 +4,19 @@
 
 A Kafka 4.x client layer built directly on the `kafka-protocol` crate, for the backend of a Kafka cluster UI (a kafbat-ui equivalent). Admin/control-plane first, plus a UI-shaped read path. Not a general-purpose client — see PLAN.md for scope.
 
-**This repo is a client. `kaas` (kaas-rs/kaas) is a broker.** They are unrelated codebases that happen to speak the same protocol from opposite ends. If you are carrying context from the kaas repo, none of its architecture applies here.
+## Relationship to kaas
+
+**This repo is a client. `kaas` (kaas-rs/kaas) is a broker.** They speak the same protocol from opposite ends. If you are carrying context from the kaas repo, none of its architecture applies here.
+
+Do not import `kaas-codec` or reuse its wire code, and do not treat "kaas already does this" as a reason to skip work. Concretely, it doesn't:
+
+- It is server-shaped — `decode_request` + `encode_response`. `encode_request` is missing on exactly the APIs we reach for first (metadata, fetch, list_offsets, api_versions).
+- 12 of the ~37 APIs we need have no module at all, and they are M7/M8's bulk: `DescribeCluster`, `DescribeTopicPartitions`, `ConsumerGroupDescribe`, `ShareGroupDescribe`, `List`/`AlterPartitionReassignments`, `ElectLeaders`, `List`/`DescribeTransactions`, `DescribeProducers`, `Describe`/`AlterUserScramCredentials`.
+- It targets Kafka 3.7. `ListOffsets` caps at v7, so the tiered sentinels — the thing M6 exists to surface — are unreachable there by design, not by omission.
+- It cannot decode a record. Byte-opacity is an *enforced invariant* in kaas (`tripwires.rs` counts every record decode and batch re-encode; the tests assert zero), and there is no compression code in that workspace at all. M9 and M10 have no ancestor to inherit.
+- Its SCRAM is the server half — it consumes client-first/client-final against a credential store. We need the mirror, and there is no SASLprep there either.
+
+There is a second, stronger reason to keep the codecs separate: **kaas-lib is the natural conformance harness for kaas.** Point `testkit` at a kaas broker instead of `apache/kafka:4.3.1` and the acceptance suite becomes a typed parity check with real diffs, which is more than the shell-tool suite in that repo can give. That only works if the two implementations are independent — share a codec and a mutual misreading of the spec encodes and decodes consistently, passes green, and hides precisely the class of wire bug the harness exists to catch. So keep `testkit`'s bootstrap addresses behind a trait rather than hardcoding the Apache image, and keep the codec dependency `kafka-protocol`.
 
 ## Stack
 
@@ -85,12 +97,18 @@ These are the things that are easy to get subtly wrong, and each produces a conf
 Every milestone has a command in PLAN.md that must pass before it is considered done. Run it. Do not report a milestone complete on the basis of `cargo build` succeeding.
 
 ```sh
+cargo xtask ci                        # fmt + clippy + unit tests, no Docker
+cargo xtask integration               # the #[ignore]d acceptance tests, needs Docker
+cargo xtask fmt-check
+
 cargo clippy --all-targets -- -D warnings
 cargo test -p <crate>                 # unit
 cargo test -p <crate> -- --ignored    # integration, needs Docker
 ```
 
 Integration tests are `#[ignore]`d by default so `cargo test` stays fast without Docker.
+
+Lints live in `[workspace.lints]` at the root, so a new crate inherits rule 2 by adding `[lints] workspace = true` to its manifest rather than by repeating `#![deny(...)]` attributes and eventually forgetting one. `.cargo/config.toml` also sets `rustflags = ["-D", "warnings"]`, so warnings fail the build locally, not just in CI.
 
 ## Reference
 
