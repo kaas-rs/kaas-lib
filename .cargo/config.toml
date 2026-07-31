@@ -1,0 +1,6 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+[build]
+# Warnings-as-errors at build time. Keep symmetric with the clippy gate in CI.
+rustflags = ["-D", "warnings"]

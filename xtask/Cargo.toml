@@ -1,0 +1,16 @@
+[package]
+name        = "xtask"
+version     = "0.0.0"
+publish     = false
+description = "Repo-wide chores: ci, integration, fmt-check."
+
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,82 @@
+[workspace]
+resolver = "3"
+members = [
+    "xtask",
+    # M0 adds the five library crates here:
+    #   "crates/testkit",
+    #   "crates/kafka-conn",
+    #   "crates/kafka-meta",
+    #   "crates/kafka-admin",
+    #   "crates/kafka-read",
+]
+
+[workspace.package]
+edition      = "2024"
+license      = "Apache-2.0"
+repository   = "https://github.com/kaas-rs/kaas-lib"
+rust-version = "1.97"
+
+[workspace.dependencies]
+# The codec, and the only place protocol types are allowed to appear.
+# See CLAUDE.md: `client` drops the broker half of the codegen, and
+# `messages_enums` is not in `default` but is what the read-only gate
+# and generic dispatch match on.
+kafka-protocol = { version = "0.17", default-features = false, features = [
+    "client",
+    "messages_enums",
+    "gzip",
+    "snappy",
+    "lz4",
+    "zstd",
+] }
+
+# async + I/O
+tokio        = { version = "1.53", features = ["full"] }
+tokio-util   = { version = "0.7", features = ["codec", "io"] }
+futures      = "0.3"
+bytes        = "1.12"
+arc-swap     = "1.9"
+
+# TLS
+tokio-rustls        = "0.26"
+rustls              = "0.23"
+rustls-native-certs = "0.8"
+
+# SASL. `stringprep` is the SASLprep requirement from CLAUDE.md — a
+# hand-rolled trim-and-lowercase silently fails on non-ASCII passwords
+# that a Java client accepts. The RustCrypto set is version-coherent:
+# hmac 0.13 / sha2 0.11 / pbkdf2 0.13 all sit on digest 0.11.
+stringprep = "0.1"
+hmac       = "0.13"
+sha2       = "0.11"
+pbkdf2     = "0.13"
+base64     = "0.23"
+subtle     = "2.6"
+rand       = "0.9"
+
+# errors / observability
+thiserror          = "2.0"
+anyhow             = "1.0"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+metrics            = "0.24"
+
+# tests
+testcontainers = "0.27"
+
+[workspace.lints.clippy]
+# Rule 2: a malformed record from one topic must not take down a server
+# hosting other clusters. Denied at the workspace root so a new crate
+# inherits it by opting in with `[lints] workspace = true` rather than
+# by remembering to repeat the attributes.
+unwrap_used              = "deny"
+expect_used              = "deny"
+panic                    = "deny"
+indexing_slicing         = "deny"
+as_conversions           = "deny"
+cast_possible_truncation = "deny"
+cast_sign_loss           = "deny"
+
+[workspace.lints.rust]
+unsafe_code                   = "forbid"
+missing_debug_implementations = "warn"

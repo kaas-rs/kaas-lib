@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # fmt + clippy + unit tests. No Docker, no broker — this is the gate
+  # that runs on every push.
+  #
+  # Runs on a GitHub-hosted runner rather than the kaas-rs `arc-runner-set`
+  # so it is green from the first push; the ARC runner image is minimal
+  # and has no C toolchain, which is what kept kaas's CI red for a while.
+  # Switch the `runs-on` below once the runner set is confirmed available
+  # to this repo and a `cc` install step is added.
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (honours rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test (unit)
+        run: cargo test --workspace
+
+  # The `#[ignore]`d acceptance tests. Every one boots a real broker via
+  # testcontainers, so this is minutes rather than seconds — manual for
+  # now. Promote it to `push` once M0 lands and the runtime is known.
+  #
+  # ubuntu-latest ships a running Docker daemon, so testcontainers works
+  # here with no extra setup.
+  integration:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (honours rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Pre-pull the broker image
+        run: docker pull apache/kafka:4.3.1
+
+      - name: cargo test (integration)
+        run: cargo xtask integration
