@@ -339,6 +339,19 @@ impl Connection {
         &self.inner.versions
     }
 
+    /// The version this connection would send an api key at.
+    ///
+    /// Callers need this when a request's *contents* depend on the version —
+    /// `MetadataRequest`'s null-versus-empty topic list, for one — and when
+    /// deciding whether a newer API is available before falling back to an
+    /// older one.
+    pub fn negotiated_version(&self, api_key: ApiKey) -> Option<i16> {
+        self.inner
+            .versions
+            .get(api_key)
+            .and_then(|e| e.negotiated())
+    }
+
     /// Traffic counters for this connection.
     pub fn stats(&self) -> &Arc<ConnectionStats> {
         &self.inner.stats

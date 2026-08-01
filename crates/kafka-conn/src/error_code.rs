@@ -1078,6 +1078,32 @@ impl ErrorCode {
         }
     }
 
+    /// Whether retrying is worthwhile when the request named a specific
+    /// resource that the broker says does not exist.
+    ///
+    /// This exists because PLAN.md's M5 acceptance and the protocol disagree,
+    /// and both are right about different things. Kafka calls
+    /// `UNKNOWN_TOPIC_OR_PARTITION` *retriable*, and for a topic that is
+    /// mid-creation or mid-propagation it genuinely is. For a describe of a
+    /// topic a user typed into a search box it is not: the answer will be the
+    /// same five times over, and retrying turns a typo into a spinner.
+    ///
+    /// So it is a separate axis rather than a correction to [`Self::retriable`].
+    /// The protocol's answer stays the protocol's answer — derived, not
+    /// overridden — and callers that named a resource ask this one instead.
+    pub fn retriable_for_named_resource(self) -> bool {
+        !matches!(
+            self,
+            ErrorCode::UnknownTopicOrPartition
+                | ErrorCode::UnknownTopicId
+                | ErrorCode::GroupIdNotFound
+                | ErrorCode::TransactionalIdNotFound
+                | ErrorCode::UnknownMemberId
+                | ErrorCode::ResourceNotFound
+                | ErrorCode::LogDirNotFound
+        ) && self.retriable()
+    }
+
     /// Whether seeing this code should invalidate the metadata snapshot.
     ///
     /// Retrying a `NOT_LEADER_OR_FOLLOWER` against the same stale leader is an
