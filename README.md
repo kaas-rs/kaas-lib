@@ -22,7 +22,9 @@ kafka-admin = { git = "https://github.com/kaas-rs/kaas-lib" }
 kafka-read  = { git = "https://github.com/kaas-rs/kaas-lib" }
 ```
 
-Not yet on crates.io.
+Not yet on crates.io — the manifests are release-ready and
+`.github/workflows/release.yml` publishes on a `v*` tag, but nothing has
+been uploaded. See [RELEASING.md](RELEASING.md).
 
 ## Three invariants and a constraint
 
@@ -58,6 +60,8 @@ cargo xtask ci             # fmt + clippy + unit tests, no Docker
 cargo xtask integration    # acceptance tests against apache/kafka:4.3.1
 cargo xtask docs --serve   # the book, with live reload
 ```
+
+Releases: [RELEASING.md](RELEASING.md).
 
 Integration tests are `#[ignore]`d by default so `cargo test` stays fast
 without a Docker daemon. There are no mocked brokers in this workspace —

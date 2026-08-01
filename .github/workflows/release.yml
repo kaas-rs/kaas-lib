@@ -1,0 +1,149 @@
+name: Release
+
+# Publishes the four library crates to crates.io.
+#
+# Publishing is IRREVERSIBLE. crates.io yanks but never deletes, and a
+# version number can never be reused. So this workflow is deliberately
+# unhelpful about being run by accident:
+#
+#   * tag pushes publish; manual runs default to a dry run
+#   * the tag must match the workspace version, or it stops
+#   * the full acceptance suite runs against a real broker first, because
+#     "cargo build succeeded" is not evidence that a release works
+#   * it targets the `crates-io` environment, so a required reviewer can
+#     be configured on it (repo Settings -> Environments)
+#
+# Two ways to authenticate, and which one you get is automatic:
+#
+#   * Trusted Publishing (OIDC, no stored secret) — preferred, used when
+#     no CARGO_REGISTRY_TOKEN secret is set.
+#   * CARGO_REGISTRY_TOKEN — needed for the FIRST publish of each crate.
+#     crates.io cannot attach a Trusted Publisher to a crate that does not
+#     exist yet (unlike PyPI there is no "pending publisher"), so the
+#     initial release has to use a token. Afterwards, configure Trusted
+#     Publishing per crate on crates.io, delete the secret, and this
+#     workflow switches over on its own.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Package and verify without uploading"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      # Required by crates-io-auth-action: it asks GitHub for an OIDC JWT
+      # and exchanges it with crates.io for a 30-minute token.
+      id-token: write
+    env:
+      # True only for a manual run with the box ticked. A tag push always
+      # publishes for real.
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+      # Secrets are not available in `if:` on some runner versions; hoist it.
+      HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (honours rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tag must match the workspace version
+        # Read the version cargo actually resolved rather than grepping the
+        # manifest, and assert all four crates agree — they inherit
+        # `version.workspace`, so a mismatch means someone pinned one by
+        # hand and the lockstep guarantee is already broken.
+        run: |
+          set -euo pipefail
+          versions=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[]
+                     | select(.name | test("^kafka-(conn|meta|admin|read)$"))
+                     | .version' | sort -u)
+          if [ "$(echo "$versions" | wc -l)" -ne 1 ]; then
+            echo "::error::published crates disagree on version:"; echo "$versions"
+            exit 1
+          fi
+          echo "workspace version: $versions"
+          echo "WORKSPACE_VERSION=$versions" >> "$GITHUB_ENV"
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$versions" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match workspace version $versions"
+              exit 1
+            fi
+            echo "tag ${GITHUB_REF_NAME} matches"
+          fi
+
+      - name: Gate — fmt, clippy, unit tests
+        run: cargo xtask ci
+
+      - name: Gate — acceptance suite against a real broker
+        # PLAN.md makes these the acceptance criteria for every milestone.
+        # Minutes rather than seconds, which is the correct trade for an
+        # irreversible upload.
+        run: |
+          docker pull apache/kafka:4.3.1
+          cargo xtask integration
+
+      - name: Authenticate — Trusted Publishing
+        id: auth
+        if: env.HAS_TOKEN != 'true'
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish
+        # `cargo publish --workspace` resolves the dependency order itself
+        # (conn -> meta -> admin/read) and waits for each crate to appear in
+        # the index before publishing its dependents, so no manual
+        # sequencing or sleep is needed.
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN || steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "::notice::dry run — packaging and verifying, nothing will be uploaded"
+            cargo publish --workspace --dry-run
+          else
+            echo "::notice::publishing ${WORKSPACE_VERSION} to crates.io"
+            cargo publish --workspace
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Release ${WORKSPACE_VERSION}"
+            echo
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "Dry run — nothing uploaded."
+            else
+              echo "Published to crates.io:"
+              for c in kafka-conn kafka-meta kafka-admin kafka-read; do
+                echo "- [\`$c\`](https://crates.io/crates/$c/${WORKSPACE_VERSION})"
+              done
+            fi
+            echo
+            if [ "${HAS_TOKEN}" = "true" ]; then
+              echo "_Authenticated with \`CARGO_REGISTRY_TOKEN\`. Once every crate"
+              echo "exists on crates.io, configure Trusted Publishing per crate and"
+              echo "delete the secret — this workflow will switch over automatically._"
+            else
+              echo "_Authenticated with Trusted Publishing (OIDC); no stored secret._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
