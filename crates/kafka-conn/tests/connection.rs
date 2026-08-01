@@ -91,10 +91,19 @@ async fn killing_the_broker_resolves_every_pending_future() {
         }
     }
     assert!(started.elapsed() < Duration::from_secs(5));
-    assert!(
-        errors > 0,
-        "expected the kill to strand at least one request"
-    );
+
+    // Deliberately *not* asserting `errors > 0`. That asserts the kill won a
+    // race against 20 in-flight requests, which is not the property under
+    // test and is decided by how fast the machine is: on a 20-core runner all
+    // 20 completed before the container died and the test failed with
+    // "expected the kill to strand at least one request" — while the library
+    // had behaved perfectly.
+    //
+    // What must hold either way is that every future *returned*, that any
+    // failure was retriable — both checked above — and that the connection is
+    // now dead rather than hanging the next caller, which is checked below and
+    // does not depend on timing at all.
+    let _ = errors;
 
     // And the connection stays dead, rather than hanging the next caller.
     let after = conn.send(metadata_request()).await;
