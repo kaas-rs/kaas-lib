@@ -259,7 +259,10 @@ impl Connection {
             return Err(Error::ReadOnly { api_key });
         }
 
-        let version = self.inner.versions.negotiate(api_key)?;
+        // Typed, not `negotiate(api_key)`: see `version_for`. The api key's
+        // range is the union of the request's and the response's, so the
+        // untyped path can hand back a version this request has no schema for.
+        let version = version_for::<R>(&self.inner.versions)?;
         let frame = self
             .round_trip(api_key, version, &request, deadline)
             .await?;
@@ -354,8 +357,7 @@ impl Connection {
     /// where the two schemas disagree, the api key reports the wider range and
     /// encoding at it fails.
     pub fn negotiated_for<R: Rpc>(&self) -> Result<i16> {
-        let ours = typed_range::<R>();
-        self.inner.versions.negotiate_with(R::API_KEY, Some(ours))
+        version_for::<R>(&self.inner.versions)
     }
 
     /// The version this connection would send an api key at.
@@ -594,6 +596,19 @@ fn typed_range<R: Rpc>() -> crate::versions::VersionRange {
     crate::versions::VersionRange::new(request.min.max(response.min), request.max.min(response.max))
 }
 
+/// The version a request will actually be encoded at.
+///
+/// Every path that encodes a known request type must go through this rather
+/// than through `ApiVersions::negotiate`. The api key reports the *wider* of
+/// the request and response schema ranges, so for any api where the two
+/// disagree — `OffsetFetch`, whose response reaches v10 while its request
+/// stops at v9 — negotiating from the key alone picks a version the encoder
+/// then refuses, and the failure surfaces as an opaque "specified version not
+/// supported by this message type" from inside the codec.
+fn version_for<R: Rpc>(versions: &ApiVersions) -> Result<i16> {
+    versions.negotiate_with(R::API_KEY, Some(typed_range::<R>()))
+}
+
 /// Await `future` until `deadline`, reporting a typed timeout.
 async fn with_deadline<F: Future>(
     deadline: Instant,
@@ -666,7 +681,7 @@ impl RawConn<'_> {
 
     /// One request, one decoded response.
     async fn call<R: Rpc>(&mut self, api_key: ApiKey, request: &R) -> Result<R::Response> {
-        let version = self.versions.negotiate(api_key)?;
+        let version = version_for::<R>(&self.versions)?;
         let frame = self.round_trip(api_key, version, request).await?;
         codec::decode_response::<R>(api_key, version, frame)
     }
@@ -754,7 +769,7 @@ fn peek_error_code(body: &Bytes) -> Result<i16> {
 
 impl SaslTransport for RawConn<'_> {
     async fn handshake(&mut self, mechanism: &str) -> Result<Vec<String>> {
-        let version = self.versions.negotiate(ApiKey::SaslHandshake)?;
+        let version = version_for::<SaslHandshakeRequest>(&self.versions)?;
         if version < 1 {
             // v0 puts SASL tokens directly on the socket instead of inside
             // SaslAuthenticate. Kafka has offered v1 since 1.0.0; refusing is
@@ -882,6 +897,12 @@ mod tests {
             table.negotiate_with(ApiKey::OffsetFetch, Some(typed)).ok(),
             Some(9)
         );
+        // And the function the *send path* actually calls must agree. This is
+        // the assert that was missing: the two above proved `negotiate_with`
+        // worked while `send_inner` went on calling `negotiate`, so the helper
+        // was correct and unused. Test the path, not just the tool.
+        assert_eq!(version_for::<OffsetFetchRequest>(&table).ok(), Some(9));
+
         // ... whereas the untyped path is what produced the bug.
         assert_eq!(table.negotiate(ApiKey::OffsetFetch).ok(), Some(10));
     }
@@ -894,6 +915,80 @@ mod tests {
         let typed = typed_range::<MetadataRequest>();
         let by_api_key = crate::versions::our_range(ApiKey::Metadata).expect("known key");
         assert_eq!((typed.min, typed.max), (by_api_key.min, by_api_key.max));
+    }
+
+    /// The class guard, rather than one more instance of it.
+    ///
+    /// `OffsetFetch` is the divergence we know about, and it took a live
+    /// cluster to find. Upstream is free to introduce another the next time a
+    /// Kafka release bumps one half of a schema pair — this asserts the send
+    /// path stays inside the *request's* own range for every api the
+    /// workspace actually sends, so the next one is a failing unit test rather
+    /// than an opaque encoder error against somebody's production broker.
+    #[test]
+    fn every_request_negotiates_to_a_version_its_own_encoder_accepts() {
+        macro_rules! check {
+            ($($ty:ty),+ $(,)?) => {$({
+                let key = <$ty as Rpc>::API_KEY;
+                let ours = crate::versions::our_range(key).expect("this build knows the key");
+                // A broker advertising everything the api key claims — the
+                // case where the untyped path over-reaches.
+                let table = ApiVersions::from_triples([(key.code(), ours.min, ours.max)]);
+                let picked = match version_for::<$ty>(&table) {
+                    Ok(version) => version,
+                    Err(error) => panic!("{key}: no usable version: {error}"),
+                };
+                let request = <$ty as kafka_protocol::protocol::Message>::VERSIONS;
+                assert!(
+                    picked >= request.min && picked <= request.max,
+                    "{key}: send path picked v{picked}, but the request encoder only \
+                     covers v{}..=v{}",
+                    request.min,
+                    request.max,
+                );
+            })+};
+        }
+
+        use kafka_protocol::messages::*;
+        check!(
+            ApiVersionsRequest,
+            MetadataRequest,
+            FetchRequest,
+            ListOffsetsRequest,
+            FindCoordinatorRequest,
+            OffsetFetchRequest,
+            OffsetCommitRequest,
+            OffsetDeleteRequest,
+            DescribeGroupsRequest,
+            ListGroupsRequest,
+            DeleteGroupsRequest,
+            ConsumerGroupDescribeRequest,
+            ShareGroupDescribeRequest,
+            CreateTopicsRequest,
+            DeleteTopicsRequest,
+            CreatePartitionsRequest,
+            DeleteRecordsRequest,
+            DescribeTopicPartitionsRequest,
+            DescribeConfigsRequest,
+            IncrementalAlterConfigsRequest,
+            DescribeClusterRequest,
+            DescribeLogDirsRequest,
+            DescribeAclsRequest,
+            CreateAclsRequest,
+            DeleteAclsRequest,
+            DescribeClientQuotasRequest,
+            AlterClientQuotasRequest,
+            DescribeUserScramCredentialsRequest,
+            AlterUserScramCredentialsRequest,
+            ListPartitionReassignmentsRequest,
+            AlterPartitionReassignmentsRequest,
+            ElectLeadersRequest,
+            ListTransactionsRequest,
+            DescribeTransactionsRequest,
+            DescribeProducersRequest,
+            SaslHandshakeRequest,
+            SaslAuthenticateRequest,
+        );
     }
 
     #[test]
