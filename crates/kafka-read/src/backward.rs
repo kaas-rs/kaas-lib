@@ -318,7 +318,11 @@ async fn read_window(
 
         let mut last_offset = offset;
         for outcome in decoded.outcomes {
-            last_offset = outcome.offset();
+            // `last_offset`, not `offset` — a malformed batch spans a range,
+            // and stepping to its base + 1 lands back inside it. The guard
+            // below keeps that from looping, but only by abandoning the rest
+            // of the window; stepping past the whole batch reads it instead.
+            last_offset = outcome.last_offset();
             match outcome {
                 // The fetch started at whatever batch contains `offset`, so
                 // records before the window are normal and are dropped rather

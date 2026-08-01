@@ -142,6 +142,101 @@ impl RecordOutcome {
     pub fn is_malformed(&self) -> bool {
         matches!(self, RecordOutcome::Malformed { .. })
     }
+
+    /// The last offset this outcome covers.
+    ///
+    /// The distinction from [`RecordOutcome::offset`] only matters for
+    /// `Malformed`, and there it is the difference between a scan that
+    /// finishes and one that does not. A malformed *batch* spans every offset
+    /// from its base to its last, so resuming from `offset + 1` lands back
+    /// inside the same batch: the broker returns the batch containing that
+    /// offset, it fails to decode again, and the scan re-reads it forever.
+    ///
+    /// `last_offset` is `None` when the header was too damaged to say, which
+    /// is exactly when this matters most — callers must still guarantee
+    /// forward progress, so they take the max of this and their current
+    /// position.
+    pub fn last_offset(&self) -> i64 {
+        match self {
+            RecordOutcome::Ok(record) => record.offset,
+            RecordOutcome::Malformed {
+                offset,
+                last_offset,
+                ..
+            } => last_offset.unwrap_or(*offset).max(*offset),
+        }
+    }
+}
+
+#[cfg(test)]
+mod outcome_offset_tests {
+    use super::*;
+    use bytes::Bytes;
+
+    fn malformed(offset: i64, last_offset: Option<i64>) -> RecordOutcome {
+        RecordOutcome::Malformed {
+            offset,
+            last_offset,
+            raw: Bytes::new(),
+            reason: DecodeError::new("bad"),
+        }
+    }
+
+    /// The liveness bug, as arithmetic.
+    ///
+    /// A scan resuming from a malformed batch's *base* offset re-requests the
+    /// same batch forever: the broker returns whatever batch contains that
+    /// offset, which is the one that just failed to decode. It presents as a
+    /// scan that never finishes while emitting Malformed events, not as an
+    /// error.
+    #[test]
+    fn a_malformed_batch_reports_the_end_of_its_range_not_its_start() {
+        let outcome = malformed(100, Some(149));
+        assert_eq!(outcome.offset(), 100, "base offset, for reporting");
+        assert_eq!(outcome.last_offset(), 149, "resume point, for advancing");
+        assert!(
+            outcome.last_offset() >= outcome.offset(),
+            "resuming from last_offset + 1 must clear the whole batch"
+        );
+    }
+
+    /// A header too damaged to name its own end.
+    #[test]
+    fn an_unknown_end_falls_back_to_the_base_offset() {
+        let outcome = malformed(100, None);
+        assert_eq!(outcome.last_offset(), 100);
+    }
+
+    /// A header damaged into claiming it ends before it starts.
+    #[test]
+    fn a_last_offset_behind_the_base_never_moves_a_scan_backwards() {
+        let outcome = malformed(100, Some(7));
+        assert_eq!(
+            outcome.last_offset(),
+            100,
+            "a corrupt header must not rewind the cursor"
+        );
+    }
+
+    #[test]
+    fn an_ok_record_reports_its_own_offset_either_way() {
+        let record = Record {
+            topic: "t".to_owned(),
+            partition: 0,
+            offset: 42,
+            timestamp: 0,
+            timestamp_type: TimestampType::Creation,
+            key: None,
+            value: None,
+            headers: Vec::new(),
+            producer_id: None,
+            transactional: false,
+            leader_epoch: None,
+        };
+        let outcome = RecordOutcome::Ok(record);
+        assert_eq!(outcome.offset(), 42);
+        assert_eq!(outcome.last_offset(), 42);
+    }
 }
 
 #[cfg(test)]

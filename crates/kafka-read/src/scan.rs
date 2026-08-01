@@ -550,12 +550,25 @@ impl ScanState {
                 }
 
                 read_anything = true;
+                // `last_offset`, not `offset`: a malformed *batch* covers every
+                // offset from its base to its last, so resuming from base + 1
+                // lands back inside the same batch. The broker returns the
+                // batch containing that offset, it fails to decode again, and
+                // the scan re-reads it forever — emitting a Malformed event
+                // each time, which reads as a very slow scan rather than a
+                // stuck one.
                 let last = decoded
                     .outcomes
                     .last()
-                    .map(RecordOutcome::offset)
+                    .map(RecordOutcome::last_offset)
                     .unwrap_or(cursor.next_offset);
-                cursor.next_offset = last.saturating_add(1);
+                // And never move backwards or stand still. When a batch header
+                // is too damaged to report its last offset there is nothing to
+                // compute a safe skip from, so forward progress has to be
+                // asserted rather than derived.
+                cursor.next_offset = last
+                    .saturating_add(1)
+                    .max(cursor.next_offset.saturating_add(1));
 
                 let bad = decoded
                     .outcomes
