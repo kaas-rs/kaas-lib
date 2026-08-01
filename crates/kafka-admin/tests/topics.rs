@@ -14,11 +14,48 @@
     clippy::indexing_slicing
 )]
 
+use std::time::{Duration, Instant};
+
 use kafka_admin::{
-    Admin, ClusterConfig, ConfigChange, ConfigResource, ConfigSource, ErrorCode, NewTopic,
-    OffsetSpec,
+    Admin, ClusterConfig, ConfigChange, ConfigEntry, ConfigResource, ConfigSource, ErrorCode,
+    NewTopic, OffsetSpec,
 };
 use testkit::Cluster as _;
+
+/// How long a config change may take to reach the broker serving describes.
+const CONFIG_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wait for a topic config to report `expected`, then return the entry.
+///
+/// The broker acks an alter once the controller commits it, but serves
+/// describes from the metadata it has applied — which in KRaft trails the log
+/// asynchronously. Asserting on a single read makes the test a race that an
+/// idle machine wins and a loaded one loses.
+async fn await_config(admin: &Admin, topic: &str, name: &str, expected: &str) -> ConfigEntry {
+    let deadline = Instant::now() + CONFIG_TIMEOUT;
+    loop {
+        let configs = admin
+            .describe_configs([ConfigResource::topic(topic)])
+            .await
+            .unwrap();
+        let entries = find(&configs, &ConfigResource::topic(topic))
+            .as_ref()
+            .expect("described");
+        let entry = entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} is always present"));
+        if entry.value.as_deref() == Some(expected) {
+            return entry.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{topic}.{name} never became {expected:?} within {CONFIG_TIMEOUT:?}; last saw {:?}",
+            entry.value
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
 
 fn find<'a, K: PartialEq, T>(
     items: &'a [(K, Result<T, kafka_admin::Error>)],
@@ -71,17 +108,18 @@ async fn create_describe_alter_verify_delete() {
     );
 
     // Verify.
-    let configs = admin
-        .describe_configs([ConfigResource::topic("orders")])
-        .await
-        .unwrap();
-    let entries = find(&configs, &ConfigResource::topic("orders"))
-        .as_ref()
-        .expect("described");
-    let retention = entries
-        .iter()
-        .find(|entry| entry.name == "retention.ms")
-        .expect("retention.ms is always present");
+    //
+    // Polled, not read once. `IncrementalAlterConfigs` is acked when the
+    // controller has committed the change, but a broker serves
+    // `DescribeConfigs` from the metadata state it has *applied*, and in KRaft
+    // it applies records from the log asynchronously. So there is a real
+    // window where the alter has succeeded and a describe still returns the
+    // old value — narrow on an idle machine, wide enough on a loaded CI runner
+    // to fail as `left: Some("600000"), right: Some("1200000")`.
+    //
+    // Waiting for the value the alter promised is the assertion; the timeout
+    // is what turns "never converged" into a failure rather than a hang.
+    let retention = await_config(&admin, "orders", "retention.ms", "1200000").await;
     assert_eq!(retention.value.as_deref(), Some("1200000"));
     assert_eq!(
         retention.source,
