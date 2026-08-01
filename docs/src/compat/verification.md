@@ -7,10 +7,10 @@ Four layers, in increasing order of cost and of what they prove.
 
 | Layer | Command | Needs | Proves |
 |---|---|---|---|
-| unit | `cargo xtask ci` | nothing | fmt, clippy, table-driven logic |
+| unit | `cargo xtask ci` | nothing | fmt, clippy, actionlint, table-driven logic |
 | acceptance | `cargo xtask integration` | Docker | it works against Apache Kafka 4.3.1 |
-| fuzz | `cargo xtask fuzz` | nightly | the decoder cannot panic |
-| interop | `cargo xtask interop` | Docker + cmake | we agree with a genuinely different client |
+| fuzz | `cargo xtask fuzz` | nightly | the decoder cannot panic *or exhaust memory* |
+| interop | `cargo xtask interop` | Docker, cmake, libclang, libcurl | we agree with a genuinely different client |
 
 ## Unit — the fast gate
 
@@ -65,6 +65,13 @@ practice:
 Multi-broker fixtures (`cluster(3)`) exist because leader spread, log dirs
 and reassignment are not observable on one broker.
 
+The suite runs `--no-fail-fast`. Cargo otherwise stops at the first test
+*binary* that fails, and each one here is a whole milestone — one broken
+assertion in `kafka-read`'s forward scan is enough to leave the leak suite
+unrun and M11's status simply unknown. Finding out *which* milestones are red
+is the entire point of the command, so it pays for all of them; the exit
+status still carries any failure.
+
 ## Fuzz — rule 2, made executable
 
 ```sh
@@ -78,6 +85,14 @@ clusters.
 
 It needs a nightly toolchain, so it gets its own CI job rather than pinning
 the whole workspace to nightly for one target.
+
+Its first genuinely green run found a real bug, and found it as an
+**out-of-memory** rather than a panic: a 99-byte batch declaring 285 million
+records, against a decoder that sized its `Vec` from that number before
+parsing anything. Worth internalising — rule 2 can be violated without any
+`unwrap` in sight, by allocation rather than by abort, and libFuzzer counts
+that as a finding even though "no panic" is the stated pass condition. See
+[Tolerant decoding](../architecture/tolerant-decoding.md#a-record-count-is-not-a-promise).
 
 ## Interop — the silent-wrongness class
 
@@ -94,11 +109,18 @@ other and disagree with the rest of the world:
 - header encoding
 - tombstones (a null value must round-trip as null, not as empty bytes)
 
-**The snappy path is asserted explicitly.** `kafka-protocol` 0.17.0 *rewrote*
-snappy to emit Java/xerial framing — 0.16 and earlier were mutually
-incompatible with the Java client — and it decodes by autodetecting between
-the two. It is the newest code in the dependency and the one we are least
-entitled to assume is right.
+**The snappy path is asserted explicitly, and it is the assertion that paid.**
+`kafka-protocol` 0.17.0 *rewrote* snappy to emit Java/xerial framing — 0.16
+and earlier were mutually incompatible with the Java client — and it decodes
+by autodetecting between that and raw snappy. It is the newest code in the
+dependency and the one we were least entitled to assume was right.
+
+It was not. `rdkafka` writes raw unframed snappy, upstream's autodetection
+consumes the bytes it is sniffing, and the interop case failed the first time
+it ran — a bug no unit test in this workspace could have found, because both
+ends of every unit test are our own code and our own encoder emits xerial.
+That is precisely the silent-wrongness class this layer exists for. See
+[The upstream schema gap](upstream-gap.md#5-raw-snappy-does-not-decode).
 
 The `interop` crate is deliberately **outside the workspace**: `rdkafka`
 builds librdkafka from C source and wants cmake, which is a fine thing to

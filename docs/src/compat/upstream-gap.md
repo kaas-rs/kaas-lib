@@ -84,6 +84,34 @@ The fix is `ApiVersions::negotiate_with`, which takes the specific request
 and response types' own `VERSIONS` rather than the api key's. See
 [Version negotiation](../architecture/version-negotiation.md).
 
+## 5. Raw snappy does not decode
+
+Also a codec bug rather than a broker gap, and the most consequential one on
+this page — it is the only entry that makes real data unreadable rather than
+merely unreachable.
+
+Kafka's snappy is two formats. The Java client frames it with snappy-java's
+xerial header; `librdkafka`, and so most of the non-Java ecosystem, writes
+raw unframed snappy. `kafka-protocol` autodetects between them and gets it
+wrong: it reads the 16-byte magic header with `try_get_bytes(16)`, which
+*advances* the buffer, so the raw fallback runs on a buffer already missing
+its first sixteen bytes. Upstream's own fallback test passes only because its
+fixture is fifteen bytes, one short of the header.
+
+Note the version history above — 0.17.0's one substantive change was to the
+snappy framing. This is the newest code in the dependency, and it is the code
+we were least entitled to assume.
+
+Untreated, this means **no snappy topic written by a non-Java producer can be
+read**. So this is the single place the workspace takes option 3 below in its
+strongest form: `kafka-read` decides the framing itself and delegates only
+the xerial case, which is a knowing divergence from the codec crate rather
+than a gap it merely documents. See
+[Tolerant decoding](../architecture/tolerant-decoding.md).
+
+Revisit when upstream fixes the detection. The workaround is small and
+deliberately shaped to be deleted.
+
 ## What to do when this blocks you
 
 **Say so.** An honest blocker is a legitimate outcome; a hand-rolled schema

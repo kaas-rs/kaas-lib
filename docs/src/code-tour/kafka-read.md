@@ -56,15 +56,28 @@ suggested. That is what stops a compacted partition with thousand-fold offset
 gaps from crawling backwards a handful of records per round trip and
 re-reading the whole log.
 
-## `decompress.rs` — three codecs stream, one does not
+## `decompress.rs` — bounded, and the one place we diverge from the codec
 
 Gzip, LZ4 and zstd decompress through a `Read` wrapped in `take()`, so the
 limit applies *during* decompression and the oversized allocation never
-happens. Snappy is delegated to `kafka-protocol` and bounded on its
-*compressed* input instead — Kafka's snappy is xerial-framed, the crate
-rewrote that code in 0.17 to match the Java client, and maintaining a second
-divergent copy of the newest code in the dependency is a worse trade than the
-bound it would buy.
+happens.
+
+Snappy needs more care, because Kafka's snappy is **two** formats: the Java
+client writes snappy-java's xerial framing, `librdkafka` writes raw unframed
+snappy. `kafka-protocol` 0.17 autodetects and gets it wrong — it sniffs the
+magic header with a call that *advances* the buffer, so the raw fallback runs
+on bytes it has already eaten. Left alone, that makes every snappy topic
+written by a non-Java producer unreadable.
+
+So this module picks the framing while the buffer is intact and delegates
+only the xerial case, which stays bounded on its *compressed* input because
+upstream allocates per block from each block's own declared length. The raw
+branch is one `snap` call, and it gets the better bound of the two: the block
+declares its decompressed size up front, so the check is exact.
+
+That is a knowing divergence from the codec crate — the only one in the
+workspace — and it is written to be deleted when upstream fixes the
+detection.
 
 ## `fetch.rs` — deliberately session-less
 

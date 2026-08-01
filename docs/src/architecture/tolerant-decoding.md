@@ -77,23 +77,63 @@ every other cluster in the process, and it costs the attacker almost nothing.
 So decompression is bounded, using
 `RecordBatchDecoder::decode_with_custom_compression` as the hook.
 
-**Three codecs stream, one does not:**
-
 | Codec | Bound | How |
 |---|---|---|
 | gzip, LZ4, zstd | on **output** | decompressed through a `Read` wrapped in `take()`, so the limit applies *during* decompression and the allocation never happens |
-| snappy | on **input** | delegated to `kafka-protocol` |
+| snappy, unframed | on **declared output** | the block header states its decompressed size, checked before anything is allocated |
+| snappy, xerial-framed | on **input** | delegated to `kafka-protocol`, which walks the blocks itself |
 
-Snappy is the exception for a specific reason. Kafka's snappy is
-xerial-framed, not the standard snappy frame format, and `kafka-protocol`
-0.17 rewrote that code to match the Java client, decoding by autodetecting
-between the two framings. Reimplementing it here to get a streaming limit
-would mean maintaining a second, divergent copy of the newest and least
-settled code in the dependency — a worse trade than the bound it would buy.
+The framed case keeps an input cap rather than an output one because
+`kafka-protocol` allocates per block from each block's own declared length,
+with no hook in between. That cap is a real bound rather than a hopeful one:
+snappy's expansion is limited by its format — a copy operation emits at most
+64 bytes, and xerial chunks decompress to at most 32 KiB each.
 
-The input cap is a real bound rather than a hopeful one, because snappy's
-expansion is limited by its format: a copy operation emits at most 64 bytes,
-and xerial chunks decompress to at most 32 KiB each.
+## Kafka's snappy is two formats, and the crate cannot tell them apart
+
+Snappy on the wire is not one thing. The Java client frames it with
+snappy-java's *xerial* header; `librdkafka` — and with it most of the
+non-Java ecosystem — writes **raw, unframed** snappy. A reader has to accept
+both, which is why `kafka-protocol` autodetects.
+
+Its autodetection is broken in 0.17.0. It reads the 16-byte magic header with
+`try_get_bytes(16)`, and that call *advances* the buffer. When the header
+does not match — the raw case — the fallback then runs on a buffer whose
+first sixteen bytes are already gone, and fails with `failed to decompress
+raw snappy bytes`. Upstream's own fallback test passes only because its
+fixture is fifteen bytes long, one short of the header, so the read returns
+`Err` and consumes nothing.
+
+The consequence for a UI is not subtle: **no snappy topic written by a
+non-Java producer can be read at all.**
+
+So `crates/kafka-read/src/decompress.rs` decides the framing itself, while
+the buffer is still whole, and delegates only the xerial case. This is not
+the reimplementation the module otherwise refuses to attempt — the raw branch
+is a single `snap` call with no framing logic in it, and it is the branch that
+gets the *better* bound of the two.
+
+This is the one place the workspace knowingly diverges from the codec crate.
+Revisit it when `kafka-protocol` fixes the detection upstream.
+
+## A record count is not a promise
+
+`RecordBatchDecoder` reserves the whole `Vec<Record>` from the batch header's
+`recordsCount` *before parsing a single record*, and the only check it applies
+to that number is that it is not negative. The count is attacker-controlled
+bytes: a 99-byte batch declaring 285 million records asks for a multi-gigabyte
+allocation.
+
+Decompression bounds do not help, because the reservation happens on the
+header, not on the payload. So the count is checked against what the batch
+could physically hold — its own payload when uncompressed, the decompression
+ceiling when compressed — and an impossible count becomes `Malformed` like any
+other unreadable batch. The allocation is then proportional to bytes already
+accepted rather than to a number the sender chose freely.
+
+The divisor is six bytes per record, deliberately one below the true
+seven-byte floor for a v2 record, so no batch a real producer writes is ever
+rejected.
 
 ## Verified by fuzzing
 
@@ -107,6 +147,12 @@ cargo xtask fuzz
 
 It needs a nightly toolchain, so it has its own CI job rather than pinning
 the whole workspace to nightly.
+
+The unbounded record count above is what it found on its first genuinely
+green run, and the shape of that finding is worth keeping in mind: libFuzzer
+reported it as an **out-of-memory**, not a panic. "No panic" is the pass
+condition, but a decoder can violate rule 2 without ever panicking — killing
+a process by allocation rather than by abort. Both count.
 
 The unit tests hand-craft a batch with a corrupt record and assert
 `Malformed` is yielded and the scan continues; separately, they fetch with
