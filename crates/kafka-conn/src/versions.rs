@@ -142,14 +142,42 @@ impl ApiVersions {
     }
 
     /// The version to send, or a typed error naming both ranges.
+    ///
+    /// Uses [`our_range`], which reads `ApiKey::valid_versions()`. That is the
+    /// right answer for a *report* and the wrong one for encoding a specific
+    /// request — see [`ApiVersions::negotiate_with`].
     pub fn negotiate(&self, api_key: ApiKey) -> Result<i16> {
+        self.negotiate_with(api_key, our_range(api_key))
+    }
+
+    /// The version to send, clamped to a caller-supplied range.
+    ///
+    /// `ApiKey::valid_versions()` is not always the range a given *request*
+    /// can be encoded at: it is derived per api key, and where a request and
+    /// its response have different schema ranges it reports the wider one.
+    /// `OffsetFetch` is the live example — the response reaches v10, the
+    /// request stops at v9, and negotiating from the api key alone picks a
+    /// version the encoder refuses. So `Connection::send` passes the request
+    /// and response types' own `VERSIONS` here instead.
+    pub fn negotiate_with(&self, api_key: ApiKey, ours: Option<VersionRange>) -> Result<i16> {
         let entry = self.entries.get(&api_key.code());
-        match entry.and_then(BrokerApiVersion::negotiated) {
+        let negotiated = match (entry, ours) {
+            (Some(entry), Some(ours)) => {
+                let overlap = entry.broker.intersect(&ours);
+                if overlap.is_empty() {
+                    None
+                } else {
+                    Some(overlap.max)
+                }
+            }
+            _ => None,
+        };
+        match negotiated {
             Some(version) => Ok(version),
             None => Err(Error::UnsupportedApi {
                 api_key,
                 broker: entry.map(|e| e.broker.into()),
-                ours: our_range(api_key).map(Into::into),
+                ours: ours.map(Into::into),
             }),
         }
     }

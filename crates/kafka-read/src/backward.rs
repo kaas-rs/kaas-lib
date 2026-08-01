@@ -32,7 +32,7 @@
 use std::collections::VecDeque;
 
 use kafka_conn::Result;
-use kafka_meta::Cluster;
+use kafka_meta::{Cluster, TopicId};
 
 use crate::batch::{DecodeOptions, Visibility, decode_partition};
 use crate::fetch::{FetchTarget, fetch};
@@ -163,22 +163,34 @@ pub async fn tail(cluster: &Cluster, spec: &TailSpec) -> Result<Vec<PartitionTai
     // 500 from each would fetch six times what was asked for.
     let per_partition = spec.limit.div_ceil(wanted.len());
     let first_step = spec.first_step(wanted.len());
+    let topic_id = topic.topic_id;
 
     let mut out = Vec::with_capacity(wanted.len());
     for partition in wanted {
         let leader = cluster.leader_for(&spec.topic, partition).await?;
         out.push(
-            tail_partition(cluster, spec, partition, leader, per_partition, first_step).await?,
+            tail_partition(
+                cluster,
+                spec,
+                partition,
+                leader,
+                topic_id,
+                per_partition,
+                first_step,
+            )
+            .await?,
         );
     }
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn tail_partition(
     cluster: &Cluster,
     spec: &TailSpec,
     partition: i32,
     leader: i32,
+    topic_id: TopicId,
     limit: usize,
     first_step: i64,
 ) -> Result<PartitionTail> {
@@ -195,8 +207,16 @@ async fn tail_partition(
     while collected.len() < limit && window_end > log_start {
         let window_start = window_end.saturating_sub(step).max(log_start);
 
-        let (records, bad, reads) =
-            read_window(cluster, spec, partition, leader, window_start, window_end).await?;
+        let (records, bad, reads) = read_window(
+            cluster,
+            spec,
+            partition,
+            leader,
+            topic_id,
+            window_start,
+            window_end,
+        )
+        .await?;
         fetches += reads;
         malformed += bad;
 
@@ -242,11 +262,13 @@ async fn tail_partition(
 }
 
 /// Read `[start, end)` of a partition, following batch boundaries.
+#[allow(clippy::too_many_arguments)]
 async fn read_window(
     cluster: &Cluster,
     spec: &TailSpec,
     partition: i32,
     leader: i32,
+    topic_id: TopicId,
     start: i64,
     end: i64,
 ) -> Result<(Vec<Record>, usize, usize)> {
@@ -260,6 +282,7 @@ async fn read_window(
             cluster,
             leader,
             &spec.topic,
+            topic_id,
             &[FetchTarget {
                 partition,
                 offset,

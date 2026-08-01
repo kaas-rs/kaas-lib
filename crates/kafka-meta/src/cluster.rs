@@ -97,6 +97,16 @@ impl Cluster {
         &self.inner.pool
     }
 
+    /// The version a connection would send a specific request at.
+    ///
+    /// Exposed because several requests change *shape* with the version rather
+    /// than merely gaining fields — `Fetch` names its topics by string up to
+    /// v12 and by uuid from v13 — and the codec rejects a field set outside
+    /// its own range rather than ignoring it.
+    pub async fn negotiated_for<R: Rpc>(&self) -> Result<i16> {
+        self.inner.pool.any().await?.negotiated_for::<R>()
+    }
+
     /// Fetch metadata for the whole cluster and install it.
     pub async fn refresh(&self) -> Result<Arc<MetadataSnapshot>> {
         let connection = self.inner.pool.any().await?;
@@ -168,10 +178,18 @@ impl Cluster {
         }
 
         let connection = self.inner.pool.any().await?;
-        let request = FindCoordinatorRequest::default()
-            .with_key(StrBytes::from_string(key.to_owned()))
-            .with_key_type(kind.key_type())
-            .with_coordinator_keys(vec![StrBytes::from_string(key.to_owned())]);
+        // `key` is versions 0-3 and `coordinator_keys` is 4+, and the codec
+        // *rejects* a field set outside its own version range rather than
+        // ignoring it. Setting both to cover the range looks like belt and
+        // braces and is an encode failure on every modern broker — which takes
+        // down every coordinator-routed RPC with it.
+        let version = connection.negotiated_for::<FindCoordinatorRequest>()?;
+        let request = FindCoordinatorRequest::default().with_key_type(kind.key_type());
+        let request = if version >= 4 {
+            request.with_coordinator_keys(vec![StrBytes::from_string(key.to_owned())])
+        } else {
+            request.with_key(StrBytes::from_string(key.to_owned()))
+        };
         let response = connection.send(request).await?;
 
         // v4+ moved the answer into a `coordinators` array and left the

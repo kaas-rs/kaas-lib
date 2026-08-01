@@ -34,7 +34,9 @@ use kafka_conn::protocol::messages::offset_commit_request::{
 use kafka_conn::protocol::messages::offset_delete_request::{
     OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
 };
-use kafka_conn::protocol::messages::offset_fetch_request::OffsetFetchRequestTopic;
+use kafka_conn::protocol::messages::offset_fetch_request::{
+    OffsetFetchRequestGroup, OffsetFetchRequestTopic, OffsetFetchRequestTopics,
+};
 use kafka_conn::protocol::messages::{
     ConsumerGroupDescribeRequest, DeleteGroupsRequest, DescribeGroupsRequest, GroupId,
     ListGroupsRequest, OffsetCommitRequest, OffsetDeleteRequest, OffsetFetchRequest,
@@ -672,21 +674,44 @@ impl Admin {
         group_id: &str,
         partitions: Option<Vec<(String, Vec<i32>)>>,
     ) -> Result<PerItem<(String, i32), CommittedOffset>> {
-        let topics = partitions.map(|topics| {
-            topics
-                .into_iter()
-                .map(|(name, indexes)| {
-                    OffsetFetchRequestTopic::default()
-                        .with_name(TopicName(StrBytes::from_string(name)))
-                        .with_partition_indexes(indexes)
-                })
-                .collect()
-        });
-
-        let request = OffsetFetchRequest::default()
-            .with_group_id(GroupId(StrBytes::from_string(group_id.to_owned())))
-            .with_topics(topics)
-            .with_require_stable(true);
+        // The request changed shape at v8: `group_id` and `topics` are
+        // versions 1-7, `groups` is 8+, and the codec rejects a field set
+        // outside its own range. A modern broker negotiates v8 or above, so
+        // building the old shape unconditionally means offsets never load at
+        // all.
+        let version = self.negotiated_for::<OffsetFetchRequest>().await?;
+        let request = OffsetFetchRequest::default().with_require_stable(true);
+        let request = if version >= 8 {
+            let topics = partitions.map(|topics| {
+                topics
+                    .into_iter()
+                    .map(|(name, indexes)| {
+                        OffsetFetchRequestTopics::default()
+                            .with_name(TopicName(StrBytes::from_string(name)))
+                            .with_partition_indexes(indexes)
+                    })
+                    .collect()
+            });
+            request.with_groups(vec![
+                OffsetFetchRequestGroup::default()
+                    .with_group_id(GroupId(StrBytes::from_string(group_id.to_owned())))
+                    .with_topics(topics),
+            ])
+        } else {
+            let topics = partitions.map(|topics| {
+                topics
+                    .into_iter()
+                    .map(|(name, indexes)| {
+                        OffsetFetchRequestTopic::default()
+                            .with_name(TopicName(StrBytes::from_string(name)))
+                            .with_partition_indexes(indexes)
+                    })
+                    .collect()
+            });
+            request
+                .with_group_id(GroupId(StrBytes::from_string(group_id.to_owned())))
+                .with_topics(topics)
+        };
         let response = self
             .cluster()
             .send_to_coordinator(CoordinatorKind::Group, group_id, request)

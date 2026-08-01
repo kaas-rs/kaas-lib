@@ -31,7 +31,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::Stream;
 use kafka_conn::{Error, Result};
-use kafka_meta::Cluster;
+use kafka_meta::{Cluster, TopicId};
 
 use crate::batch::{DecodeOptions, Visibility, decode_partition};
 use crate::fetch::{FetchTarget, fetch};
@@ -296,6 +296,8 @@ impl PartitionCursor {
 struct ScanState {
     cluster: Cluster,
     spec: ScanSpec,
+    /// From v13 `Fetch` names topics by id, not by name.
+    topic_id: TopicId,
     cursors: Vec<PartitionCursor>,
     progress: ScanProgress,
     pending: VecDeque<ScanEvent>,
@@ -316,7 +318,7 @@ pub async fn scan(
     cluster: &Cluster,
     spec: ScanSpec,
 ) -> Result<impl Stream<Item = Result<ScanEvent>> + Send> {
-    let cursors = plan(cluster, &spec).await?;
+    let (cursors, topic_id) = plan(cluster, &spec).await?;
     let offsets_total = cursors
         .iter()
         .map(|c| c.end_offset.saturating_sub(c.start_offset).max(0))
@@ -335,6 +337,7 @@ pub async fn scan(
         },
         cursors,
         spec,
+        topic_id,
         pending: VecDeque::new(),
         buffered_total: 0,
         done: false,
@@ -348,7 +351,7 @@ pub async fn scan(
 }
 
 /// Work out where each partition starts and ends.
-async fn plan(cluster: &Cluster, spec: &ScanSpec) -> Result<Vec<PartitionCursor>> {
+async fn plan(cluster: &Cluster, spec: &ScanSpec) -> Result<(Vec<PartitionCursor>, TopicId)> {
     let snapshot = cluster.refresh_topics(&[spec.topic.as_str()]).await?;
     let topic = snapshot.topic(&spec.topic).ok_or_else(|| {
         Error::from_code(
@@ -365,6 +368,7 @@ async fn plan(cluster: &Cluster, spec: &ScanSpec) -> Result<Vec<PartitionCursor>
         None => topic.partitions.iter().map(|p| p.partition).collect(),
     };
 
+    let topic_id = topic.topic_id;
     let mut cursors = Vec::new();
     for partition in wanted {
         let leader = cluster.leader_for(&spec.topic, partition).await?;
@@ -392,7 +396,7 @@ async fn plan(cluster: &Cluster, spec: &ScanSpec) -> Result<Vec<PartitionCursor>
             finished: start >= latest,
         });
     }
-    Ok(cursors)
+    Ok((cursors, topic_id))
 }
 
 impl ScanState {
@@ -477,6 +481,7 @@ impl ScanState {
                 &self.cluster,
                 leader,
                 &self.spec.topic,
+                self.topic_id,
                 &targets,
                 self.spec.max_wait_ms,
                 self.spec.fetch_max_bytes,

@@ -5,12 +5,39 @@ use kafka_conn::protocol::StrBytes;
 use kafka_conn::protocol::messages::fetch_request::{FetchPartition, FetchTopic};
 use kafka_conn::protocol::messages::{BrokerId, FetchRequest, TopicName};
 use kafka_conn::{Error, ErrorCode, Result};
-use kafka_meta::Cluster;
+use kafka_meta::{Cluster, TopicId};
 
 use crate::batch::{AbortedTransaction, Visibility};
 
 /// `replica_id` for a consumer rather than a follower.
 const CONSUMER_REPLICA_ID: i32 = -1;
+
+/// The first `Fetch` version that identifies topics by uuid rather than name.
+const FETCH_TOPIC_ID_VERSION: i16 = 13;
+
+/// Name a topic the way this `Fetch` version expects.
+///
+/// From v13 the request carries a *topic id* and the name is not encoded at
+/// all. Sending only the name against a modern broker leaves the id at nil and
+/// the broker answers `UNKNOWN_TOPIC_ID` for every partition — which reads like
+/// a missing topic and is not: it is a client that asked the wrong question.
+fn fetch_topic(topic: &str, topic_id: TopicId, version: i16) -> Result<FetchTopic> {
+    if version >= FETCH_TOPIC_ID_VERSION {
+        if topic_id.is_zero() {
+            // A broker that supports topic ids always reports them in
+            // metadata, so a zero id here means our snapshot is from a path
+            // that dropped it — worth saying plainly rather than sending nil
+            // and blaming the broker for the answer.
+            return Err(Error::InvalidRequest(format!(
+                "{topic}: Fetch v{version} identifies topics by id, and no topic id is known"
+            )));
+        }
+        return Ok(
+            FetchTopic::default().with_topic_id(uuid::Uuid::from_bytes(*topic_id.as_bytes()))
+        );
+    }
+    Ok(FetchTopic::default().with_topic(TopicName(StrBytes::from_string(topic.to_owned()))))
+}
 
 /// What one partition of a fetch response contained.
 #[derive(Debug, Clone)]
@@ -42,10 +69,12 @@ pub(crate) struct FetchTarget {
 }
 
 /// Fetch from one leader.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch(
     cluster: &Cluster,
     leader: i32,
     topic: &str,
+    topic_id: TopicId,
     targets: &[FetchTarget],
     max_wait_ms: i32,
     max_bytes: i32,
@@ -55,6 +84,7 @@ pub(crate) async fn fetch(
         return Ok(Vec::new());
     }
 
+    let version = cluster.negotiated_for::<FetchRequest>().await?;
     let request = FetchRequest::default()
         .with_replica_id(BrokerId(CONSUMER_REPLICA_ID))
         .with_max_wait_ms(max_wait_ms)
@@ -74,22 +104,20 @@ pub(crate) async fn fetch(
         .with_session_id(0)
         .with_session_epoch(-1)
         .with_topics(vec![
-            FetchTopic::default()
-                .with_topic(TopicName(StrBytes::from_string(topic.to_owned())))
-                .with_partitions(
-                    targets
-                        .iter()
-                        .map(|target| {
-                            FetchPartition::default()
-                                .with_partition(target.partition)
-                                .with_current_leader_epoch(-1)
-                                .with_fetch_offset(target.offset)
-                                .with_last_fetched_epoch(-1)
-                                .with_log_start_offset(-1)
-                                .with_partition_max_bytes(target.max_bytes)
-                        })
-                        .collect(),
-                ),
+            fetch_topic(topic, topic_id, version)?.with_partitions(
+                targets
+                    .iter()
+                    .map(|target| {
+                        FetchPartition::default()
+                            .with_partition(target.partition)
+                            .with_current_leader_epoch(-1)
+                            .with_fetch_offset(target.offset)
+                            .with_last_fetched_epoch(-1)
+                            .with_log_start_offset(-1)
+                            .with_partition_max_bytes(target.max_bytes)
+                    })
+                    .collect(),
+            ),
         ]);
 
     let response = cluster.send_to_node(leader, request).await?;

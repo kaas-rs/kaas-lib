@@ -347,6 +347,17 @@ impl Connection {
         &self.inner.versions
     }
 
+    /// The version this connection would send a specific request at.
+    ///
+    /// Intersects the broker's range with *both* the request's and the
+    /// response's own `VERSIONS`, which is stricter than asking the api key:
+    /// where the two schemas disagree, the api key reports the wider range and
+    /// encoding at it fails.
+    pub fn negotiated_for<R: Rpc>(&self) -> Result<i16> {
+        let ours = typed_range::<R>();
+        self.inner.versions.negotiate_with(R::API_KEY, Some(ours))
+    }
+
     /// The version this connection would send an api key at.
     ///
     /// Callers need this when a request's *contents* depend on the version —
@@ -574,6 +585,13 @@ fn spawn(
             shutdown: shutdown_tx,
         }),
     }
+}
+
+/// The versions a request *and* its response can both be encoded at.
+fn typed_range<R: Rpc>() -> crate::versions::VersionRange {
+    let request = R::VERSIONS;
+    let response = <R::Response as kafka_protocol::protocol::Message>::VERSIONS;
+    crate::versions::VersionRange::new(request.min.max(response.min), request.max.min(response.max))
 }
 
 /// Await `future` until `deadline`, reporting a typed timeout.
@@ -836,6 +854,47 @@ mod tests {
     use super::*;
     use kafka_protocol::messages::ResponseHeader;
     use kafka_protocol::protocol::Encodable;
+
+    /// The regression test for a bug a live cluster found and every fixture
+    /// missed.
+    ///
+    /// `ApiKey::valid_versions()` is derived per api key, and where a request
+    /// and its response have different schema ranges it reports the wider one.
+    /// Negotiating from it picks a version the *request* encoder refuses, and
+    /// the failure is "specified version not supported by this message type"
+    /// from our own encoder — which reads like a broker problem and is not.
+    #[test]
+    fn negotiation_clamps_to_the_request_type_not_the_api_key() {
+        use kafka_protocol::messages::OffsetFetchRequest;
+
+        let by_api_key = crate::versions::our_range(ApiKey::OffsetFetch).expect("known key");
+        let typed = typed_range::<OffsetFetchRequest>();
+
+        // The divergence, stated. If upstream ever aligns these, this assert
+        // is how we find out.
+        assert_eq!(by_api_key.max, 10, "ApiKey::valid_versions reports v10");
+        assert_eq!(typed.max, 9, "but the request encoder stops at v9");
+
+        // A broker offering the api key's full range must still be negotiated
+        // down to something we can encode.
+        let table = ApiVersions::from_triples([(ApiKey::OffsetFetch.code(), 1, 10)]);
+        assert_eq!(
+            table.negotiate_with(ApiKey::OffsetFetch, Some(typed)).ok(),
+            Some(9)
+        );
+        // ... whereas the untyped path is what produced the bug.
+        assert_eq!(table.negotiate(ApiKey::OffsetFetch).ok(), Some(10));
+    }
+
+    #[test]
+    fn a_typed_range_is_the_overlap_of_request_and_response() {
+        use kafka_protocol::messages::MetadataRequest;
+
+        // Where the two agree, nothing changes.
+        let typed = typed_range::<MetadataRequest>();
+        let by_api_key = crate::versions::our_range(ApiKey::Metadata).expect("known key");
+        assert_eq!((typed.min, typed.max), (by_api_key.min, by_api_key.max));
+    }
 
     #[test]
     fn pending_resolves_every_waiter_when_the_socket_dies() {

@@ -72,4 +72,14 @@ impl Admin {
             .ok()
             .and_then(|connection| connection.negotiated_version(api_key))
     }
+
+    /// The version a connection would send a specific request at.
+    ///
+    /// Needed wherever a request's *shape* changes with the version — the
+    /// codec rejects a field set outside its own version range rather than
+    /// ignoring it, so "set both the old and the new field" is an encode
+    /// failure rather than a compatibility trick.
+    pub(crate) async fn negotiated_for<R: kafka_conn::Rpc>(&self) -> Result<i16> {
+        self.cluster.pool().any().await?.negotiated_for::<R>()
+    }
 }

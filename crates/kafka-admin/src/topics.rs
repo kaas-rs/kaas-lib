@@ -104,11 +104,13 @@ impl Admin {
             return Ok(Vec::new());
         }
 
-        // v6+ takes `topics` (name or id); older versions take `topic_names`.
-        // Setting both is harmless and covers the whole range without asking
-        // the connection what it negotiated.
-        let request = DeleteTopicsRequest::default()
-            .with_topics(
+        // v6+ takes `topics` (name or id); v1-5 take `topic_names`. Setting
+        // both is *not* harmless: the codec bails on a field set outside its
+        // own version range, so the two shapes have to be chosen between.
+        let version = self.negotiated_for::<DeleteTopicsRequest>().await?;
+        let request = DeleteTopicsRequest::default().with_timeout_ms(self.request_timeout_ms());
+        let request = if version >= 6 {
+            request.with_topics(
                 names
                     .iter()
                     .map(|name| {
@@ -117,13 +119,14 @@ impl Admin {
                     })
                     .collect(),
             )
-            .with_topic_names(
+        } else {
+            request.with_topic_names(
                 names
                     .iter()
                     .map(|name| TopicName(StrBytes::from_string(name.clone())))
                     .collect(),
             )
-            .with_timeout_ms(self.request_timeout_ms());
+        };
 
         let response = self.cluster().send_to_controller(request).await?;
         Ok(response
@@ -157,6 +160,13 @@ impl Admin {
                 CreatePartitionsTopic::default()
                     .with_name(TopicName(StrBytes::from_string(name)))
                     .with_count(count)
+                    // The second instance of the trap CLAUDE.md names for
+                    // `allow_auto_topic_creation`: a *nullable* field defaults
+                    // to `Some(empty)`, not `None`. Null means "broker, place
+                    // the new replicas"; an empty list means "here are your
+                    // assignments, there are none of them", and the broker
+                    // rejects it with INVALID_REPLICA_ASSIGNMENT.
+                    .with_assignments(None)
             })
             .collect();
         if topics.is_empty() {
@@ -535,6 +545,24 @@ mod tests {
             creatable.configs[0].value.as_ref().map(|v| v.as_str()),
             Some("60000")
         );
+    }
+
+    #[test]
+    fn growing_a_topic_lets_the_broker_place_the_new_replicas() {
+        // `CreatePartitionsTopic::default()` sets `assignments: Some(vec![])`,
+        // which the broker reads as "zero assignments supplied for N new
+        // partitions" and rejects. Null is the value that means "you choose".
+        assert!(
+            CreatePartitionsTopic::default().assignments.is_some(),
+            "if upstream changes this default, the explicit None below is \
+             redundant rather than load-bearing — check before removing it"
+        );
+
+        let topic = CreatePartitionsTopic::default()
+            .with_name(TopicName(StrBytes::from_static_str("orders")))
+            .with_count(6)
+            .with_assignments(None);
+        assert!(topic.assignments.is_none());
     }
 
     #[test]
