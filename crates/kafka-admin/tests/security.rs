@@ -297,9 +297,19 @@ async fn transactions_and_producers_describe() {
         .unwrap();
 
     // Listing transactions on a cluster with none must be an empty list, not
-    // an error.
+    // an error. The `unwrap` is the assertion — an `is_empty() ||
+    // !is_empty()` stood here, which is true of every Vec ever constructed and
+    // would have held just as well if the call had returned garbage.
+    //
+    // What is worth pinning down is that the *idempotent* producer above did
+    // not register a transaction: idempotence and transactions share the
+    // producer-id machinery, and a client that conflates them reports phantom
+    // transactions on every cluster that has ever produced anything.
     let transactions = admin.list_transactions(&[]).await.unwrap();
-    assert!(transactions.is_empty() || !transactions.is_empty());
+    assert!(
+        transactions.is_empty(),
+        "an idempotent producer is not a transactional one: {transactions:?}"
+    );
 
     let producers = admin
         .describe_producers([("produced".to_owned(), 0)])

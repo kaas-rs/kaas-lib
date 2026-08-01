@@ -528,6 +528,7 @@ async fn a_groups_lag_can_be_computed_from_committed_and_latest_offsets() {
         .unwrap();
 
     let mut total_lag = 0i64;
+    let mut partitions_compared = 0usize;
     for ((topic, partition), committed) in &committed {
         let Ok(committed) = committed else { continue };
         let Some((_, Ok(end))) = latest
@@ -536,7 +537,26 @@ async fn a_groups_lag_can_be_computed_from_committed_and_latest_offsets() {
         else {
             continue;
         };
-        total_lag += end.offset.unwrap_or_default() - committed.offset;
+        let end = end.offset.unwrap_or_default();
+        // Per partition, not just in aggregate: a sign error on one partition
+        // cancelling against another would pass a total-only check.
+        assert!(
+            committed.offset <= end,
+            "{topic}-{partition} committed {} past the log end {end}",
+            committed.offset
+        );
+        total_lag += end - committed.offset;
+        partitions_compared += 1;
     }
+
+    // Without this the loop above can match nothing at all — no committed
+    // offsets, every `continue` taken — and a lag of zero over zero partitions
+    // satisfies any inequality you care to write. The fixture consumes
+    // `fixture-topic`, so there is something to compare.
+    assert!(
+        partitions_compared > 0,
+        "no partition had both a committed and a latest offset: \
+         committed={committed:?} latest={latest:?}"
+    );
     assert!(total_lag >= 0, "lag cannot be negative: {total_lag}");
 }

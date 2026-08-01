@@ -148,12 +148,25 @@ async fn a_corrupt_batch_yields_malformed_and_the_scan_continues() {
         .await
         .unwrap();
 
-    produce(&fixture, "corrupt", 1, 300, "none").await;
-    // Force a roll so the damaged segment is not the active one.
+    // Twelve separate producer runs, not one. Each invocation flushes and
+    // closes its own producer, so each leaves at least one batch behind — and
+    // "one corrupt batch must not fail the scan" is only a claim about
+    // *several* batches.
+    //
+    // A single run of 300 tiny records fits inside one 16 KiB batch, so the
+    // damage below landed on the only batch in the log. Everything that could
+    // have survived was inside it, and the test failed as "no records survived
+    // the damaged batch" while the decoder had done precisely the right thing:
+    // reported the batch it could not read, and finished.
+    for round in 0..12 {
+        produce(&fixture, "corrupt", round * 25 + 1, 25, "none").await;
+    }
+    // Let the writes reach the segment before measuring its size.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    // Overwrite bytes in the middle of the segment, past the first batch's
-    // header, so the batch framing survives and its contents do not.
+    // Overwrite bytes halfway through the segment. With a dozen batches in the
+    // log that lands inside one of the middle ones, leaving whole batches on
+    // either side — which is the arrangement the assertions below describe.
     fixture
         .exec(
             0,
@@ -190,6 +203,13 @@ async fn a_corrupt_batch_yields_malformed_and_the_scan_continues() {
     // not read rather than failing.
     assert!(malformed > 0, "the damage was not reported");
     assert!(records > 0, "no records survived the damaged batch");
+    // And the damage was real. A scan that returned all 300 would mean the
+    // overwrite missed the log entirely and `malformed` came from somewhere
+    // else — which would make the two assertions above pass for no reason.
+    assert!(
+        records < 300,
+        "{records} records came back intact; the segment was not actually damaged"
+    );
     println!("{records} records, {malformed} malformed batches");
 }
 
