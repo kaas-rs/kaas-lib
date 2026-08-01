@@ -15,7 +15,7 @@ members = [
 # along a layering boundary, not four independently useful things, and a
 # consumer pulling kafka-admin 0.2 against kafka-conn 0.1 is not a
 # combination anyone tests. Bump here, not per crate.
-version      = "0.1.0"
+version      = "0.0.1"
 edition      = "2024"
 license      = "Apache-2.0"
 repository   = "https://github.com/kaas-rs/kaas-lib"

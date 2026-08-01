@@ -13,8 +13,8 @@ homepage.workspace     = true
 rust-version.workspace = true
 
 [dependencies]
-kafka-conn     = { path = "../kafka-conn", version = "0.1.0" }
-kafka-meta     = { path = "../kafka-meta", version = "0.1.0" }
+kafka-conn     = { path = "../kafka-conn", version = "0.0.1" }
+kafka-meta     = { path = "../kafka-meta", version = "0.0.1" }
 kafka-protocol = { workspace = true }
 tokio          = { workspace = true }
 futures        = { workspace = true }
