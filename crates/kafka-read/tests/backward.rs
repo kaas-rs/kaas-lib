@@ -1,6 +1,12 @@
 //! M10 acceptance: the backward scan.
 //!
 //! `cargo test -p kafka-read --test backward -- --ignored`
+//!
+//! In-container shell tools bootstrap `localhost:9093`, the BROKER
+//! listener — see `testkit::INTERNAL_BOOTSTRAP`. Port 9092 is advertised
+//! as the *host-mapped* port for the test process, so a client inside the
+//! container follows metadata to a port nothing is listening on and dies
+//! with a bare TimeoutException.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -25,7 +31,7 @@ async fn produce_randomised(fixture: &KafkaCluster, topic: &str, total: u32) {
            START=$(( (i - 1) * {per} + 1 )); \
            END=$(( i * {per} )); \
            seq $START $END | /opt/kafka/bin/kafka-console-producer.sh \
-             --bootstrap-server localhost:9092 --topic {topic} \
+             --bootstrap-server localhost:9093 --topic {topic} \
              --producer-property batch.size=$((BATCH * 64)) \
              --producer-property linger.ms=$LINGER; \
          done",
@@ -161,7 +167,7 @@ async fn a_compacted_topic_with_offset_gaps_terminates_and_counts_correctly() {
                 "for round in $(seq 1 50); do \
                    for k in $(seq 1 200); do echo \"key$k:v$round\"; done \
                  done | /opt/kafka/bin/kafka-console-producer.sh \
-                   --bootstrap-server localhost:9092 --topic compacted \
+                   --bootstrap-server localhost:9093 --topic compacted \
                    --property parse.key=true --property key.separator=:"
                     .to_owned(),
             ],
@@ -208,7 +214,7 @@ async fn a_tail_longer_than_the_partition_returns_everything_without_looping() {
                 "bash".to_owned(),
                 "-c".to_owned(),
                 "seq 1 25 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9092 --topic short"
+                 --bootstrap-server localhost:9093 --topic short"
                     .to_owned(),
             ],
         )
@@ -251,7 +257,7 @@ async fn a_multi_partition_tail_spreads_the_limit() {
                 "bash".to_owned(),
                 "-c".to_owned(),
                 "seq 1 4000 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9092 --topic spread"
+                 --bootstrap-server localhost:9093 --topic spread"
                     .to_owned(),
             ],
         )

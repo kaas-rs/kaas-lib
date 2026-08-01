@@ -8,6 +8,12 @@
 //! image already ships `kafka-console-consumer.sh` and
 //! `kafka-console-share-consumer.sh`, which reach every group kind with zero
 //! build dependencies.
+//!
+//! In-container shell tools bootstrap `localhost:9093`, the BROKER
+//! listener — see `testkit::INTERNAL_BOOTSTRAP`. Port 9092 is advertised
+//! as the *host-mapped* port for the test process, so a client inside the
+//! container follows metadata to a port nothing is listening on and dies
+//! with a bare TimeoutException.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -33,7 +39,7 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(180);
 /// Start a console consumer in the background, in a group, and leave it running.
 async fn start_consumer(fixture: &KafkaCluster, tool: &str, group: &str, extra: &[&str]) {
     let mut command = format!(
-        "nohup /opt/kafka/bin/{tool} --bootstrap-server localhost:9092 \
+        "nohup /opt/kafka/bin/{tool} --bootstrap-server localhost:9093 \
          --topic fixture-topic --group {group}"
     );
     for arg in extra {
@@ -68,19 +74,22 @@ async fn fixture_with_all_group_kinds() -> (KafkaCluster, Admin) {
         .expect("topic");
 
     // Produce something so the consumers have work and stay joined.
-    fixture
-        .exec(
-            0,
-            vec![
-                "bash".to_owned(),
-                "-c".to_owned(),
-                "seq 1 1000 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9092 --topic fixture-topic"
-                    .to_owned(),
-            ],
-        )
-        .await
-        .expect("produced");
+    // `exec_ok`, not `exec`: `exec` returns Ok for a command that ran and
+    // failed, so `.expect("produced")` passed happily while the producer could
+    // not reach the broker at all. That silence is what hid the listener bug.
+    testkit::exec_ok(
+        &fixture,
+        0,
+        vec![
+            "bash".to_owned(),
+            "-c".to_owned(),
+            "seq 1 1000 | /opt/kafka/bin/kafka-console-producer.sh \
+             --bootstrap-server localhost:9093 --topic fixture-topic"
+                .to_owned(),
+        ],
+    )
+    .await
+    .expect("produced");
 
     start_consumer(
         &fixture,
@@ -185,7 +194,7 @@ async fn consume_into_group(
     timeout_ms: u32,
 ) {
     let command = format!(
-        "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+        "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9093 \
          --topic {topic} --group {group} --from-beginning --timeout-ms {timeout_ms} \
          --consumer-property group.protocol={protocol} >/tmp/consumer-{group}.log 2>&1; true"
     );
@@ -354,7 +363,7 @@ async fn offsets_can_be_read_and_reset_for_a_classic_group() {
                 "bash".to_owned(),
                 "-c".to_owned(),
                 "seq 1 100 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9092 --topic reset-me"
+                 --bootstrap-server localhost:9093 --topic reset-me"
                     .to_owned(),
             ],
         )
@@ -412,7 +421,7 @@ async fn offsets_can_be_reset_for_a_kip_848_consumer_group() {
                 "bash".to_owned(),
                 "-c".to_owned(),
                 "seq 1 100 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9092 --topic reset-848"
+                 --bootstrap-server localhost:9093 --topic reset-848"
                     .to_owned(),
             ],
         )
@@ -481,7 +490,7 @@ async fn groups_can_be_deleted_and_their_offsets_removed() {
                 "bash".to_owned(),
                 "-c".to_owned(),
                 "seq 1 10 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9092 --topic deletable"
+                 --bootstrap-server localhost:9093 --topic deletable"
                     .to_owned(),
             ],
         )

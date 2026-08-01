@@ -1,6 +1,12 @@
 //! M6 acceptance: topics, configs, offsets.
 //!
 //! `cargo test -p kafka-admin --test topics -- --ignored`
+//!
+//! In-container shell tools bootstrap `localhost:9093`, the BROKER
+//! listener — see `testkit::INTERNAL_BOOTSTRAP`. Port 9092 is advertised
+//! as the *host-mapped* port for the test process, so a client inside the
+//! container follows metadata to a port nothing is listening on and dies
+//! with a bare TimeoutException.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -148,7 +154,7 @@ async fn per_topic_size_on_rf3_is_the_single_replica_size_not_three_times_it() {
                 "bash".to_owned(),
                 "-c".to_owned(),
                 "seq 1 5000 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9092 --topic sized"
+                 --bootstrap-server localhost:9093 --topic sized"
                     .to_owned(),
             ],
         )
@@ -201,7 +207,7 @@ async fn all_five_reachable_offset_sentinels_answer() {
                 "bash".to_owned(),
                 "-c".to_owned(),
                 "seq 1 100 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9092 --topic offsets"
+                 --bootstrap-server localhost:9093 --topic offsets"
                     .to_owned(),
             ],
         )
@@ -300,7 +306,7 @@ async fn delete_records_moves_the_low_watermark() {
                 "bash".to_owned(),
                 "-c".to_owned(),
                 "seq 1 100 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9092 --topic truncate-me"
+                 --bootstrap-server localhost:9093 --topic truncate-me"
                     .to_owned(),
             ],
         )

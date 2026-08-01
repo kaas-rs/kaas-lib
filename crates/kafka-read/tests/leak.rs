@@ -7,6 +7,12 @@
 //! the stream must free everything it held, immediately, with no cleanup path
 //! to forget. A thousand cancellations at random points is the cheapest way to
 //! find out whether that is true or merely intended.
+//!
+//! In-container shell tools bootstrap `localhost:9093`, the BROKER
+//! listener — see `testkit::INTERNAL_BOOTSTRAP`. Port 9092 is advertised
+//! as the *host-mapped* port for the test process, so a client inside the
+//! container follows metadata to a port nothing is listening on and dies
+//! with a bare TimeoutException.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -52,7 +58,7 @@ async fn a_thousand_cancelled_scans_return_to_baseline() {
                 "bash".to_owned(),
                 "-c".to_owned(),
                 "seq 1 50000 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9092 --topic leaky \
+                 --bootstrap-server localhost:9093 --topic leaky \
                  --producer-property batch.size=32768 --producer-property linger.ms=20"
                     .to_owned(),
             ],
@@ -171,7 +177,7 @@ async fn cancelling_between_every_single_event_is_safe() {
                 "bash".to_owned(),
                 "-c".to_owned(),
                 "seq 1 5000 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9092 --topic tight"
+                 --bootstrap-server localhost:9093 --topic tight"
                     .to_owned(),
             ],
         )

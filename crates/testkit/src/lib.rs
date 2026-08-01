@@ -47,7 +47,9 @@ mod error;
 mod image;
 mod kafka;
 
-pub use config::{BrokerConfig, DEFAULT_IMAGE, DEFAULT_TAG, SaslMechanism, SaslUser, Security};
+pub use config::{
+    BrokerConfig, DEFAULT_IMAGE, DEFAULT_TAG, INTERNAL_BOOTSTRAP, SaslMechanism, SaslUser, Security,
+};
 pub use error::{Error, Result};
 pub use harness::{Cluster, ExecOutput, ExternalCluster, exec_ok};
 pub use kafka::{KafkaCluster, cluster, cluster_with, single_broker, single_broker_with};

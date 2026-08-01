@@ -1,6 +1,12 @@
 //! M9 acceptance: the forward scan.
 //!
 //! `cargo test -p kafka-read --test forward -- --ignored`
+//!
+//! In-container shell tools bootstrap `localhost:9093`, the BROKER
+//! listener — see `testkit::INTERNAL_BOOTSTRAP`. Port 9092 is advertised
+//! as the *host-mapped* port for the test process, so a client inside the
+//! container follows metadata to a port nothing is listening on and dies
+//! with a bare TimeoutException.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -21,7 +27,7 @@ use testkit::{Cluster as _, KafkaCluster};
 async fn produce(fixture: &KafkaCluster, topic: &str, from: u32, count: u32, codec: &str) {
     let command = format!(
         "seq {from} {} | /opt/kafka/bin/kafka-console-producer.sh \
-         --bootstrap-server localhost:9092 --topic {topic} \
+         --bootstrap-server localhost:9093 --topic {topic} \
          --producer-property compression.type={codec} \
          --producer-property batch.size=16384 \
          --producer-property linger.ms=50",

@@ -1,6 +1,12 @@
 //! M8 acceptance: security, partitions, and the read-only gate.
 //!
 //! `cargo test -p kafka-admin -- --ignored`
+//!
+//! In-container shell tools bootstrap `localhost:9093`, the BROKER
+//! listener — see `testkit::INTERNAL_BOOTSTRAP`. Port 9092 is advertised
+//! as the *host-mapped* port for the test process, so a client inside the
+//! container follows metadata to a port nothing is listening on and dies
+//! with a bare TimeoutException.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -243,7 +249,7 @@ async fn transactions_and_producers_describe() {
                 "bash".to_owned(),
                 "-c".to_owned(),
                 "seq 1 50 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9092 --topic produced \
+                 --bootstrap-server localhost:9093 --topic produced \
                  --producer-property enable.idempotence=true"
                     .to_owned(),
             ],

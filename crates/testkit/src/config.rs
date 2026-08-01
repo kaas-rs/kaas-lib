@@ -32,6 +32,37 @@ pub(crate) const BROKER_PORT: u16 = 9093;
 /// Port the KRaft controller listener binds inside the container.
 pub(crate) const CONTROLLER_PORT: u16 = 9094;
 
+/// The bootstrap address a tool running *inside* a fixture node must use.
+///
+/// **Not** the address [`crate::Cluster::bootstrap`] returns, and the
+/// difference is not cosmetic — it is a whole class of fixture bug.
+///
+/// The EXTERNAL listener is advertised as the *host-mapped* port so the test
+/// process can reach it. A client running inside the container can open the
+/// bootstrap connection to it fine, then reads metadata, is told the broker
+/// and the group coordinator live at `localhost:<host-port>` — a port nothing
+/// is listening on inside the container — and never connects again. It fails
+/// as a bare `TimeoutException` and `Processed a total of 0 messages`, which
+/// names nothing.
+///
+/// The BROKER listener advertises the container's own hostname, so it resolves
+/// both inside the node and across the container network. It is also mapped to
+/// `PLAINTEXT` unconditionally — see `listener.security.protocol.map` — so
+/// shell tools need no credentials even in the SASL fixtures.
+pub const INTERNAL_BOOTSTRAP: &str = "localhost:9093";
+
+#[cfg(test)]
+mod bootstrap_tests {
+    use super::{BROKER_PORT, INTERNAL_BOOTSTRAP};
+
+    /// The const is a literal because test command strings are literals; this
+    /// is what stops it drifting from the port the broker actually binds.
+    #[test]
+    fn the_internal_bootstrap_matches_the_broker_listener_port() {
+        assert_eq!(INTERNAL_BOOTSTRAP, format!("localhost:{BROKER_PORT}"));
+    }
+}
+
 /// Where the fixture keeps everything it generates inside the container.
 pub(crate) const WORK_DIR: &str = "/tmp/kaas-testkit";
 /// Path of the keystore the TLS listeners use, when TLS is enabled.
