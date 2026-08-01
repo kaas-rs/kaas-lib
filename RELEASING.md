@@ -46,8 +46,12 @@ five seconds.
 ## Cutting a release
 
 ```sh
-# 1. Bump the single source of truth.
-$EDITOR Cargo.toml          # [workspace.package] version = "0.2.0"
+# 1. Bump BOTH version lines in the root Cargo.toml. They are adjacent.
+#      [workspace.package]  version = "0.2.0"
+#      [workspace.dependencies]
+#        kafka-conn = { path = "...", version = "0.2.0" }
+#        kafka-meta = { path = "...", version = "0.2.0" }
+$EDITOR Cargo.toml
 cargo check                 # refresh Cargo.lock
 
 # 2. Prove it locally.
@@ -67,6 +71,20 @@ git push origin v0.2.0
 The tag must be `v` + the workspace version exactly. The workflow reads the
 version cargo actually resolved, asserts all four crates agree on it, and
 refuses to run if the tag disagrees.
+
+### Why two version lines and not one
+
+A crate's own version inherits from `[workspace.package]`, but the *dependency
+requirement* one published crate states for another does not — that is a
+separate string, and crates.io needs it to name a version that exists.
+
+Leaving it stale is uniquely nasty: everything builds locally, because the
+path dependency wins; `cargo xtask ci` is green; and the failure lands
+partway through a four-crate publish, after some crates are already live and
+irreversibly so, as a resolver error about a version nobody has uploaded.
+Keeping both lines in the root manifest means one file and two adjacent
+edits — `cargo publish --dry-run --workspace` in step 2 is what catches it if
+you miss one.
 
 ### Dry run first
 

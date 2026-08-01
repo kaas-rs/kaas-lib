@@ -15,7 +15,7 @@ members = [
 # along a layering boundary, not four independently useful things, and a
 # consumer pulling kafka-admin 0.2 against kafka-conn 0.1 is not a
 # combination anyone tests. Bump here, not per crate.
-version      = "0.0.1"
+version      = "0.1.0"
 edition      = "2024"
 license      = "Apache-2.0"
 repository   = "https://github.com/kaas-rs/kaas-lib"
@@ -23,6 +23,19 @@ homepage     = "https://kaas-rs.github.io/kaas-lib/"
 rust-version = "1.97"
 
 [workspace.dependencies]
+# The published crates depending on each other. Here rather than inline in
+# five manifests because a `cargo publish` dependency requirement is not
+# inherited from `[workspace.package] version` — it is a separate string that
+# has to be bumped in lockstep, and getting it wrong is not caught by any
+# local check. It fails partway through a four-crate publish, after some
+# crates are already live and irreversibly so, with a resolver error about a
+# version that does not exist yet.
+#
+# So: two adjacent lines in one file, not six scattered across five. Bump the
+# `version` below together with `[workspace.package] version` above.
+kafka-conn = { path = "crates/kafka-conn", version = "0.1.0" }
+kafka-meta = { path = "crates/kafka-meta", version = "0.1.0" }
+
 # The codec, and the only place protocol types are allowed to appear.
 # See CLAUDE.md: `client` drops the broker half of the codegen, and
 # `messages_enums` is not in `default` but is what the read-only gate

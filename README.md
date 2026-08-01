@@ -18,13 +18,17 @@ topic rather than for joining a consumer group.
 
 ```toml
 [dependencies]
-kafka-admin = { git = "https://github.com/kaas-rs/kaas-lib" }
-kafka-read  = { git = "https://github.com/kaas-rs/kaas-lib" }
+kafka-admin = "0.1"
+kafka-read  = "0.1"
 ```
 
-Not yet on crates.io — the manifests are release-ready and
-`.github/workflows/release.yml` publishes on a `v*` tag, but nothing has
-been uploaded. See [RELEASING.md](RELEASING.md).
+The four crates publish to crates.io in lockstep at a single version — they
+are one library split along a layering boundary, not four independently
+useful things, so `kafka-admin` 0.2 against `kafka-conn` 0.1 is not a
+combination anyone tests. Pull whichever layers you need at the same version.
+
+Pre-1.0, so breaking changes land in the minor position. See
+[RELEASING.md](RELEASING.md).
 
 ## The goal
 
