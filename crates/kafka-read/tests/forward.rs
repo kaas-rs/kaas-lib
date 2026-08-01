@@ -25,12 +25,19 @@ use testkit::{Cluster as _, KafkaCluster};
 /// own console producer so the bytes on disk are what a real Kafka client
 /// writes.
 async fn produce(fixture: &KafkaCluster, topic: &str, from: u32, count: u32, codec: &str) {
+    // Round-robin rather than the default sticky partitioner. Sticky fills one
+    // partition per batch, which is correct for throughput and wrong for a
+    // fixture: 10k records reached only 3 of 6 partitions and the test failed
+    // as "records landed in every partition", blaming the scan for the
+    // producer's batching.
     let command = format!(
         "seq {from} {} | /opt/kafka/bin/kafka-console-producer.sh \
          --bootstrap-server localhost:9093 --topic {topic} \
          --producer-property compression.type={codec} \
          --producer-property batch.size=16384 \
-         --producer-property linger.ms=50",
+         --producer-property linger.ms=50 \
+         --producer-property \
+         partitioner.class=org.apache.kafka.clients.producer.RoundRobinPartitioner",
         from + count - 1
     );
     fixture
@@ -299,6 +306,22 @@ async fn dropping_a_scan_stops_it() {
     // leaving a task filling a channel nobody reads.
     let (fixture, cluster, _admin) = setup(3).await;
     produce(&fixture, "scanned", 1, 5000, "none").await;
+
+    // Warm the pool first. A scan legitimately opens a connection to each
+    // partition leader, and the pool keeps them — that is reuse working, not a
+    // leak. Measuring `before` on a cold pool counted those as growth and
+    // failed as 4 against 2. The property is that *repeating* an abandoned
+    // scan does not add any more.
+    for _ in 0..2 {
+        let mut stream = Box::pin(
+            kafka_read::scan(&cluster, ScanSpec::new("scanned"))
+                .await
+                .unwrap(),
+        );
+        for _ in 0..5 {
+            let _ = stream.next().await;
+        }
+    }
 
     let before = cluster.pool().live_connections().await;
     {
