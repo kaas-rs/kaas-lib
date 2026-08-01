@@ -26,6 +26,18 @@ Not yet on crates.io — the manifests are release-ready and
 `.github/workflows/release.yml` publishes on a `v*` tag, but nothing has
 been uploaded. See [RELEASING.md](RELEASING.md).
 
+## The goal
+
+**Which Kafka version a cluster runs should not be your problem.** No version
+in your config, no feature flags, no `match` on a version number — you ask
+for topics, you get topics. Per-key version negotiation, `Unknown` variants
+on the api-key and error-code enums, automatic API fallback and
+version-dependent request shapes are all handled below the API you call.
+
+Where a difference genuinely cannot be absorbed, it surfaces as something
+legible — `Unsupported`, `Unrecognized`, or an `UnsupportedApi` carrying both
+version ranges — rather than as a silently wrong answer.
+
 ## Three invariants and a constraint
 
 Most of the design follows from four statements, covered in the

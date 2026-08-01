@@ -65,6 +65,61 @@ condition, not an edge case — which is why version negotiation, an
 [gap documentation](compat/upstream-gap.md) are structural rather than
 defensive.
 
+## The goal: which Kafka version a cluster runs is not your problem
+
+That constraint has a payoff, and it is the clearest statement of what this
+library is *for*.
+
+**A caller should never have to ask what version a cluster runs.** Not in a
+config file, not in a feature flag, not in a `match` on a version number. You
+ask for topics; you get topics. The library works out what the cluster can
+actually do and does the most it can with it.
+
+Concretely, that means a caller never writes any of this:
+
+```rust,no_run
+# struct Client; struct Config { kafka_version: String }
+// None of this exists in kaas-lib's API, deliberately.
+let client = Client::connect(cfg, KafkaVersion::V3_7)?;   // no
+if cluster.version() >= (4, 0) { /* use the new API */ }   // no
+config.set("api.version.request", "false");                // no
+```
+
+Five mechanisms carry that promise, and most of Part I is one of them
+seen up close:
+
+| Mechanism | What it absorbs |
+|---|---|
+| [Per-key version negotiation](architecture/version-negotiation.md) | brokers that are newer *or* older than this build |
+| `ErrorCode::Unknown(i16)` | codes from Kafka releases the codec has never heard of |
+| `GroupDescription::Unrecognized` | [group kinds](compat/group-kinds.md) that cannot be described at all |
+| Automatic API fallback | `DescribeTopicPartitions` where offered, `Metadata` where not — one method, either way |
+| [The domain boundary](architecture/domain-boundary.md) | schema churn, so a Kafka release does not reshape *your* types |
+
+The library also switches request *shapes* on the negotiated version without
+telling you: `Fetch` v13+ identifies topics by UUID and older versions by
+name; `OffsetFetch` moved its group field at v8. Both paths exist, and which
+one runs is not a decision a caller makes.
+
+### Where the abstraction stops, it says so
+
+"As much as possible" is doing real work in that sentence, and pretending
+otherwise would be the more damaging choice. Some differences between Kafka
+versions are not absorbable, and for those the library's job is to be
+*legible* rather than silent:
+
+- A sentinel that needs a schema this build cannot encode is a documented
+  `Unsupported`, not a silently wrong answer — see
+  [`ListOffsets` `-6`](compat/upstream-gap.md).
+- A group kind with no schema renders as `Unrecognized` carrying its type,
+  not as an error and not as a fabricated description.
+- An api the cluster genuinely lacks is `Error::UnsupportedApi`, carrying
+  *both* version ranges so the reader can tell whether the cluster is old or
+  this build is.
+
+A version difference you can see and act on is a feature. One that is papered
+over into a wrong number is the bug this design exists to prevent.
+
 ## What is here, and what is not
 
 Five library crates, layered strictly:
