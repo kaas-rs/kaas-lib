@@ -134,6 +134,43 @@ Facts worth reading before anything else:
 | `smoke.*.settle_ms` | how long a write took to become visible on an arbitrary broker. Real on a 3-broker cluster (~500ms for a config change) and structurally invisible to a single-broker fixture. |
 | `read.*.malformed` | must be `0` on healthy topics. Non-zero is either real corruption or a decoder bug — either way, worth stopping for. |
 
+## Known `kaas` gaps (as of the last run)
+
+`kaas` advertises 37 api keys to Strimzi's 75. A run against it is expected to
+be *narrower*, not equal. Confirmed by running the whole suite against both:
+
+| command | strimzi | kaas |
+|---|---|---|
+| `probe` | pass, 301 facts | pass, 181 facts |
+| `smoke` | pass | **fail** — topic config overrides are not stored |
+| `read`  | pass, 25k records, 0 malformed | pass, 25k records, 0 malformed |
+| `sweep` | pass | pass |
+
+The `smoke` failure is a broker gap, not a client bug, and it was confirmed the
+way any such claim should be — with a second, independent client. Apache's own
+`kafka-configs.sh`, pointed at `kaas`, reports `Completed updating config` and
+then shows no dynamic configs at all, including the one set at creation time.
+kaas-lib behaves identically to the Java client. If you are chasing a `kaas`
+difference, do this before concluding anything:
+
+```sh
+kubectl -n strimzi exec kafka-cluster-dual-role-1 -- \
+  bin/kafka-configs.sh --bootstrap-server kaas.kaas.svc.cluster.local:9092 \
+  --entity-type topics --entity-name <topic> --describe
+```
+
+Absent from `kaas` entirely: `DescribeCluster`, `DescribeTopicPartitions`,
+`ConsumerGroupDescribe`, `ShareGroupDescribe`, transactions, reassignments,
+`ElectLeaders`, SCRAM credential management, delegation tokens, and every
+share-group api. It also reports no topic ids, so `Fetch` stays on the
+name-based path. It *does* have an authorizer (24 ACLs) where Strimzi has none.
+
+Useful side effect: the two clusters between them exercise **both branches** of
+the version-shaped requests. `Fetch` runs v18 (topic id) on Strimzi and v12
+(name) on kaas; `DeleteTopics` runs v6 (`topics`) on Strimzi and v5
+(`topic_names`) on kaas. Running the pair is worth more than running either
+twice.
+
 ## What live runs catch
 
 A single-broker container fixture is a different machine from a shared

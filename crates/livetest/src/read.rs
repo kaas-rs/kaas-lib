@@ -16,7 +16,7 @@ use kafka_admin::Admin;
 use kafka_meta::Cluster;
 use kafka_read::{ScanEvent, ScanSpec, TailSpec};
 
-use crate::report::{Report, one_line};
+use crate::report::{Outcome, Report, one_line};
 use crate::target::Target;
 
 /// How much to read.
@@ -80,22 +80,29 @@ impl Options {
 }
 
 /// Read topics and report what the decoder made of them.
-pub async fn read(target: &Target, options: &Options) -> Result<Report> {
+pub async fn read(target: &Target, options: &Options) -> Result<Outcome> {
+    let mut report = Report::new();
+    match read_inner(target, options, &mut report).await {
+        Ok(()) => Ok(Outcome::ok(report)),
+        Err(error) => Ok(Outcome::failed(report, error)),
+    }
+}
+
+async fn read_inner(target: &Target, options: &Options, report: &mut Report) -> Result<()> {
     let cluster = Cluster::connect(target.bootstrap.clone(), target.cluster_config()).await?;
     let admin = Admin::new(cluster.clone());
 
-    let mut report = Report::new();
     report.note(format!("target: {}", target.label));
 
     let topics = if options.topics.is_empty() {
-        pick_topics(&cluster, options.max_topics)
+        pick_topics(&cluster, &admin, options.max_topics).await
     } else {
         options.topics.clone()
     };
     if topics.is_empty() {
         report.set("read.topics", 0);
         report.note("no readable topics on this cluster");
-        return Ok(report);
+        return Ok(());
     }
     report.set("read.topics", topics.len());
     report.note(format!("reading: {}", topics.join(", ")));
@@ -152,13 +159,20 @@ pub async fn read(target: &Target, options: &Options) -> Result<Report> {
 
     report.set("read.total_records", total_records);
     report.set("read.total_malformed", total_malformed);
-    Ok(report)
+    Ok(())
 }
 
-/// Topics worth reading: real ones, with data, that are not internal.
-fn pick_topics(cluster: &Cluster, max: usize) -> Vec<String> {
+/// Topics worth reading: real ones, that are not internal, **with records in
+/// them**.
+///
+/// Picking alphabetically is worse than useless. A cluster's first few topic
+/// names are usually empty scratch topics, and a scan of an empty topic asserts
+/// nothing at all — it never even issues a `Fetch`, so it cannot show a decoder
+/// bug, a compression bug or a topic-id bug. Ranking by record count is what
+/// makes the automatic choice mean something.
+async fn pick_topics(cluster: &Cluster, admin: &Admin, max: usize) -> Vec<String> {
     let snapshot = cluster.snapshot();
-    let mut names: Vec<String> = snapshot
+    let candidates: Vec<String> = snapshot
         .topics()
         .iter()
         .filter(|topic| !topic.internal)
@@ -169,9 +183,41 @@ fn pick_topics(cluster: &Cluster, max: usize) -> Vec<String> {
         .filter(|topic| !topic.partitions.is_empty())
         .map(|topic| topic.name.clone())
         .collect();
-    names.sort();
-    names.truncate(max);
-    names
+
+    let mut sized: Vec<(u64, String)> = Vec::new();
+    for name in candidates {
+        let records = match admin.topic_offset_range(&name).await {
+            Ok(ranges) => ranges
+                .into_iter()
+                .filter_map(|(_, range)| range.ok())
+                .map(|(low, high)| {
+                    let low = low.unwrap_or(0);
+                    let high = high.unwrap_or(0);
+                    u64::try_from(high.saturating_sub(low).max(0)).unwrap_or(0)
+                })
+                .sum(),
+            // A topic we cannot size is a topic we cannot rank; it stays a
+            // candidate of last resort rather than disappearing.
+            Err(_) => 0,
+        };
+        sized.push((records, name));
+    }
+
+    // Largest first, then by name so the choice is reproducible between runs.
+    sized.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+    let with_data: Vec<String> = sized
+        .iter()
+        .filter(|(records, _)| *records > 0)
+        .map(|(_, name)| name.clone())
+        .take(max)
+        .collect();
+    if !with_data.is_empty() {
+        return with_data;
+    }
+    // Nothing on this cluster has records. Read the empty ones anyway, so the
+    // report says so rather than saying nothing.
+    sized.into_iter().map(|(_, name)| name).take(max).collect()
 }
 
 #[derive(Debug, Default)]

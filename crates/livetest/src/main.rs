@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
     match command.as_str() {
         // Notes to stderr, facts to stdout, so `livetest probe > out.txt`
         // captures exactly the diffable body and nothing else.
-        "probe" => emit(probe::probe(&target).await?),
+        "probe" => emit(report::Outcome::ok(probe::probe(&target).await?)),
         "smoke" => emit(smoke::smoke(&target).await?),
         "read" => {
             let options = read::Options::parse(&rest)?;
@@ -76,11 +76,16 @@ async fn main() -> Result<()> {
     }
 }
 
-fn emit(report: report::Report) -> Result<()> {
-    eprint!("{}", report.render_notes());
-    eprintln!("# {} fact(s)", report.len());
-    print!("{}", report.render());
-    Ok(())
+/// Print what was learned, then report whether the run passed.
+///
+/// The report comes first even when the run failed: a partial report says how
+/// far it got and what the cluster looked like on the way, which is the whole
+/// diagnostic.
+fn emit(outcome: report::Outcome) -> Result<()> {
+    eprint!("{}", outcome.report.render_notes());
+    eprintln!("# {} fact(s)", outcome.report.len());
+    print!("{}", outcome.report.render());
+    outcome.result
 }
 
 fn print_help() {

@@ -85,6 +85,39 @@ impl Report {
     }
 }
 
+/// A report plus whether the run that produced it succeeded.
+///
+/// The facts collected before a failure are the most useful ones there are —
+/// they say how far the run got and what the cluster looked like on the way.
+/// Returning `Result<Report>` throws exactly those away at the moment they
+/// matter, so commands that assert return this instead and the caller prints
+/// the report before propagating.
+#[derive(Debug)]
+pub struct Outcome {
+    /// What was learned.
+    pub report: Report,
+    /// Whether the run met its assertions.
+    pub result: anyhow::Result<()>,
+}
+
+impl Outcome {
+    /// A successful run.
+    pub fn ok(report: Report) -> Self {
+        Self {
+            report,
+            result: Ok(()),
+        }
+    }
+
+    /// A run that collected facts and then failed.
+    pub fn failed(report: Report, error: anyhow::Error) -> Self {
+        Self {
+            report,
+            result: Err(error),
+        }
+    }
+}
+
 /// Escape a value that might contain a newline or a leading space.
 ///
 /// A broker's error message can contain anything, and one stray newline turns

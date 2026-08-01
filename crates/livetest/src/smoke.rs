@@ -13,11 +13,11 @@ use anyhow::{Result, bail};
 use kafka_admin::{Admin, ConfigChange, ConfigResource, ConfigSource, NewTopic, OffsetSpec};
 use kafka_meta::Cluster;
 
-use crate::report::{Report, one_line};
+use crate::report::{Outcome, Report, one_line};
 use crate::target::{Target, run_token};
 
 /// Run the admin round trip.
-pub async fn smoke(target: &Target) -> Result<Report> {
+pub async fn smoke(target: &Target) -> Result<Outcome> {
     target.require_writable("the smoke suite")?;
 
     let cluster = Cluster::connect(target.bootstrap.clone(), target.cluster_config()).await?;
@@ -49,8 +49,10 @@ pub async fn smoke(target: &Target) -> Result<Report> {
         }
     }
 
-    outcome?;
-    Ok(report)
+    Ok(match outcome {
+        Ok(()) => Outcome::ok(report),
+        Err(error) => Outcome::failed(report, error),
+    })
 }
 
 /// How long to wait for a change to become visible on an arbitrary broker.
