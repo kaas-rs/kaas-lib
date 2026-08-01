@@ -203,6 +203,20 @@ async fn consume_into_group(
         .await
         .expect("consumer ran");
 
+    await_committed_offset(fixture, admin, group, topic).await;
+}
+
+/// Block until `group` has committed an offset for `topic`.
+///
+/// A weaker condition than [`settle_groups`], and a different one: that waits
+/// for members to *join*, while a console consumer commits on
+/// `auto.commit.interval.ms` — five seconds by default. So a group can be
+/// stable, with members, and have committed nothing at all.
+///
+/// Reading once and carrying on regardless is what made the lag assertion
+/// vacuous: every entry took a `continue`, and a total of zero over zero
+/// partitions satisfies any inequality worth writing.
+async fn await_committed_offset(fixture: &KafkaCluster, admin: &Admin, group: &str, topic: &str) {
     let deadline = Instant::now() + SETTLE_TIMEOUT;
     while Instant::now() < deadline {
         if let Ok(committed) = admin.fetch_offsets(group, None).await
@@ -516,7 +530,11 @@ async fn groups_can_be_deleted_and_their_offsets_removed() {
 async fn a_groups_lag_can_be_computed_from_committed_and_latest_offsets() {
     // The single most-rendered number in a Kafka UI, and the one that needs
     // both halves of this milestone to be right.
-    let (_fixture, admin) = fixture_with_all_group_kinds().await;
+    let (fixture, admin) = fixture_with_all_group_kinds().await;
+
+    // The fixture's consumers are joined by now, which is not the same as
+    // having committed. Wait for the offset this test is about to read.
+    await_committed_offset(&fixture, &admin, "classic-group", "fixture-topic").await;
 
     let committed = admin.fetch_offsets("classic-group", None).await.unwrap();
     let latest = admin

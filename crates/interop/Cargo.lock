@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-admin"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "futures",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-conn"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "base64 0.23.0",
  "bytes",
@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-meta"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -1174,7 +1174,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-read"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1187,6 +1187,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "uuid",
  "zstd",
 ]
 
@@ -2223,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "testkit"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "futures",
  "testcontainers",

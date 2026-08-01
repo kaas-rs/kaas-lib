@@ -29,7 +29,7 @@ use kafka_admin::{Admin, ClusterConfig, NewTopic};
 use kafka_read::{ScanEvent, ScanSpec};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::message::{Header, Headers, OwnedHeaders};
+use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::Message;
 use testkit::Cluster as _;
