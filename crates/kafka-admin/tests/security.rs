@@ -221,10 +221,26 @@ async fn a_reassignment_is_triggered_and_observed_reaching_completion() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    let described = admin.describe_topics(["movable"]).await.unwrap();
-    let info = described[0].1.as_ref().expect("described");
-    let mut replicas = info.partitions[0].replicas.clone();
-    replicas.sort_unstable();
+    // An empty reassignment list means the *controller* is done; the broker
+    // answering describes still serves the metadata it has applied, which for
+    // a moment is the transitional replica set — [1, 2, 3], the union of the
+    // old and new assignments. Reading once caught that and reported "the move
+    // did not take effect", which is the opposite of what had happened.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let replicas = loop {
+        let described = admin.describe_topics(["movable"]).await.unwrap();
+        let info = described[0].1.as_ref().expect("described");
+        let mut replicas = info.partitions[0].replicas.clone();
+        replicas.sort_unstable();
+        if replicas == vec![2, 3] {
+            break replicas;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the move did not take effect; replicas are still {replicas:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
     assert_eq!(replicas, vec![2, 3], "the move did not take effect");
 }
 
