@@ -272,7 +272,12 @@ jobs:
       # so the include is not fully guarded by that switch on the 2.12.1
       # bundled source. Supplying the header is a one-package fix; chasing the
       # right combination of upstream feature flags is not.
-      - name: Install cmake + C toolchain + libcurl headers
+      # clang too: the `zstd` feature on rdkafka pulls in zstd-sys, which
+      # generates its bindings with bindgen and dies on
+      #   Unable to find libclang
+      # without it. The feature is not optional — see the comment on the
+      # rdkafka dependency in crates/interop/Cargo.toml.
+      - name: Install cmake + C toolchain + libcurl and libclang
         run: |
           if [ "$(id -u)" -eq 0 ]; then SUDO=""
           elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"
@@ -283,10 +288,11 @@ jobs:
           $SUDO apt-get update
           $SUDO apt-get install -y --no-install-recommends \
             cmake make gcc g++ libc6-dev pkg-config ca-certificates \
-            libcurl4-openssl-dev libssl-dev
+            libcurl4-openssl-dev libssl-dev clang libclang-dev
           echo "cc → $(command -v cc || echo MISSING)"
           echo "cmake → $(command -v cmake || echo MISSING)"
           echo "curl.h → $(ls /usr/include/*/curl/curl.h /usr/include/curl/curl.h 2>/dev/null | head -1 || echo MISSING)"
+          echo "libclang → $(ls /usr/lib/llvm-*/lib/libclang.so* 2>/dev/null | head -1 || echo MISSING)"
 
       - name: Pre-pull the broker image
         run: docker pull apache/kafka:4.3.1
