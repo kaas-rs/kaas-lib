@@ -14,7 +14,7 @@
     clippy::indexing_slicing
 )]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kafka_admin::{
     AclBinding, AclFilter, AclOperation, AclResourceType, Admin, ClusterConfig, ElectionType,
@@ -22,6 +22,9 @@ use kafka_admin::{
 };
 use kafka_conn::{ApiKey, Connection, ConnectionConfig, Error};
 use testkit::{BrokerConfig, Cluster as _};
+
+/// How long a quota change may take to reach the broker serving describes.
+const QUOTA_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[tokio::test]
 #[ignore = "needs Docker"]
@@ -81,14 +84,34 @@ async fn client_quotas_round_trip() {
         .unwrap();
     assert!(altered[0].1.is_ok(), "{altered:?}");
 
-    let described = admin
-        .describe_client_quotas(&QuotaFilter {
-            components: vec![("client-id".to_owned(), Some("noisy".to_owned()))],
-            strict: false,
-        })
-        .await
-        .unwrap();
-    let (_, values) = described.first().expect("the quota we just set");
+    // Polled, not read once. `AlterClientQuotas` is acked when the controller
+    // commits it; the broker answers describes from the metadata it has
+    // applied, which in KRaft trails the log. Same race as `retention.ms` in
+    // the topics suite, and the ACL test above happens not to lose it — which
+    // is exactly why this one is worth waiting on rather than assuming.
+    let deadline = Instant::now() + QUOTA_TIMEOUT;
+    let values = loop {
+        let described = admin
+            .describe_client_quotas(&QuotaFilter {
+                components: vec![("client-id".to_owned(), Some("noisy".to_owned()))],
+                strict: false,
+            })
+            .await
+            .unwrap();
+        let found = described.first().map(|(_, values)| values.clone());
+        if let Some(values) = &found
+            && values.iter().any(|(key, value)| {
+                key == "producer_byte_rate" && (*value - 1_048_576.0).abs() < 1.0
+            })
+        {
+            break values.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the quota never became visible within {QUOTA_TIMEOUT:?}; last saw {found:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     assert!(
         values
             .iter()
