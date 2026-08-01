@@ -15,12 +15,20 @@
     clippy::indexing_slicing
 )]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kafka_admin::{
     Admin, ClusterConfig, GroupDescription, GroupState, NewTopic, OffsetReset, OffsetSpec,
 };
 use testkit::{BrokerConfig, Cluster as _, KafkaCluster};
+
+/// How long a fixture may take to settle.
+///
+/// Deliberately generous. The fixture previously slept a fixed 15 seconds,
+/// which was fine on an idle laptop and failed every time on CI, where
+/// several of these fixtures boot their own broker concurrently and a JVM
+/// console consumer needs a good part of that budget just to reach `main`.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Start a console consumer in the background, in a group, and leave it running.
 async fn start_consumer(fixture: &KafkaCluster, tool: &str, group: &str, extra: &[&str]) {
@@ -97,10 +105,134 @@ async fn fixture_with_all_group_kinds() -> (KafkaCluster, Admin) {
     .await;
 
     // Joining is not instantaneous, and a group with no members describes as
-    // Empty rather than failing — which would make this test pass for the
-    // wrong reason.
-    tokio::time::sleep(Duration::from_secs(15)).await;
+    // Empty rather than failing — which would make these tests pass for the
+    // wrong reason. So wait for the condition the tests actually need rather
+    // than for a duration that happened to be long enough once.
+    settle_groups(
+        &fixture,
+        &admin,
+        &["classic-group", "consumer-group", "share-group"],
+    )
+    .await;
     (fixture, admin)
+}
+
+/// Block until every named group has registered *and* has at least one member.
+///
+/// Polling rather than sleeping is the whole point: the fixture is ready when
+/// the broker says it is, not when a magic number elapses. A fixed sleep that
+/// is too short fails as `missing classic-group: []` — which names the
+/// symptom and gives no clue at all about the cause — so on timeout this dumps
+/// each console consumer's log, the one place the actual reason ever appears.
+async fn settle_groups(fixture: &KafkaCluster, admin: &Admin, expected: &[&str]) {
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    let mut seen: Vec<String> = Vec::new();
+
+    while Instant::now() < deadline {
+        if let Ok(listings) = admin.list_groups().await {
+            seen = listings.iter().map(|l| l.group_id.clone()).collect();
+            let all_present = expected
+                .iter()
+                .all(|want| seen.iter().any(|got| got == want));
+            if all_present && members_joined(admin, expected).await {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    panic!(
+        "fixture did not settle within {SETTLE_TIMEOUT:?}\n  wanted: {expected:?}\n  \
+         saw:    {seen:?}\n{}",
+        consumer_logs(fixture, expected).await
+    );
+}
+
+/// Whether every named group describes with at least one member.
+///
+/// `member_count` returns `None` for a group this build cannot describe,
+/// which is not "settled" — treat it as not ready rather than as satisfied.
+async fn members_joined(admin: &Admin, expected: &[&str]) -> bool {
+    match admin.describe_groups(expected.iter().copied()).await {
+        Ok(described) => described.iter().all(|(_, result)| {
+            result
+                .as_ref()
+                .ok()
+                .and_then(|d| d.member_count())
+                .is_some_and(|count| count > 0)
+        }),
+        Err(_) => false,
+    }
+}
+
+/// Run a bounded console consumer, then wait until its group has committed.
+///
+/// `--timeout-ms` makes the consumer exit non-zero when it stops on idle,
+/// which is its *normal* path here — so the exit code cannot be the signal
+/// that it worked. The previous `>/dev/null 2>&1 || true` therefore threw away
+/// the only evidence there was, and a consumer that never started at all
+/// surfaced several assertions later as `GROUP_ID_NOT_FOUND`, naming a group
+/// whose absence nothing had explained.
+///
+/// So keep the log, then poll for the committed offset the caller actually
+/// depends on, and print the log if it never arrives.
+async fn consume_into_group(
+    fixture: &KafkaCluster,
+    admin: &Admin,
+    group: &str,
+    topic: &str,
+    protocol: &str,
+    timeout_ms: u32,
+) {
+    let command = format!(
+        "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+         --topic {topic} --group {group} --from-beginning --timeout-ms {timeout_ms} \
+         --consumer-property group.protocol={protocol} >/tmp/consumer-{group}.log 2>&1; true"
+    );
+    fixture
+        .exec(0, vec!["bash".to_owned(), "-c".to_owned(), command])
+        .await
+        .expect("consumer ran");
+
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Ok(committed) = admin.fetch_offsets(group, None).await
+            && committed
+                .iter()
+                .any(|((name, _), value)| name == topic && value.is_ok())
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    panic!(
+        "group {group} never committed an offset for {topic} within {SETTLE_TIMEOUT:?}\n{}",
+        consumer_logs(fixture, &[group]).await
+    );
+}
+
+/// The console consumers' own logs, for a failure message that explains itself.
+async fn consumer_logs(fixture: &KafkaCluster, groups: &[&str]) -> String {
+    let mut out = String::new();
+    for group in groups {
+        out.push_str(&format!("\n--- /tmp/consumer-{group}.log ---\n"));
+        let command = format!("tail -n 20 /tmp/consumer-{group}.log 2>&1 || echo '(no log)'");
+        match fixture
+            .exec(0, vec!["bash".to_owned(), "-c".to_owned(), command])
+            .await
+        {
+            Ok(output) => {
+                out.push_str(output.stdout.trim_end());
+                if !output.stderr.trim().is_empty() {
+                    out.push_str(&format!("\n[stderr] {}", output.stderr.trim_end()));
+                }
+            }
+            Err(error) => out.push_str(&format!("(could not read: {error})")),
+        }
+        out.push('\n');
+    }
+    out
 }
 
 #[tokio::test]
@@ -231,20 +363,7 @@ async fn offsets_can_be_read_and_reset_for_a_classic_group() {
 
     // Consume to completion so the group exists, has committed offsets, and is
     // *empty* by the time we try to reset it.
-    fixture
-        .exec(
-            0,
-            vec![
-                "bash".to_owned(),
-                "-c".to_owned(),
-                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
-                 --topic reset-me --group resettable --from-beginning --timeout-ms 8000 \
-                 --consumer-property group.protocol=classic >/dev/null 2>&1 || true"
-                    .to_owned(),
-            ],
-        )
-        .await
-        .unwrap();
+    consume_into_group(&fixture, &admin, "resettable", "reset-me", "classic", 8000).await;
 
     let committed = admin.fetch_offsets("resettable", None).await.unwrap();
     let offset = committed
@@ -299,20 +418,7 @@ async fn offsets_can_be_reset_for_a_kip_848_consumer_group() {
         )
         .await
         .unwrap();
-    fixture
-        .exec(
-            0,
-            vec![
-                "bash".to_owned(),
-                "-c".to_owned(),
-                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
-                 --topic reset-848 --group modern --from-beginning --timeout-ms 8000 \
-                 --consumer-property group.protocol=consumer >/dev/null 2>&1 || true"
-                    .to_owned(),
-            ],
-        )
-        .await
-        .unwrap();
+    consume_into_group(&fixture, &admin, "modern", "reset-848", "consumer", 8000).await;
 
     // Wait for the member to be fully gone, or the reset is refused by design.
     for _ in 0..20 {
@@ -381,20 +487,7 @@ async fn groups_can_be_deleted_and_their_offsets_removed() {
         )
         .await
         .unwrap();
-    fixture
-        .exec(
-            0,
-            vec![
-                "bash".to_owned(),
-                "-c".to_owned(),
-                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
-                 --topic deletable --group doomed --from-beginning --timeout-ms 6000 \
-                 --consumer-property group.protocol=classic >/dev/null 2>&1 || true"
-                    .to_owned(),
-            ],
-        )
-        .await
-        .unwrap();
+    consume_into_group(&fixture, &admin, "doomed", "deletable", "classic", 6000).await;
 
     let deleted_offsets = admin
         .delete_offsets("doomed", [("deletable".to_owned(), 0)])
