@@ -165,7 +165,35 @@ impl Cluster {
     }
 
     /// The coordinator for a group or transactional id, cached.
+    ///
+    /// Retried on the retriable codes like every other routed call. This one
+    /// is easy to miss because it is not a `send_*` and so never went through
+    /// [`Cluster::dispatch`] — but `COORDINATOR_NOT_AVAILABLE` is exactly what
+    /// a *fresh* cluster returns, because `__consumer_offsets` is created
+    /// lazily on first use and has no leader for a moment afterwards. Without
+    /// a retry the first group lookup against a new cluster is a hard error
+    /// for a condition that clears itself in about a second.
     pub async fn coordinator(&self, kind: CoordinatorKind, key: &str) -> Result<i32> {
+        let policy = self.inner.config.retry;
+        let mut attempt = 1;
+        loop {
+            let delay = policy.delay(attempt);
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            match self.coordinator_once(kind, key).await {
+                Ok(node) => return Ok(node),
+                Err(error) if error.retriable() && policy.should_retry(attempt) => {
+                    tracing::debug!(?kind, key, attempt, %error, "retrying FindCoordinator");
+                    attempt = attempt.saturating_add(1);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// One `FindCoordinator` round trip, cache included.
+    async fn coordinator_once(&self, kind: CoordinatorKind, key: &str) -> Result<i32> {
         let cache_key = (kind, key.to_owned());
         if let Some(node) = self
             .inner

@@ -185,7 +185,35 @@ impl BrokerPool {
         }
     }
 
-    /// How many live connections the pool is holding.
+    /// How many live connections the pool holds to brokers known by id.
+    ///
+    /// Distinct from [`BrokerPool::live_connections`], which also counts the
+    /// bootstrap socket. That socket is real and deliberately kept — it is the
+    /// fallback when every known broker becomes unreachable — so a caller
+    /// asking "did we open one connection per broker?" wants this, and gets a
+    /// confusing off-by-one from the other.
+    pub async fn live_node_connections(&self) -> usize {
+        let slots: Vec<(Endpoint, Arc<Slot>)> = self
+            .slots
+            .lock()
+            .map(|map| {
+                map.iter()
+                    .filter(|(endpoint, _)| matches!(endpoint, Endpoint::Node(_)))
+                    .map(|(endpoint, slot)| (endpoint.clone(), Arc::clone(slot)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut count = 0;
+        for (_, slot) in slots {
+            let state = slot.state.lock().await;
+            if state.connection.as_ref().is_some_and(|c| !c.is_closed()) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// How many live connections the pool is holding, bootstrap included.
     pub async fn live_connections(&self) -> usize {
         let slots: Vec<Arc<Slot>> = self
             .slots

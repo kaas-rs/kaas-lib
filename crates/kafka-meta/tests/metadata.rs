@@ -209,8 +209,12 @@ async fn the_pool_opens_one_connection_per_broker_and_reuses_it() {
             cluster.pool().get(*id).await.expect("connects");
         }
     }
+    // `live_node_connections`, not `live_connections`: the pool also keeps the
+    // bootstrap socket, deliberately, as the fallback for when every known
+    // broker goes unreachable. Counting it here measured 4 against 3 brokers
+    // and read as a reuse failure, which is not what this test is about.
     assert_eq!(
-        cluster.pool().live_connections().await,
+        cluster.pool().live_node_connections().await,
         ids.len(),
         "five calls per broker must not open five sockets per broker"
     );
