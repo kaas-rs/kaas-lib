@@ -51,9 +51,16 @@ jobs:
       # and exchanges it with crates.io for a 30-minute token.
       id-token: write
     env:
-      # True only for a manual run with the box ticked. A tag push always
-      # publishes for real.
-      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+      # Fail safe: only a tag push, or a manual run with the box explicitly
+      # unticked, publishes for real. Everything else is a dry run.
+      #
+      # Written as a double negative on purpose. GitHub expressions treat any
+      # non-empty string as truthy, and a `workflow_dispatch` input arriving
+      # as the string "false" — which is what `gh workflow run -f dry_run=false`
+      # can send — would make a naive `&& inputs.dry_run` truthy and publish
+      # when the caller asked not to. Comparing against both the boolean and
+      # the string means the only way to reach a real upload is to ask for one.
+      DRY_RUN: ${{ github.event_name != 'push' && inputs.dry_run != false && inputs.dry_run != 'false' }}
       # Secrets are not available in `if:` on some runner versions; hoist it.
       HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
     steps:
