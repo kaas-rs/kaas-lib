@@ -1,13 +1,19 @@
 [package]
 name        = "kafka-meta"
-version     = "0.1.0"
+description = "Kafka 4.x cluster metadata cache, RPC routing, connection pooling and error taxonomy"
+readme      = "README.md"
+keywords    = ["kafka", "metadata", "routing", "client", "async"]
+categories  = ["network-programming", "asynchronous"]
+
+version.workspace      = true
 edition.workspace      = true
 license.workspace      = true
 repository.workspace   = true
+homepage.workspace     = true
 rust-version.workspace = true
 
 [dependencies]
-kafka-conn     = { path = "../kafka-conn" }
+kafka-conn     = { path = "../kafka-conn", version = "0.1.0" }
 kafka-protocol = { workspace = true }
 tokio          = { workspace = true }
 futures        = { workspace = true }

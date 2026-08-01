@@ -1,14 +1,20 @@
 [package]
 name        = "kafka-admin"
-version     = "0.1.0"
+description = "Kafka 4.x admin client: topics, configs, offsets, groups, ACLs, quotas and partitions, with per-resource results"
+readme      = "README.md"
+keywords    = ["kafka", "admin", "adminclient", "client", "async"]
+categories  = ["network-programming", "asynchronous", "api-bindings"]
+
+version.workspace      = true
 edition.workspace      = true
 license.workspace      = true
 repository.workspace   = true
+homepage.workspace     = true
 rust-version.workspace = true
 
 [dependencies]
-kafka-conn     = { path = "../kafka-conn" }
-kafka-meta     = { path = "../kafka-meta" }
+kafka-conn     = { path = "../kafka-conn", version = "0.1.0" }
+kafka-meta     = { path = "../kafka-meta", version = "0.1.0" }
 kafka-protocol = { workspace = true }
 tokio          = { workspace = true }
 futures        = { workspace = true }

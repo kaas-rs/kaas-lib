@@ -11,9 +11,15 @@ members = [
 ]
 
 [workspace.package]
+# The four published crates release in lockstep: they are one library split
+# along a layering boundary, not four independently useful things, and a
+# consumer pulling kafka-admin 0.2 against kafka-conn 0.1 is not a
+# combination anyone tests. Bump here, not per crate.
+version      = "0.1.0"
 edition      = "2024"
 license      = "Apache-2.0"
 repository   = "https://github.com/kaas-rs/kaas-lib"
+homepage     = "https://kaas-rs.github.io/kaas-lib/"
 rust-version = "1.97"
 
 [workspace.dependencies]
