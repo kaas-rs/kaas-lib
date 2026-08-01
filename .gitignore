@@ -1,14 +1,18 @@
-/target
+# Cargo build output.
+#
+# Unanchored on purpose: `/target` matches only the workspace root, which let
+# `crates/interop/target` be committed (2,053 files, 432 MB) and purged from
+# history later. `interop` is outside the workspace, so it builds into its own
+# target dir — as would any future standalone crate.
+target/
+
 **/*.rs.bk
 
-# mdbook build output
+# mdbook build output. The linkcheck renderer moves the site to book/html,
+# but ignore the whole tree.
 docs/book/
-fuzz/target
-fuzz/corpus
-fuzz/artifacts
 
 # cargo-fuzz artifacts
-fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
 fuzz/coverage/
