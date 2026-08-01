@@ -57,18 +57,58 @@ pub(crate) fn bounded(
             let decoder = zstd::stream::read::Decoder::new(&input[..])?;
             read_bounded(decoder, limit, "zstd")
         }
-        Compression::Snappy => {
-            let max_input = limit / SNAPPY_MAX_RATIO;
-            if compressed.len() > max_input {
-                anyhow::bail!(
-                    "snappy batch of {} compressed bytes could exceed the {limit} byte \
-                     decompression limit",
-                    compressed.len()
-                );
-            }
-            Snappy::decompress(compressed, |buf| Ok(buf.clone()))
-        }
+        Compression::Snappy => snappy(compressed, limit),
     }
+}
+
+/// The xerial framing's magic header, as `kafka-protocol` writes it.
+const XERIAL_MAGIC: &[u8; 16] = b"\x82SNAPPY\x00\x00\x00\x00\x01\x00\x00\x00\x01";
+
+/// Decompress a snappy batch in either framing Kafka clients actually write.
+///
+/// Kafka's snappy is not one format. The Java client frames it with
+/// snappy-java's xerial header; `librdkafka` — and with it most of the
+/// non-Java ecosystem — writes raw, unframed snappy. A reader has to take
+/// both, which is why upstream autodetects.
+///
+/// It autodetects wrongly. `Snappy::decompress` reads the magic header with
+/// `try_get_bytes(16)`, and that *advances* the buffer (`protocol/buf.rs:38`
+/// calls `get_bytes`). When the header does not match, the raw fallback then
+/// runs on a buffer whose first sixteen bytes are already gone, and fails as
+/// "failed to decompress raw snappy bytes". Upstream's own fallback test
+/// passes only because its fixture is fifteen bytes — one short of the header
+/// — so the read returns `Err` and consumes nothing.
+///
+/// So the framing is decided here, where the buffer is still whole, and only
+/// the xerial case is delegated. This is not the reimplementation this module
+/// refuses to do: the raw branch is a single `snap` call with no framing in it.
+fn snappy(compressed: &mut Bytes, limit: usize) -> anyhow::Result<Bytes> {
+    if compressed.starts_with(&XERIAL_MAGIC[..]) {
+        // Framed: upstream walks the blocks and each block's declared length
+        // drives an allocation, so the bound has to stay on the input.
+        let max_input = limit / SNAPPY_MAX_RATIO;
+        if compressed.len() > max_input {
+            anyhow::bail!(
+                "snappy batch of {} compressed bytes could exceed the {limit} byte \
+                 decompression limit",
+                compressed.len()
+            );
+        }
+        return Snappy::decompress(compressed, |buf| Ok(buf.clone()));
+    }
+
+    // Unframed: the block declares its own decompressed size, so this branch
+    // gets an exact bound instead of a ratio. Checked before anything is
+    // consumed or allocated.
+    let declared = snap::raw::decompress_len(compressed)
+        .map_err(|e| anyhow::anyhow!("failed to read the snappy block length: {e}"))?;
+    if declared > limit {
+        anyhow::bail!("snappy batch declares {declared} bytes, past the {limit} byte limit");
+    }
+    let input = compressed.split_to(compressed.len());
+    let mut out = vec![0u8; declared];
+    snap::raw::Decoder::new().decompress(&input, &mut out)?;
+    Ok(Bytes::from(out))
 }
 
 /// Read at most `limit` bytes, and fail rather than truncating.
@@ -118,10 +158,10 @@ pub(crate) fn compress_for_test(data: &[u8], compression: Compression) -> Vec<u8
             out
         }
         Compression::Snappy => {
-            // Raw snappy, which `kafka-protocol`'s decoder accepts as its
-            // non-xerial fallback. Producing xerial framing here would be
-            // reimplementing the very thing this module refuses to
-            // reimplement.
+            // Raw, unframed snappy — the framing `librdkafka` writes. It is
+            // also the framing `kafka-protocol` 0.17 claims to fall back to
+            // and cannot actually decode, which is why `decompress::snappy`
+            // handles this branch itself.
             let mut out = vec![0u8; snap::raw::max_compress_len(data.len())];
             let written = snap::raw::Encoder::new()
                 .compress(data, &mut out)
@@ -156,15 +196,15 @@ mod tests {
     }
 
     #[test]
-    fn a_snappy_bomb_is_refused_on_its_compressed_size() {
-        // Snappy is bounded on input rather than output, so this asserts the
-        // input cap fires *before* any decompression is attempted — which is
-        // what makes it a bound at all.
+    fn a_snappy_bomb_is_refused_before_it_is_decompressed() {
+        // Unframed snappy declares its decompressed size up front, so the
+        // check is exact rather than a ratio — but either way what makes it a
+        // bound is that it fires *before* anything is decompressed.
         let mut compressed = bomb(Compression::Snappy);
         let before = compressed.len();
         let error = bounded(&mut compressed, Compression::Snappy, 1024)
             .expect_err("a batch this large cannot fit in 1 KiB");
-        assert!(format!("{error}").contains("compressed bytes"), "{error}");
+        assert!(format!("{error}").contains("declares"), "{error}");
         assert_eq!(
             compressed.len(),
             before,
@@ -193,6 +233,28 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{compression:?}: {e}"));
             assert_eq!(&out[..], &payload[..], "{compression:?}");
         }
+    }
+
+    /// Raw, unframed snappy — what `librdkafka` writes, and therefore what
+    /// most non-Java producers in a cluster write.
+    ///
+    /// Excluded from `an_honest_batch_decompresses_unchanged` above on the
+    /// grounds that batch.rs covers snappy through `RecordBatchEncoder`. It
+    /// does — but that encoder emits *xerial* framing, so the unframed half of
+    /// the format had no test anywhere, and it was broken.
+    #[test]
+    fn raw_unframed_snappy_round_trips() {
+        let payload: Vec<u8> = (0..4096u32)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+        let mut compressed = Bytes::from(compress_for_test(&payload, Compression::Snappy));
+        assert!(
+            compressed.len() > 16,
+            "the payload must exceed the magic header for this to be the interesting case"
+        );
+        let out = bounded(&mut compressed, Compression::Snappy, 1024 * 1024)
+            .expect("raw snappy is a framing Kafka clients really write");
+        assert_eq!(&out[..], &payload[..]);
     }
 
     #[test]

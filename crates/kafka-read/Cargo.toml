@@ -26,13 +26,15 @@ uuid           = { workspace = true }
 flate2         = { workspace = true }
 lz4            = { workspace = true }
 zstd           = { workspace = true }
+# Raw, unframed snappy — the framing `librdkafka` writes and the one
+# `kafka-protocol` 0.17 cannot decode. See `decompress::snappy`.
+snap           = "1.1"
 
 [dev-dependencies]
 testkit            = { path = "../testkit" }
 kafka-admin        = { path = "../kafka-admin" }
 tokio              = { workspace = true }
 tracing-subscriber = { workspace = true }
-snap               = "1.1"
 
 [lints]
 workspace = true
