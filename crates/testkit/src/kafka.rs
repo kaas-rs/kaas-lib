@@ -128,6 +128,21 @@ impl KafkaCluster {
         Ok(out.stdout)
     }
 
+    /// Kill a node.
+    ///
+    /// M2's acceptance test needs a broker to die mid-request, and "die" has to
+    /// mean the socket goes away without a clean shutdown — a graceful stop
+    /// would let the broker answer everything in flight first, which is
+    /// precisely the case the test is not interested in.
+    pub async fn stop_node(&self, index: usize) -> Result<()> {
+        let container = self.containers.get(index).ok_or(Error::NoSuchNode {
+            index,
+            size: self.containers.len(),
+        })?;
+        container.stop_with_timeout(Some(0)).await?;
+        Ok(())
+    }
+
     /// Run one of the Kafka shell tools bundled in the image.
     ///
     /// `--bootstrap-server` is filled in from the node's *internal* listener,
