@@ -1,0 +1,32 @@
+[package]
+name        = "livetest"
+version     = "0.1.0"
+publish     = false
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[[bin]]
+name = "livetest"
+path = "src/main.rs"
+
+[dependencies]
+kafka-conn  = { path = "../kafka-conn" }
+kafka-meta  = { path = "../kafka-meta" }
+kafka-admin = { path = "../kafka-admin" }
+kafka-read  = { path = "../kafka-read" }
+testkit     = { path = "../testkit" }
+
+tokio              = { workspace = true }
+futures            = { workspace = true }
+bytes              = { workspace = true }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

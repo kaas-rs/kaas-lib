@@ -7,6 +7,7 @@ members = [
     "crates/kafka-meta",
     "crates/kafka-admin",
     "crates/kafka-read",
+    "crates/livetest",
 ]
 
 [workspace.package]
@@ -70,6 +71,9 @@ rand       = "0.9"
 # through a `Read` we can `take()`, which is the only way to stop a hostile
 # producer's 1 KiB batch from becoming a 1 GiB allocation. Snappy is the
 # exception — see kafka-read/src/decompress.rs.
+# `Fetch` v13+ identifies topics by uuid; `kafka-protocol` uses this crate for
+# the type, so we need it to construct one.
+uuid   = "1"
 flate2 = "1.1"
 lz4    = "1.28"
 zstd   = "0.13"
