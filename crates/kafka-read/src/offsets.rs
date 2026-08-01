@@ -39,7 +39,46 @@ pub(crate) async fn at_timestamp(
     list_one(cluster, topic, partition, leader, timestamp).await
 }
 
+/// How many times to re-resolve the leader before giving up.
+const MAX_ATTEMPTS: u32 = 5;
+/// Pause between attempts, long enough for an election to settle.
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
 async fn list_one(
+    cluster: &Cluster,
+    topic: &str,
+    partition: i32,
+    leader: i32,
+    timestamp: i64,
+) -> Result<Option<i64>> {
+    let mut leader = leader;
+    let mut attempt = 1;
+    loop {
+        match list_one_once(cluster, topic, partition, leader, timestamp).await {
+            Err(error) if error.retriable() && attempt < MAX_ATTEMPTS => {
+                // `ListOffsets` reports failure *per partition*, inside a
+                // response the transport considers a success — so
+                // `Cluster::dispatch`'s retry never sees it and this is the
+                // only place it can be handled. `NOT_LEADER_OR_FOLLOWER` on a
+                // freshly created partition is the common case: the topic
+                // exists, the leader is mid-election, and the snapshot names a
+                // broker that is not it yet. Surfacing that to a caller makes
+                // reading a topic you just created a hard error.
+                if error.needs_metadata_refresh() {
+                    cluster.refresh().await.ok();
+                }
+                if let Ok(current) = cluster.leader_for(topic, partition).await {
+                    leader = current;
+                }
+                tokio::time::sleep(RETRY_DELAY).await;
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn list_one_once(
     cluster: &Cluster,
     topic: &str,
     partition: i32,
