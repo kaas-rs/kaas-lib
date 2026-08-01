@@ -104,7 +104,12 @@ jobs:
 
       - name: Authenticate — Trusted Publishing
         id: auth
-        if: env.HAS_TOKEN != 'true'
+        # Skipped on a dry run: `cargo publish --dry-run` never contacts the
+        # registry, and requesting a token would fail until every crate has a
+        # Trusted Publisher configured — which would make the dry run
+        # unusable at exactly the point it is most useful, before the first
+        # real release.
+        if: env.HAS_TOKEN != 'true' && env.DRY_RUN != 'true'
         uses: rust-lang/crates-io-auth-action@v1
 
       - name: Publish
