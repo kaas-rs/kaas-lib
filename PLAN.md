@@ -2,6 +2,8 @@
 
 Scope: enough client to back a Kafka cluster UI. Admin coverage is the bulk; the read path is browse-shaped, not group-consumer-shaped. Producer is minimal. Estimated 3–5 weeks of agent-assisted work — the slip risk is not RPC count in M6–M8, it is M7's fixtures and M9/M10 correctness.
 
+M0–M11 are that client. **Phase 2 (M12–M19) is the extension to a general-purpose one** — a real producer and real consumer-group membership. It roughly doubles the codebase, and the correctness bar is higher than anything in phase 1: these are the paths where a bug loses or duplicates data rather than rendering a wrong number in a UI.
+
 Each milestone has an **Acceptance** command that must pass. A milestone is not done until it does.
 
 ---
@@ -261,16 +263,184 @@ cargo test --test interop -- --ignored
 
 ---
 
-## Stretch (post-UI-MVP)
+# Phase 2 — general-purpose client
 
-Minimal producer for "send a test message" — single record, explicit partition, headers, tombstones. **Murmur2 must be byte-identical to the Java client**; verify by producing the same key from both and comparing assigned partition. No accumulator or linger, but shape the API so they can be added behind config without changing call sites.
+Supersedes the old "minimal producer" stretch goal. The premise of phase 1 was *admin-first, browse-shaped read path*; phase 2 drops the qualifier. Two crates get added — `kafka-produce` and `kafka-consumer` — and one existing file gets reshaped.
+
+What phase 1 already gives us, and what should therefore not be rebuilt: version negotiation, the routing table, the error taxonomy, the connection pool, SASL/SASLprep/KIP-368, the tolerant record decoder and bounded decompression. All of it is general-purpose already; none of it is UI-shaped. The read-only gate is a `ConnectionConfig` flag, not a constant, so it needs no unpicking — but see M19, because it now has four more mutating keys to hold the line on.
+
+Ordering is deliberate: **producer first, and within the consumer half, KIP-848 before the classic protocol.** M16 is a prerequisite for both group milestones.
+
+---
+
+## M12 — Produce: one record round trip
+
+**Goal:** one record on the wire, acked, and readable by `kafka-read`. This validates record batch *encoding* the way M1 validated framing. Do not start the accumulator until it works.
+
+- New crate `crates/kafka-produce/` with `[lints] workspace = true`.
+- `RecordBatchEncoder::encode` with `RecordEncodeOptions`. v2 batches only — v0/v1 message sets are pre-0.11 and we do not write them. No manifest change is needed: `records` is not gated behind the `client` feature, so the encoder and all four compression codecs are already available.
+- Negotiate `Produce` v3..v13. **v13 replaces `name` with `topic_id: Uuid`** (`produce_request.rs:371`, gated `version >= 13`) — the same transition `Fetch` made at v13. Reuse `kafka-read`'s topic-id resolution rather than growing a second copy.
+- Murmur2 partitioner, byte-identical to the Java client. Verify by producing the same key from both and comparing the assigned partition — not by reading the algorithm twice and believing yourself.
+- Null-key records use the **sticky partitioner** (KIP-480), not round-robin. Round-robin per record produces a one-record batch per partition and destroys batching throughput — a performance bug that presents as a correctness success.
+
+**`acks=0` is a request with no response.** The broker sends nothing back at all. `Connection::send` correlates on a `HashMap<i32, oneshot::Sender<_>>` (M2), so an `acks=0` produce leaves an entry that never resolves and *every successful write reports a timeout*. Either refuse `acks=0` at the config boundary or give the connection an explicit fire-and-forget path that drops the correlation entry at send time. **Decide before writing the encoder and write down which** — discovering this from a hanging test is the expensive path.
+
+**Acceptance**
+```sh
+cargo test -p kafka-produce --test round_trip -- --ignored
+# produce one record with key + value + headers to an explicit partition, read it back
+# through kafka-read, assert key, value, headers and timestamp survive exactly.
+# Plus: a tombstone (null value) round trips as null, not as an empty Bytes.
+# Plus: murmur2 — 1000 distinct keys, assert every partition assignment matches the
+# one rdkafka picks for the same key (drive it from the interop crate).
+```
+
+---
+
+## M13 — The accumulator
+
+- Per-partition batching with `linger` and `batch.size`. Per-record delivery futures resolved when the batch's response lands.
+- Compression on write, all four codecs.
+- `flush()`, and a cancel-safe drop: rule 5 applies to the send future, and dropping one must not desynchronise the accumulator or strand records that were already batched.
+- Bounded buffer memory with backpressure. An unbounded accumulator is an OOM waiting for a slow broker.
+- A batch exceeding `max.message.bytes` fails **its own records only** (`MESSAGE_TOO_LARGE`), never the producer. This is rule 4 in the write direction: 500 records where 1 is oversized delivers 499.
+
+**Acceptance**
+```sh
+cargo test -p kafka-produce --test accumulator -- --ignored
+# produce 50k records across 6 partitions, assert exact count on read-back AND that the
+# broker saw fewer than 500 produce requests (via the M2 byte/request counters) —
+# proving batching actually happened rather than one request per record.
+# Plus: one oversized record among 1000, assert 999 delivery futures resolve Ok and
+# exactly one resolves Err(RecordTooLarge).
+# Plus: round trip through each of the four codecs, decoded by kafka-read.
+```
+
+---
+
+## M14 — Idempotence
+
+- `InitProducerId`, per-partition sequence numbers, epoch handling.
+- Recovery from `OUT_OF_ORDER_SEQUENCE_NUMBER`, `UNKNOWN_PRODUCER_ID`, `DUPLICATE_SEQUENCE_NUMBER`. A producer id can expire on an idle partition; that is a recoverable condition, not a fatal one.
+- Retry must preserve per-partition order: a failed batch is re-sent before any later batch for the same partition, or idempotence buys nothing.
+
+**`max_in_flight` defaults to 5 and that is only safe once this milestone lands.** `ConnectionConfig` sets it in `config.rs:56`, matching Kafka's own default. It is harmless today because nothing in the codebase retries a write. The moment M13 retries a batch, 5 in flight reorders records silently — no error, no log line, just a topic whose order is wrong. **A non-idempotent producer must clamp its connections to 1 in flight; an idempotent one may use 5 and no more**, because the broker only tracks five in-flight sequence windows per partition. Wire this to the idempotence setting rather than leaving it to the caller.
+
+**Acceptance**
+```sh
+cargo test -p kafka-produce --test idempotence -- --ignored
+# 3-broker cluster: produce 20k records to one partition while killing and restarting
+# the leader mid-stream. Read back and assert exactly 20k records in exactly the
+# produced order — no duplicates, no gaps, no reordering.
+# Plus: assert a non-idempotent producer's connections report max_in_flight == 1.
+```
+
+---
+
+## M15 — Transactions
+
+- `InitProducerId` with a `transactional_id`, `AddPartitionsToTxn`, `AddOffsetsToTxn`, `EndTxn`, `TxnOffsetCommit`. All present upstream at v5.
+- Fencing: a second producer with the same transactional id bumps the epoch and the first must surface `PRODUCER_FENCED` as a terminal error, not retry into it forever.
+- `AddPartitionsToTxn` must precede the first produce to each partition in a transaction. Missing it yields an error that reads like a permissions problem.
+
+**This is where `kafka-read`'s `Visibility::CommittedOnly` finally gets exercised end-to-end.** M9 built the aborted-transaction filter and the `AbortedTransactions` handling, but nothing in the workspace has ever *produced* an aborted transaction to test it against — the filter is, as of today, asserted only against data that never exercises it.
+
+**Acceptance**
+```sh
+cargo test -p kafka-produce --test transactions -- --ignored
+# commit one transaction of 100 records, abort another of 100 to the same partition.
+# Assert Visibility::CommittedOnly yields exactly the 100 committed, and
+# Visibility::All yields all 200. Then fence the producer with a second instance
+# sharing its transactional id and assert PRODUCER_FENCED is terminal.
+```
+
+---
+
+## M16 — Fetch sessions and the streaming fetcher
+
+The read-path reshape. **Prerequisite for both M17 and M18** — do it before either.
+
+- `fetch.rs:104-105` pins `session_id = 0, session_epoch = -1`. That is Java's `FetchMetadata.LEGACY` sentinel — no session at all — which is exactly right for a one-shot UI scan and exactly wrong for a consumer. Move to `(0, 0)` to open a session, then `(session_id, epoch + 1)` per KIP-227, with `forgotten_topics_data` when the assignment shrinks. Keep the legacy path for `scan`/`tail`; they are still one-shot and should stay that way.
+- `fetch()` currently takes one topic and one topic id per call. A consumer holding partitions across several topics on the same leader must send **one request per broker** covering all of them, or the fetch count scales with topic count instead of broker count.
+- Unbounded stream with `seek` / `pause` / `resume`, as against `scan`'s bounded, progress-reporting shape. Both survive; they are different APIs over the same fetcher.
+- `OffsetCommit` and `OffsetFetch` for a non-member (manual assignment). `kafka-admin/offsets.rs` today has `list_offsets` and `topic_offset_range` and **no commit path at all**.
+- `FETCH_SESSION_ID_NOT_FOUND` and `INVALID_FETCH_SESSION_EPOCH` mean the broker dropped the session — fall back to a full fetch and rebuild it. Never surface them to the caller; a broker restart must not kill a consumer.
+
+**Acceptance**
+```sh
+cargo test -p kafka-consumer --test fetcher -- --ignored
+# manually assign 12 partitions across 2 topics on a 3-broker cluster, stream 100k
+# records, assert exact count and per-partition order.
+# Plus: assert steady-state fetch requests carry an empty topics array — that is what
+# proves the incremental session is live rather than silently re-sending everything.
+# Plus: restart a broker mid-stream, assert the session rebuilds and no records are lost.
+```
+
+---
+
+## M17 — Consumer groups: KIP-848
+
+Do this before the classic protocol. The broker computes the assignment, so **there is no assignor payload to make byte-compatible with Java's** — which is the single largest source of subtle incompatibility in M18. On a 4.x cluster this is also the default protocol.
+
+- `ConsumerGroupHeartbeat` (the crate ships v0..v1). One RPC replaces JoinGroup/SyncGroup/Heartbeat entirely.
+- `member_epoch` sentinels: `0` to join, `-1` to leave, `-2` for a static member leaving. These are not interchangeable and using `-1` for a static member drops its assignment instead of parking it.
+- Reconciliation is client-side and ordered: **revoke, then acknowledge the new assignment.** Acking an assignment whose predecessor you have not yet revoked means two consumers own the same partition simultaneously — duplicate delivery with no error anywhere.
+- The heartbeat interval comes from the response, not from config. Treat the response value as authoritative on every beat.
+- Auto-commit, and rebalance callbacks that fire before revocation so a caller can flush.
+
+**Acceptance**
+```sh
+cargo test -p kafka-consumer --test group_848 -- --ignored
+# 3 consumers join one group on a 12-partition topic. Assert the union of assignments
+# is all 12 partitions and the intersection is empty — full coverage, no overlap.
+# Kill one consumer, assert reassignment completes within the session timeout and that
+# a continuously-produced stream shows no gap and no double-delivery across the rebalance.
+```
+
+---
+
+## M18 — Consumer groups: classic
+
+Only if you need brokers older than 4.0, or mixed groups with Java clients pinned to `group.protocol=classic`. It is strictly more work than M17 for strictly older clusters — if that is not a requirement, skip it and say so in the README rather than half-building it.
+
+- `JoinGroup` v9, `SyncGroup` v5, `Heartbeat` v4, `LeaveGroup`.
+- **The assignor payload must be byte-identical to Java's**, because the group leader — which may be a Java client — decodes what we encode. Good news, and check this before hand-rolling anything: `kafka-protocol` ships `ConsumerProtocolSubscription` and `ConsumerProtocolAssignment` as real schemas. Use them.
+- Range, round-robin, sticky, cooperative-sticky. Cooperative needs two rebalance rounds and a client that returns partitions it no longer owns *before* claiming new ones.
+- `REBALANCE_IN_PROGRESS` arriving mid-poll is normal, not an error.
+- Static membership via `group.instance.id` (KIP-345) — a restart inside the session timeout must not trigger a rebalance.
+
+**Acceptance**
+```sh
+cargo test -p kafka-consumer --test group_classic -- --ignored
+# mixed group: one kafka-consumer and one kafka-console-consumer.sh (via testkit's exec
+# helper) in the same classic group on a 12-partition topic. Assert both hold disjoint
+# partitions and that together they cover all 12.
+# That is the only test that actually proves assignor byte-compatibility; a Rust-only
+# group will pass happily against a wrong-but-self-consistent encoding.
+```
+
+---
+
+## M19 — Interop and hardening for the write and consume paths
+
+- Extend `crates/interop`: produce with `kafka-produce` → consume with `rdkafka`, and the reverse. This is where murmur2, snappy xerial framing and header encoding get checked against a genuinely different implementation, same argument as M11.
+- Fuzz the encoder against the decoder: `RecordBatchEncoder` output through `kafka-read`'s tolerant decoder, asserting round-trip equality and no panic.
+- Leak test: 1000 producer and consumer lifecycles cancelled at random points, assert connection count and RSS return to baseline. Rule 5 across two new crates.
+- **The read-only gate now has four more keys to hold.** `Produce`, `OffsetCommit`, `InitProducerId` and `AddPartitionsToTxn` are all classified mutating already and all newly reachable. Assert a read-only client refuses each before opening a socket — the M8 test drives from `ApiKey::iter`, so it should cover them automatically, which is the point of having written it that way.
+
+**Acceptance**
+```sh
+cargo fuzz run record_batch_roundtrip -- -max_total_time=300
+cargo test -p kafka-consumer --test leak -- --ignored
+cargo xtask interop
+```
 
 ---
 
 ## Working notes for the agent
 
 - **One milestone per session.** `/clear` between them. These milestones are sized so context stays clean.
-- **Plan mode first** on M4, M7, M9, and M10 — the ones with real design content. The rest are mechanical enough to implement directly.
+- **Plan mode first** on M4, M7, M9, and M10 — the ones with real design content. The rest are mechanical enough to implement directly. In phase 2 the same applies to M13, M14, M16 and M17; M12 is mechanical *except* for the `acks=0` decision, which is a design call and should be settled in plan mode before any encoder code exists.
 - **Run the acceptance command before reporting done.** A green `cargo build` is not evidence.
 - **When the protocol is ambiguous, read the message schema JSON**, not a blog post and not your recollection. Linked in CLAUDE.md, pinned to the broker version we test against. Check the crate's `CHANGELOG.md` too — the schemas it ships are a Kafka release behind the broker, and that gap is load-bearing.
 - **If something can't be done cleanly, stop and say so.** A `todo!()` that looks like progress costs more than an honest blocker. "The crate can't encode this version" is a legitimate answer; a hand-rolled schema is not.
