@@ -10,18 +10,49 @@ on:
 permissions:
   contents: read
 
+# Self-hosted runners: `arc-runner-set-lib` is an ARC scale set on the
+# kaas-rs k3s cluster (see Woestebanaan/k3s-cluster, apps/arc-runners).
+#
+# Jobs that can be triggered by a *fork* pull request must NOT land there.
+# The runner pods are privileged DinD with a hostPath mount onto the node,
+# and this repo is public — a fork PR is arbitrary code from a stranger.
+# So `rust` and `docs`, the two jobs wired to `pull_request`, pick their
+# runner per event: forks go to GitHub-hosted, everything else to ARC.
+# The remaining jobs are `workflow_dispatch`-only and can't be reached by
+# a fork at all, so they name the scale set directly.
+#
+# `github.event.pull_request` is null for push/dispatch, so the expression
+# falls through to ARC for those.
+
 jobs:
   # fmt + clippy + unit tests. No Docker, no broker — this is the gate
   # that runs on every push.
-  #
-  # Runs on a GitHub-hosted runner rather than the kaas-rs `arc-runner-set`
-  # so it is green from the first push; the ARC runner image is minimal
-  # and has no C toolchain, which is what kept kaas's CI red for a while.
-  # Switch the `runs-on` below once the runner set is confirmed available
-  # to this repo and a `cc` install step is added.
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'arc-runner-set-lib' }}
     steps:
+      # The ARC runner image (ghcr.io/actions/actions-runner) is minimal:
+      # no cc, gcc, ld, make or pkg-config. `ring` and other build-script
+      # crates need a working C toolchain and linker. Verified absent by
+      # probing the image directly; curl/unzip/tar/git ARE present, and
+      # uid 1001 is in group 27(sudo) with passwordless sudo.
+      # No-ops on ubuntu-latest, which already has cc.
+      - name: Install C toolchain
+        run: |
+          if command -v cc >/dev/null 2>&1; then
+            echo "cc already present: $(command -v cc)"
+            exit 0
+          fi
+          if [ "$(id -u)" -eq 0 ]; then SUDO=""
+          elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"
+          else
+            echo "::error::no cc, not root, and no sudo — cannot build native deps"
+            exit 1
+          fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
+            gcc libc6-dev pkg-config ca-certificates
+          echo "cc → $(command -v cc || echo MISSING)"
+
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
@@ -44,12 +75,46 @@ jobs:
   # testcontainers, so this is minutes rather than seconds — manual for
   # now. Promote it to `push` once M0 lands and the runtime is known.
   #
-  # ubuntu-latest ships a running Docker daemon, so testcontainers works
-  # here with no extra setup.
+  # Docker comes from the ARC DinD sidecar, not the host: the pod sets
+  # DOCKER_HOST=unix:///var/run/docker.sock and testcontainers picks it up
+  # with no extra config. The sidecar is not ready the instant the runner
+  # container starts, hence the wait below.
   integration:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set-lib
     steps:
+      - name: Wait for Docker daemon (DinD sidecar)
+        run: |
+          echo "DOCKER_HOST=${DOCKER_HOST:-<unset>}"
+          for i in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then
+              echo "docker daemon ready after ${i}s"
+              docker version
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::docker daemon did not become ready"
+          docker info || true
+          exit 1
+
+      - name: Install C toolchain
+        run: |
+          if command -v cc >/dev/null 2>&1; then
+            echo "cc already present: $(command -v cc)"
+            exit 0
+          fi
+          if [ "$(id -u)" -eq 0 ]; then SUDO=""
+          elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"
+          else
+            echo "::error::no cc, not root, and no sudo — cannot build native deps"
+            exit 1
+          fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
+            gcc libc6-dev pkg-config ca-certificates
+          echo "cc → $(command -v cc || echo MISSING)"
+
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
@@ -68,8 +133,27 @@ jobs:
   # this is the executable form of that claim.
   fuzz:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set-lib
     steps:
+      # `cargo install cargo-fuzz` compiles from source, and libFuzzer needs
+      # a linker — both require the C toolchain the ARC image lacks.
+      - name: Install C toolchain
+        run: |
+          if command -v cc >/dev/null 2>&1; then
+            echo "cc already present: $(command -v cc)"
+            exit 0
+          fi
+          if [ "$(id -u)" -eq 0 ]; then SUDO=""
+          elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"
+          else
+            echo "::error::no cc, not root, and no sudo — cannot build native deps"
+            exit 1
+          fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
+            gcc libc6-dev pkg-config ca-certificates
+          echo "cc → $(command -v cc || echo MISSING)"
+
       - uses: actions/checkout@v6
 
       - name: Install nightly
@@ -92,8 +176,11 @@ jobs:
   # so 0.16.2 is the newest mermaid preprocessor that works here. Bump all
   # three together when moving to mdbook 0.5. Keep these pins in lockstep
   # with docs-publish.yml.
+  #
+  # No toolchain step: the three tools are pinned release binaries, and the
+  # ARC image already has curl, unzip and tar (verified by probing it).
   docs:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'arc-runner-set-lib' }}
     env:
       MDBOOK_VERSION: v0.4.52
       MDBOOK_MERMAID_VERSION: v0.16.2
@@ -137,8 +224,23 @@ jobs:
   # build librdkafka, which is why it is neither in the workspace nor in `ci`.
   interop:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set-lib
     steps:
+      - name: Wait for Docker daemon (DinD sidecar)
+        run: |
+          echo "DOCKER_HOST=${DOCKER_HOST:-<unset>}"
+          for i in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then
+              echo "docker daemon ready after ${i}s"
+              docker version
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::docker daemon did not become ready"
+          docker info || true
+          exit 1
+
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
@@ -146,8 +248,22 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install cmake
-        run: sudo apt-get update && sudo apt-get install -y cmake
+      # librdkafka needs cmake *and* a C toolchain; the ARC image has
+      # neither. `sudo` exists there (uid 1001 is in group 27), but guard
+      # anyway so the step is portable back to a root or hosted runner.
+      - name: Install cmake + C toolchain
+        run: |
+          if [ "$(id -u)" -eq 0 ]; then SUDO=""
+          elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"
+          else
+            echo "::error::not root and no sudo — cannot install cmake"
+            exit 1
+          fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
+            cmake gcc g++ libc6-dev pkg-config ca-certificates
+          echo "cc → $(command -v cc || echo MISSING)"
+          echo "cmake → $(command -v cmake || echo MISSING)"
 
       - name: Pre-pull the broker image
         run: docker pull apache/kafka:4.3.1
