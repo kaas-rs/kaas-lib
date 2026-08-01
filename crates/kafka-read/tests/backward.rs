@@ -136,7 +136,14 @@ async fn a_compacted_topic_with_offset_gaps_terminates_and_counts_correctly() {
             .with_property("log.cleaner.enable", "true")
             .with_property("log.cleaner.backoff.ms", "1000")
             .with_property("log.cleaner.min.cleanable.ratio", "0.01")
-            .with_property("log.segment.bytes", "16384")
+            // 1 MiB is the *minimum* Kafka accepts for the broker-level
+            // setting; 16384 makes the broker refuse to start outright:
+            //   Invalid value 16384 for configuration log.segment.bytes:
+            //   Value must be at least 1048576
+            // The topic-level `segment.bytes` below has no such floor, and it
+            // is the one that actually drives compaction for this topic — so
+            // the small-segment intent survives.
+            .with_property("log.segment.bytes", "1048576")
             .with_property("log.roll.ms", "1000"),
     )
     .await;
@@ -256,8 +263,17 @@ async fn a_multi_partition_tail_spreads_the_limit() {
             vec![
                 "bash".to_owned(),
                 "-c".to_owned(),
+                // Round-robin, not the default sticky partitioner. Sticky
+                // fills one partition per batch, which is right for
+                // throughput and useless here: this test is about the tail
+                // limit being *spread* across partitions, so the fixture has
+                // to actually spread. With sticky, 4000 records landed on two
+                // partitions and the test failed as "200 records is too few",
+                // blaming the reader for the producer's batching.
                 "seq 1 4000 | /opt/kafka/bin/kafka-console-producer.sh \
-                 --bootstrap-server localhost:9093 --topic spread"
+                 --bootstrap-server localhost:9093 --topic spread \
+                 --producer-property \
+                 partitioner.class=org.apache.kafka.clients.producer.RoundRobinPartitioner"
                     .to_owned(),
             ],
         )
