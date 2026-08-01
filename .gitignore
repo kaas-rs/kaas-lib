@@ -1,5 +1,8 @@
 /target
 **/*.rs.bk
+
+# mdbook build output
+docs/book/
 fuzz/target
 fuzz/corpus
 fuzz/artifacts

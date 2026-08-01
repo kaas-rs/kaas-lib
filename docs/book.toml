@@ -1,0 +1,33 @@
+[book]
+title = "kaas-lib — a Kafka 4.x client layer in Rust"
+authors = ["Benjamin Smeding"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "rust"
+git-repository-url = "https://github.com/kaas-rs/kaas-lib"
+edit-url-template = "https://github.com/kaas-rs/kaas-lib/edit/main/docs/{path}"
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[output.html.search]
+enable = true
+
+# Every Rust sample here names workspace crates, which the playground cannot
+# resolve — a Run button on them would only ever produce a compile error.
+[output.html.playground]
+runnable = false
+
+[output.html.fold]
+enable = true
+
+# Enabling any renderer turns off the html default, so linkcheck is a
+# backend rather than a preprocessor: `mdbook build` runs both and fails
+# the build on a broken intra-book link.
+[output.linkcheck]
+follow-web-links = false
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

@@ -2,7 +2,7 @@
 name        = "xtask"
 version     = "0.0.0"
 publish     = false
-description = "Repo-wide chores: ci, integration, fmt-check."
+description = "Repo-wide chores: ci, integration, fmt-check, fuzz, interop, docs."
 
 edition.workspace      = true
 license.workspace      = true

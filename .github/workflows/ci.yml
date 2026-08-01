@@ -83,6 +83,56 @@ jobs:
       - name: Fuzz the record batch decoder
         run: cargo fuzz run --fuzz-dir fuzz record_batch -- -max_total_time=300
 
+  # The documentation book. Runs on every push: a broken cross-reference is
+  # cheap to catch here and expensive to notice as a 404 after publish.
+  #
+  # mdbook stays on the 0.4.x line. mdbook-linkcheck 0.7.7 and
+  # mdbook-mermaid >= 0.17.0 target different mdbook major lines — 0.17.0 is
+  # built against mdbook 0.5's preprocessor protocol and fails against 0.4 —
+  # so 0.16.2 is the newest mermaid preprocessor that works here. Bump all
+  # three together when moving to mdbook 0.5. Keep these pins in lockstep
+  # with docs-publish.yml.
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      MDBOOK_VERSION: v0.4.52
+      MDBOOK_MERMAID_VERSION: v0.16.2
+      MDBOOK_LINKCHECK_VERSION: v0.7.7
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install mdbook + mdbook-mermaid + mdbook-linkcheck (pinned)
+        # Pinned release binaries via curl rather than `cargo install`:
+        # minutes faster on a cold runner, and the versions are exact.
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          curl -sSL "https://github.com/rust-lang/mdBook/releases/download/${MDBOOK_VERSION}/mdbook-${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          curl -sSL "https://github.com/badboy/mdbook-mermaid/releases/download/${MDBOOK_MERMAID_VERSION}/mdbook-mermaid-${MDBOOK_MERMAID_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin"
+          curl -sSL -o /tmp/mdbook-linkcheck.zip \
+            "https://github.com/Michael-F-Bryan/mdbook-linkcheck/releases/download/${MDBOOK_LINKCHECK_VERSION}/mdbook-linkcheck.x86_64-unknown-linux-gnu.zip"
+          unzip -o -d "$HOME/.local/bin" /tmp/mdbook-linkcheck.zip mdbook-linkcheck
+          chmod +x "$HOME/.local/bin/mdbook-linkcheck"
+
+      - name: mdbook build (html + linkcheck backends)
+        run: mdbook build docs
+
+      - name: Every crates/ path cited in the book must exist
+        # The book cites module paths heavily. Without this a refactor that
+        # moves a file leaves a citation that is confidently wrong, which is
+        # worse than no citation at all.
+        run: |
+          missing=0
+          for path in $(grep -rhoE '\bcrates/[A-Za-z0-9_./-]+\.rs\b' docs/src | sort -u); do
+            if [ ! -e "$path" ]; then
+              echo "::error::docs cite a path that does not exist: $path"
+              missing=1
+            fi
+          done
+          exit $missing
+
   # Cross-client interop against rdkafka. Needs cmake and a C toolchain to
   # build librdkafka, which is why it is neither in the workspace nor in `ci`.
   interop:

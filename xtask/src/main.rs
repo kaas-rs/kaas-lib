@@ -1,4 +1,4 @@
-//! Repo-wide chores: `ci`, `integration`, `fmt-check`.
+//! Repo-wide chores: `ci`, `integration`, `fmt-check`, `fuzz`, `interop`, `docs`.
 //!
 //! `ci` is the gate CI runs and the one to run locally before pushing —
 //! it is deliberately the *unit* gate and needs no Docker daemon, so it
@@ -23,8 +23,11 @@ fn main() -> Result<()> {
         "fmt-check" => run("cargo", &["fmt", "--check"]),
         "fuzz" => fuzz(),
         "interop" => interop(),
+        "docs" => docs(),
         other => {
-            bail!("unknown xtask: {other:?}. try: ci | integration | fmt-check | fuzz | interop")
+            bail!(
+                "unknown xtask: {other:?}. try: ci | integration | fmt-check | fuzz | interop | docs"
+            )
         }
     }
 }
@@ -102,6 +105,20 @@ fn interop() -> Result<()> {
             "--nocapture",
         ],
     )
+}
+
+/// Build the documentation book.
+///
+/// Needs `mdbook`, `mdbook-mermaid` and `mdbook-linkcheck` on `PATH`; the
+/// `docs` job in `.github/workflows/ci.yml` pins all three. `mdbook build`
+/// runs the linkcheck backend too, so a broken cross-reference fails here
+/// rather than shipping as a 404.
+fn docs() -> Result<()> {
+    if env::args().nth(2).as_deref() == Some("--serve") {
+        run("mdbook", &["serve", "docs"])
+    } else {
+        run("mdbook", &["build", "docs"])
+    }
 }
 
 fn run(program: &str, args: &[&str]) -> Result<()> {
