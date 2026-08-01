@@ -44,11 +44,22 @@ mod header {
     pub(super) const LAST_OFFSET_DELTA: usize = 23;
     /// `producerId`, i64.
     pub(super) const PRODUCER_ID: usize = 43;
+    /// `recordsCount`, i32 — the last field of the header.
+    pub(super) const RECORD_COUNT: usize = 57;
     /// Bytes before `batchLength`'s coverage begins.
     pub(super) const PREFIX_LEN: usize = 12;
     /// The smallest complete v2 batch header.
     pub(super) const MIN_LEN: usize = 61;
 }
+
+/// The fewest bytes a v2 record can possibly encode to.
+///
+/// A record is a length varint, a fixed attributes byte, then timestampDelta,
+/// offsetDelta, keyLength, valueLen and headerCount — each a varint costing at
+/// least one byte. Seven. Six is used deliberately, one below the true floor,
+/// so that no batch a real producer writes is ever rejected by the ceiling
+/// this feeds.
+const MIN_RECORD_BYTES: usize = 6;
 
 /// Attribute bit 5: this batch is a transaction marker, not user data.
 const CONTROL_FLAG: i16 = 0x20;
@@ -74,6 +85,9 @@ pub(crate) struct BatchHeader {
     pub(crate) producer_id: i64,
     /// The codec the records are compressed with.
     pub(crate) compression: Compression,
+    /// How many records the header claims. Not to be trusted — see
+    /// [`max_plausible_records`].
+    pub(crate) record_count: usize,
 }
 
 /// Why a batch could not even be looked at.
@@ -116,8 +130,11 @@ pub(crate) fn peek_header(buf: &[u8]) -> Result<BatchHeader, HeaderProblem> {
     let last_offset_delta =
         read_i32(buf, header::LAST_OFFSET_DELTA).ok_or(HeaderProblem::Truncated)?;
     let producer_id = read_i64(buf, header::PRODUCER_ID).ok_or(HeaderProblem::Truncated)?;
+    let record_count = read_i32(buf, header::RECORD_COUNT).ok_or(HeaderProblem::Truncated)?;
+    let record_count = usize::try_from(record_count).map_err(|_| HeaderProblem::Malformed)?;
 
     Ok(BatchHeader {
+        record_count,
         base_offset,
         last_offset: base_offset.saturating_add(i64::from(last_offset_delta)),
         total_len,
@@ -267,6 +284,24 @@ pub(crate) fn decode_partition(
             continue;
         }
 
+        // Before handing the batch over, refuse a record count the batch
+        // cannot possibly hold. `RecordBatchDecoder` reserves the whole
+        // `Vec<Record>` from this number before parsing a single record, so a
+        // count nothing else validates is an allocation primitive.
+        let ceiling = max_plausible_records(&header, options);
+        if header.record_count > ceiling {
+            out.outcomes.push(RecordOutcome::Malformed {
+                offset: header.base_offset,
+                last_offset: Some(header.last_offset),
+                raw: batch,
+                reason: DecodeError::new(format!(
+                    "batch claims {} records; {} bytes can hold at most {ceiling}",
+                    header.record_count, header.total_len
+                )),
+            });
+            continue;
+        }
+
         let raw = batch.clone();
         let decoded = RecordBatchDecoder::decode_with_custom_compression(
             &mut batch,
@@ -300,6 +335,29 @@ pub(crate) fn decode_partition(
     }
 
     out
+}
+
+/// The most records a batch could physically contain.
+///
+/// `RecordBatchDecoder::decode` reserves a `Vec<Record>` sized from the
+/// header's `recordsCount` before it has parsed anything
+/// (`kafka-protocol-0.17.0/src/records.rs:479`), and the only check upstream
+/// applies to that number is that it is not negative. So a 99-byte batch
+/// claiming 285 million records asks for a multi-gigabyte allocation — which
+/// is how the M11 fuzz target found this, as an out-of-memory rather than a
+/// panic, and which a corrupt segment or a hostile broker could aim at a
+/// backend serving other clusters. That is rule 2.
+///
+/// The bound is what the batch could actually hold: uncompressed, its own
+/// payload; compressed, the decompression ceiling `DecodeOptions` already
+/// promises. Either way the demand becomes proportional to bytes we have
+/// already accepted, rather than to a number the sender chose freely.
+fn max_plausible_records(header: &BatchHeader, options: &DecodeOptions) -> usize {
+    let payload = match header.compression {
+        Compression::None => header.total_len.saturating_sub(header::MIN_LEN),
+        _ => options.max_decompressed_bytes,
+    };
+    payload / MIN_RECORD_BYTES
 }
 
 fn convert(topic: &str, partition: i32, record: kafka_protocol::records::Record) -> Record {
@@ -465,6 +523,65 @@ mod tests {
         assert_eq!(decoded.outcomes[0].offset(), 0);
         assert_eq!(decoded.outcomes[2].offset(), 2);
         assert!(!decoded.truncated_tail);
+    }
+
+    /// The M11 fuzz target's first real finding, pinned as a unit test.
+    ///
+    /// libFuzzer reported it as an out-of-memory rather than a panic: a batch
+    /// whose 38-byte payload claims 285 million records makes the upstream
+    /// decoder reserve a `Vec<Record>` of that length before parsing anything.
+    /// If this regresses, the test does not fail — the machine runs out of
+    /// memory — so the assertion is that the batch is refused *by its header*,
+    /// cheaply, before the decoder is ever handed it.
+    #[test]
+    fn an_absurd_record_count_is_refused_before_it_becomes_an_allocation() {
+        let honest = encode(&[sample_record(0, "payload")], Compression::None);
+        let mut buf = BytesMut::from(&honest[..]);
+        let absurd = 285_212_423i32.to_be_bytes();
+        if let Some(slot) = buf.get_mut(header::RECORD_COUNT..header::RECORD_COUNT + 4) {
+            slot.copy_from_slice(&absurd);
+        }
+
+        let header = peek_header(&buf).expect("the header itself is still well formed");
+        assert_eq!(header.record_count, 285_212_423);
+        assert!(
+            header.record_count > max_plausible_records(&header, &DecodeOptions::default()),
+            "the ceiling must reject a count this batch cannot hold"
+        );
+
+        let decoded = decode_partition("orders", 0, buf.freeze(), &[], &DecodeOptions::default());
+        assert_eq!(decoded.outcomes.len(), 1);
+        assert!(decoded.outcomes[0].is_malformed(), "{decoded:?}");
+    }
+
+    /// The other half: the ceiling must not reject batches real producers write.
+    #[test]
+    fn an_honest_record_count_is_within_the_ceiling() {
+        for count in [1usize, 2, 50, 500] {
+            let records: Vec<_> = (0..count)
+                .map(|i| sample_record(i64::try_from(i).unwrap_or(0), "payload"))
+                .collect();
+            for compression in [
+                Compression::None,
+                Compression::Gzip,
+                Compression::Snappy,
+                Compression::Lz4,
+                Compression::Zstd,
+            ] {
+                let encoded = encode(&records, compression);
+                let header = peek_header(&encoded).expect("header");
+                assert_eq!(header.record_count, count, "{compression:?}");
+                assert!(
+                    header.record_count
+                        <= max_plausible_records(&header, &DecodeOptions::default()),
+                    "{count} records compressed with {compression:?} was rejected as implausible"
+                );
+                // And it still decodes to exactly those records.
+                let decoded =
+                    decode_partition("orders", 0, encoded, &[], &DecodeOptions::default());
+                assert_eq!(decoded.outcomes.len(), count, "{compression:?}");
+            }
+        }
     }
 
     #[test]
