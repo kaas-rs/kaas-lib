@@ -116,7 +116,12 @@ jobs:
         # Trusted Publisher configured — which would make the dry run
         # unusable at exactly the point it is most useful, before the first
         # real release.
-        if: env.HAS_TOKEN != 'true' && env.DRY_RUN != 'true'
+        # Reads `secrets` directly rather than the job-level HAS_TOKEN. The
+        # token lives in the *environment*, and job-level `env:` is a worse
+        # place to resolve that than a step condition, which is evaluated after
+        # the environment is unambiguously in scope. Getting this wrong would
+        # skip the token and try Trusted Publishing that is not configured yet.
+        if: ${{ secrets.CARGO_REGISTRY_TOKEN == '' && env.DRY_RUN != 'true' }}
         uses: rust-lang/crates-io-auth-action@v1
 
       - name: Publish
@@ -131,10 +136,18 @@ jobs:
           if [ "${DRY_RUN}" = "true" ]; then
             echo "::notice::dry run — packaging and verifying, nothing will be uploaded"
             cargo publish --workspace --dry-run
-          else
-            echo "::notice::publishing ${WORKSPACE_VERSION} to crates.io"
-            cargo publish --workspace
+            exit 0
           fi
+          # Fail here rather than letting cargo fail mid-upload with a less
+          # obvious message: a real publish with no credential means either the
+          # secret is missing or Trusted Publishing is not configured, and
+          # partway through a four-crate publish is the worst place to find out.
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::no crates.io credential — set CARGO_REGISTRY_TOKEN on the crates-io environment, or configure Trusted Publishing for every crate"
+            exit 1
+          fi
+          echo "::notice::publishing ${WORKSPACE_VERSION} to crates.io"
+          cargo publish --workspace
 
       - name: Summary
         if: always()
