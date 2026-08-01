@@ -25,6 +25,28 @@ use testkit::Cluster as _;
 /// How long a config change may take to reach the broker serving describes.
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Wait until every named topic describes successfully.
+///
+/// Same propagation window as [`await_config`], one level up: the controller
+/// has committed the creation, the broker has not yet applied it, and a
+/// describe in between reports the topics as missing.
+async fn await_topics_visible(admin: &Admin, names: &[String]) {
+    let deadline = Instant::now() + CONFIG_TIMEOUT;
+    loop {
+        let described = admin.describe_topics(names.to_vec()).await.unwrap();
+        let visible = kafka_admin::oks(&described).count();
+        if visible == names.len() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "only {visible}/{} topics became visible within {CONFIG_TIMEOUT:?}",
+            names.len()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 /// Wait for a topic config to report `expected`, then return the entry.
 ///
 /// The broker acks an alter once the controller commits it, but serves
@@ -155,6 +177,14 @@ async fn describing_fifty_topics_with_two_missing_gives_48_ok_and_2_err() {
         .await
         .unwrap();
     assert_eq!(kafka_admin::oks(&created).count(), 48);
+
+    // `create_topics` is acked by the controller; the broker answers describes
+    // from applied metadata. Asking immediately can return
+    // UNKNOWN_TOPIC_OR_PARTITION for every topic that was just created — which
+    // fails this test as `left: 0, right: 48`, looking exactly like the
+    // per-item behaviour being broken rather than the topics not being there
+    // yet. Wait for them before asserting on the partial-failure property.
+    await_topics_visible(&admin, &existing).await;
 
     let mut asked = existing.clone();
     asked.push("does-not-exist-a".to_owned());
