@@ -240,14 +240,18 @@ jobs:
         # The book cites module paths heavily. Without this a refactor that
         # moves a file leaves a citation that is confidently wrong, which is
         # worse than no citation at all.
+        # Read line by line rather than word-splitting a command substitution:
+        # the regex happens to exclude spaces, so the loop worked, but it is
+        # one permissive character away from silently splitting a path in two
+        # and reporting both halves as missing.
         run: |
           missing=0
-          for path in $(grep -rhoE '\bcrates/[A-Za-z0-9_./-]+\.rs\b' docs/src | sort -u); do
+          while IFS= read -r path; do
             if [ ! -e "$path" ]; then
               echo "::error::docs cite a path that does not exist: $path"
               missing=1
             fi
-          done
+          done < <(grep -rhoE '\bcrates/[A-Za-z0-9_./-]+\.rs\b' docs/src | sort -u)
           exit $missing
 
   # Cross-client interop against rdkafka. Needs cmake and a C toolchain to
@@ -307,8 +311,10 @@ jobs:
             libcurl4-openssl-dev libssl-dev clang libclang-dev
           echo "cc → $(command -v cc || echo MISSING)"
           echo "cmake → $(command -v cmake || echo MISSING)"
-          echo "curl.h → $(ls /usr/include/*/curl/curl.h /usr/include/curl/curl.h 2>/dev/null | head -1 || echo MISSING)"
-          echo "libclang → $(ls /usr/lib/llvm-*/lib/libclang.so* 2>/dev/null | head -1 || echo MISSING)"
+          curl_h=$(find /usr/include -path '*/curl/curl.h' -print -quit 2>/dev/null)
+          echo "curl.h → ${curl_h:-MISSING}"
+          libclang=$(find /usr/lib -name 'libclang.so*' -print -quit 2>/dev/null)
+          echo "libclang → ${libclang:-MISSING}"
 
       - name: Pre-pull the broker image
         run: docker pull apache/kafka:4.3.1
