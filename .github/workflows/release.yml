@@ -116,12 +116,18 @@ jobs:
         # Trusted Publisher configured — which would make the dry run
         # unusable at exactly the point it is most useful, before the first
         # real release.
-        # Reads `secrets` directly rather than the job-level HAS_TOKEN. The
-        # token lives in the *environment*, and job-level `env:` is a worse
-        # place to resolve that than a step condition, which is evaluated after
-        # the environment is unambiguously in scope. Getting this wrong would
-        # skip the token and try Trusted Publishing that is not configured yet.
-        if: ${{ secrets.CARGO_REGISTRY_TOKEN == '' && env.DRY_RUN != 'true' }}
+        # `env.HAS_TOKEN`, not `secrets` — the `secrets` context is not
+        # available in a step-level `if:`, and using it there is not a runtime
+        # error but a *workflow validation* error: the run is created, fails in
+        # zero seconds with no jobs and no logs, and `gh run view --log-failed`
+        # reports only "log not found". Every push to main produced one of
+        # these, so the release path had never once executed. `actionlint`
+        # catches it in a second, which is why CI now runs it.
+        #
+        # The job-level `env:` above resolves this fine: `secrets` *is* an
+        # allowed context there, and environment secrets are in scope because
+        # the job declares `environment: crates-io`.
+        if: ${{ env.HAS_TOKEN != 'true' && env.DRY_RUN != 'true' }}
         uses: rust-lang/crates-io-auth-action@v1
 
       - name: Publish

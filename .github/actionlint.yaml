@@ -1,0 +1,7 @@
+# `arc-runner-set-lib` is an ARC scale set on the kaas-rs k3s cluster, not a
+# GitHub-hosted label, so actionlint cannot know it exists. Declaring it here
+# keeps the linter's runner-label check useful for genuine typos rather than
+# permanently noisy — see the runner comment at the top of ci.yml.
+self-hosted-runner:
+  labels:
+    - arc-runner-set-lib

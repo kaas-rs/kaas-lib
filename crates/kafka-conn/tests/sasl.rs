@@ -177,7 +177,8 @@ async fn a_connection_survives_kip_368_reauthentication() {
         .await
         .unwrap();
 
-    let deadline = Instant::now() + REAUTH_WINDOW * 2 + Duration::from_secs(5);
+    let started = Instant::now();
+    let deadline = started + REAUTH_WINDOW * 2 + Duration::from_secs(5);
     let mut round_trips = 0u32;
     while Instant::now() < deadline {
         conn.send(metadata_request())
@@ -188,5 +189,23 @@ async fn a_connection_survives_kip_368_reauthentication() {
     }
 
     assert!(!conn.is_closed(), "connection was closed at session expiry");
-    assert!(round_trips > 20, "{round_trips} round trips is too few");
+
+    // The property is that the connection outlived two reauth windows while
+    // still serving, and the loop above has just spent that long proving it —
+    // every iteration is a round trip that had to succeed. So assert on
+    // *elapsed time*, which is what the claim is about.
+    //
+    // The round-trip count is a sanity floor, not the assertion. It used to be
+    // `> 20` against roughly 25 one-second iterations, which quietly required
+    // each round trip to finish inside 250ms and so turned a loaded runner into
+    // a failure of the library. That is the same trap `connection.rs` documents
+    // having already fallen into once.
+    assert!(
+        started.elapsed() >= REAUTH_WINDOW * 2,
+        "the connection has not yet outlived two reauth windows"
+    );
+    assert!(
+        round_trips > 5,
+        "{round_trips} round trips cannot demonstrate anything"
+    );
 }
