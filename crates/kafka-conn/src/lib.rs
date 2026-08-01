@@ -66,7 +66,7 @@ pub use error::{Error, Result};
 pub use error_code::{ErrorCode, KNOWN_ERROR_CODES};
 pub use rpc::Rpc;
 pub use sasl::{SaslConfig, SaslMechanism};
-pub use scram::ScramHash;
+pub use scram::{ScramHash, random_salt, salted_password};
 pub use stats::{ConnectionStats, StatsSnapshot};
 pub use tls::{ClientCertificate, TlsConfig, TrustAnchors};
 pub use transport::Transport;

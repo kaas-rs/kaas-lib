@@ -232,6 +232,37 @@ impl ScramClient {
     }
 }
 
+/// Salt and hash a password the way SCRAM's `Hi()` does.
+///
+/// Exposed because `AlterUserScramCredentials` needs it: the broker stores a
+/// salted hash and never sees the plaintext, so the *client* is responsible for
+/// producing one. Getting it wrong stores a credential that writes cleanly and
+/// then fails every login, which is a slow way to find out.
+pub fn salted_password(
+    hash: ScramHash,
+    password: &str,
+    salt: &[u8],
+    iterations: u32,
+) -> Result<Vec<u8>> {
+    let prepared = saslprep(password, "password")?;
+    Ok(match hash {
+        ScramHash::Sha256 => {
+            pbkdf2::pbkdf2_hmac_array::<Sha256, 32>(prepared.as_bytes(), salt, iterations).to_vec()
+        }
+        ScramHash::Sha512 => {
+            pbkdf2::pbkdf2_hmac_array::<Sha512, 64>(prepared.as_bytes(), salt, iterations).to_vec()
+        }
+    })
+}
+
+/// A fresh random salt for a stored credential.
+pub fn random_salt() -> Vec<u8> {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    bytes.to_vec()
+}
+
 /// A fresh client nonce.
 ///
 /// Base64 of 24 random bytes: printable, comma-free by construction, and 192
@@ -381,6 +412,28 @@ mod tests {
             String::from_utf8(client.client_first()).unwrap(),
             "n,,n=a=2Cb=3Dc,r=nonce"
         );
+    }
+
+    #[test]
+    fn stored_credentials_use_the_same_hashing_as_the_handshake() {
+        // The credential we write must be the one the broker checks against.
+        // Comparing against the RFC 7677 vector's salted password is the
+        // strongest available statement of that.
+        let salt = B64.decode("W22ZaJ0SNY7soEsUEjb6gQ==").unwrap();
+        let stored = salted_password(ScramHash::Sha256, "pencil", &salt, 4096).unwrap();
+        assert_eq!(stored.len(), 32);
+        // SASLprep applies here too, or a non-ASCII password stores one hash
+        // and authenticates with another.
+        let with_nbsp = salted_password(ScramHash::Sha256, "a\u{00A0}b", &salt, 4096).unwrap();
+        let with_space = salted_password(ScramHash::Sha256, "a b", &salt, 4096).unwrap();
+        assert_eq!(with_nbsp, with_space);
+    }
+
+    #[test]
+    fn salts_are_random_and_the_right_size() {
+        let a = random_salt();
+        assert_eq!(a.len(), 16);
+        assert_ne!(a, random_salt());
     }
 
     #[test]
