@@ -137,22 +137,31 @@ jobs:
     steps:
       # `cargo install cargo-fuzz` compiles from source, and libFuzzer needs
       # a linker — both require the C toolchain the ARC image lacks.
-      - name: Install C toolchain
+      #
+      # g++ as well as gcc, and the guard tests for *both*. libFuzzer is C++:
+      # `cargo fuzz build` drives cc-rs over libfuzzer/*.cpp, which fails as
+      #   error occurred in cc-rs: failed to find tool "c++"
+      # long after the Rust half has compiled cleanly. Guarding on `cc` alone
+      # let a runner with a C compiler and no C++ one skip this step entirely
+      # and fail in the build script instead.
+      - name: Install C and C++ toolchain
         run: |
-          if command -v cc >/dev/null 2>&1; then
-            echo "cc already present: $(command -v cc)"
+          if command -v cc >/dev/null 2>&1 && command -v c++ >/dev/null 2>&1; then
+            echo "cc  → $(command -v cc)"
+            echo "c++ → $(command -v c++)"
             exit 0
           fi
           if [ "$(id -u)" -eq 0 ]; then SUDO=""
           elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"
           else
-            echo "::error::no cc, not root, and no sudo — cannot build native deps"
+            echo "::error::no cc/c++, not root, and no sudo — cannot build native deps"
             exit 1
           fi
           $SUDO apt-get update
           $SUDO apt-get install -y --no-install-recommends \
-            gcc libc6-dev pkg-config ca-certificates
-          echo "cc → $(command -v cc || echo MISSING)"
+            gcc g++ libc6-dev pkg-config ca-certificates
+          echo "cc  → $(command -v cc || echo MISSING)"
+          echo "c++ → $(command -v c++ || echo MISSING)"
 
       - uses: actions/checkout@v6
 
@@ -256,7 +265,14 @@ jobs:
       # librdkafka needs cmake *and* a C toolchain; the ARC image has
       # neither. `sudo` exists there (uid 1001 is in group 27), but guard
       # anyway so the step is portable back to a root or hosted runner.
-      - name: Install cmake + C toolchain
+      #
+      # libcurl headers too. `rdkafka-sys` configures librdkafka with
+      # `-DWITH_CURL=0` and the build still stops at
+      #   rdkafka_conf.c:60:10: fatal error: curl/curl.h: No such file
+      # so the include is not fully guarded by that switch on the 2.12.1
+      # bundled source. Supplying the header is a one-package fix; chasing the
+      # right combination of upstream feature flags is not.
+      - name: Install cmake + C toolchain + libcurl headers
         run: |
           if [ "$(id -u)" -eq 0 ]; then SUDO=""
           elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"
@@ -266,9 +282,11 @@ jobs:
           fi
           $SUDO apt-get update
           $SUDO apt-get install -y --no-install-recommends \
-            cmake make gcc g++ libc6-dev pkg-config ca-certificates
+            cmake make gcc g++ libc6-dev pkg-config ca-certificates \
+            libcurl4-openssl-dev libssl-dev
           echo "cc → $(command -v cc || echo MISSING)"
           echo "cmake → $(command -v cmake || echo MISSING)"
+          echo "curl.h → $(ls /usr/include/*/curl/curl.h /usr/include/curl/curl.h 2>/dev/null | head -1 || echo MISSING)"
 
       - name: Pre-pull the broker image
         run: docker pull apache/kafka:4.3.1

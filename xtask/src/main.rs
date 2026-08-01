@@ -52,6 +52,14 @@ fn ci() -> Result<()> {
 
 /// The `#[ignore]`d integration tests. Requires a reachable Docker
 /// daemon — `testcontainers` boots `apache/kafka:4.3.1` per fixture.
+///
+/// `--no-fail-fast` because these are acceptance criteria, not a build gate.
+/// Cargo otherwise stops at the first *test binary* that fails, and each one
+/// here is a whole milestone: a single broken assertion in `kafka-read`'s
+/// forward scan hid whether the leak suite passed at all, on a run that costs
+/// minutes and boots a broker per fixture. Finding out which milestones are
+/// red is the entire point of the command, so pay for every one of them.
+/// The exit status still reflects any failure.
 fn integration() -> Result<()> {
     run(
         "cargo",
@@ -59,6 +67,7 @@ fn integration() -> Result<()> {
             "test",
             "--workspace",
             "--all-features",
+            "--no-fail-fast",
             "--",
             "--ignored",
             "--nocapture",
@@ -100,6 +109,7 @@ fn interop() -> Result<()> {
             "test",
             "--manifest-path",
             "crates/interop/Cargo.toml",
+            "--no-fail-fast",
             "--",
             "--ignored",
             "--nocapture",
