@@ -70,13 +70,66 @@ defensive.
 Five library crates, layered strictly:
 [`kafka-conn`](code-tour/kafka-conn.md) (the wire),
 [`kafka-meta`](code-tour/kafka-meta.md) (routing and cluster state),
-[`kafka-admin`](code-tour/kafka-admin.md) (37 admin RPCs), and
+[`kafka-admin`](code-tour/kafka-admin.md) (31 admin RPCs), and
 [`kafka-read`](code-tour/kafka-read.md) (forward and backward scans), plus
 [`testkit`](code-tour/testkit.md) for container fixtures.
 
 There is **no producer and no consumer-group membership**. That is a scope
 decision, not an oversight — see [Non-goals](compat/non-goals.md) for what
-that rules out today and [Roadmap](guide/roadmap.md) for the plan to lift it.
+that rules out today.
+
+## The stretch goal: a full-fledged client
+
+The long-term aim is to drop the "admin-first" qualifier entirely and make
+this a **general-purpose Kafka client** — a real producer and real
+consumer-group membership alongside the admin surface it already has.
+
+That is a bigger claim than it sounds, so here is the honest version of where
+it stands.
+
+**Most of the foundation is already general-purpose.** Roughly 80% of the
+codebase has nothing UI-shaped about it and would not be rebuilt: version
+negotiation, the routing table, the connection pool, the error taxonomy,
+SASLprep and KIP-368 re-authentication, the tolerant record decoder and
+bounded decompression. `kafka-admin` *is* an AdminClient. These are the
+unglamorous parts that pure-Rust client attempts usually skimp on, and they
+are done and tested against a real broker.
+
+**What is missing is sharply defined**, which is what makes it tractable:
+
+- a **producer** — batching, a Java-compatible murmur2 partitioner,
+  idempotence, transactions
+- **consumer-group membership** — KIP-848 first, since server-side assignment
+  removes the byte-compatibility problem that makes the classic protocol hard
+- **incremental fetch sessions**, and a streaming fetcher to go with them
+
+[Roadmap](guide/roadmap.md) has the shape of it and the reasoning behind the
+ordering; `PLAN.md` in the repository carries the full milestone breakdown
+(M12–M19) with acceptance criteria for each.
+
+It roughly doubles the codebase, and the correctness bar is higher than
+anything in the current scope — these are the paths where a bug **loses or
+duplicates data** rather than rendering a wrong number in a UI.
+
+### Contributions are very welcome
+
+Especially on the above. The project is
+[Apache-2.0 on GitHub](https://github.com/kaas-rs/kaas-lib), and a few things
+make it a friendlier codebase to contribute to than the size suggests:
+
+- **Every milestone has an acceptance command** that must pass, so "is this
+  done?" has an answer that is not a matter of opinion.
+- **No mocked brokers.** Everything runs against `apache/kafka:4.3.1` in a
+  container via [`testkit`](code-tour/testkit.md), so a green test means it
+  works against Kafka.
+- **The traps are written down.** Part I explains *why* each decision is what
+  it is, usually by naming the specific way of getting it wrong — which is
+  the part that is hard to reconstruct from the source alone.
+
+If you are picking something up, M12 (a single produced record, round-tripped)
+and M16 (fetch sessions) are the two that unblock the most downstream work.
+Open an issue first for anything milestone-sized, so the design conversation
+happens before the code does.
 
 ## How to read this book
 
