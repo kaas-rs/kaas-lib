@@ -157,7 +157,13 @@ impl KafkaCluster {
         let mut argv = vec![
             format!("/opt/kafka/bin/{tool}"),
             "--bootstrap-server".to_owned(),
-            format!("localhost:{EXTERNAL_PORT}"),
+            // `INTERNAL_BOOTSTRAP`, not `EXTERNAL_PORT`. The doc above said
+            // "internal listener" from the start and the code used the
+            // external one anyway — which is a bootstrap the tool can connect
+            // to and then be redirected away from, to the host-mapped port
+            // that does not exist inside the container. Every `kafka_cli`
+            // caller failed as `Timed out waiting for a node assignment`.
+            crate::config::INTERNAL_BOOTSTRAP.to_owned(),
         ];
         argv.extend(args.into_iter().map(Into::into));
         crate::harness::exec_ok(self, index, argv).await
