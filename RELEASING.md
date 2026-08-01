@@ -13,7 +13,23 @@ in `[workspace.package]`. `testkit`, `livetest`, `xtask` and `interop` are
 
 ## Before the first release
 
-Two things that are only true once.
+Three things that are only true once.
+
+**0. The crates.io account needs a verified email address.** Not the token —
+the *account* the token belongs to. Without one, every upload is rejected
+with:
+
+```
+the remote server responded with an error (status 400 Bad Request):
+A verified email address is required to publish crates to crates.io.
+```
+
+Verify it at <https://crates.io/settings/profile>. Worth doing before
+anything else, because nothing local can detect it: the token authenticates
+fine, `cargo publish --dry-run` never contacts the registry, and the failure
+lands after the gates have spent minutes booting brokers — at the first
+upload of the run. Harmless when it happens (the first crate never uploads,
+so nothing is claimed and the version is still free), just slow to discover.
 
 **1. The crate names must be available.** As of the last check
 `kafka-conn`, `kafka-meta`, `kafka-admin` and `kafka-read` were all
