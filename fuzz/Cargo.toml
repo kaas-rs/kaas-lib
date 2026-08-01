@@ -1,0 +1,27 @@
+# Detached from the workspace on purpose: `cargo-fuzz` needs a nightly
+# toolchain, and pinning the workspace to nightly for one target would drag
+# every other crate along with it. PLAN.md's M11 asks for a separate CI job for
+# exactly this reason.
+[package]
+name    = "kaas-lib-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bytes         = "1.12"
+kafka-read    = { path = "../crates/kafka-read" }
+
+[[bin]]
+name              = "record_batch"
+path              = "fuzz_targets/record_batch.rs"
+test              = false
+doc               = false
+bench             = false
+
+# Empty table detaches this crate from the parent workspace.
+[workspace]

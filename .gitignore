@@ -3,3 +3,9 @@
 fuzz/target
 fuzz/corpus
 fuzz/artifacts
+
+# cargo-fuzz artifacts
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/

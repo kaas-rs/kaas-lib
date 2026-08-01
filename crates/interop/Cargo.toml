@@ -1,0 +1,24 @@
+# Deliberately excluded from the workspace.
+#
+# `rdkafka` builds librdkafka from C source and wants cmake and a C toolchain.
+# That is a fine thing to require of a job whose whole point is cross-client
+# interoperability, and a terrible thing to require of `cargo xtask ci` — CI on
+# a minimal runner image has already been red once over exactly this. So this
+# crate stands alone and is built by `cargo xtask interop`.
+[package]
+name    = "interop"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dev-dependencies]
+kafka-read  = { path = "../kafka-read" }
+kafka-admin = { path = "../kafka-admin" }
+kafka-conn  = { path = "../kafka-conn" }
+testkit     = { path = "../testkit" }
+tokio       = { version = "1.53", features = ["full"] }
+futures     = "0.3"
+bytes       = "1.12"
+rdkafka     = { version = "0.38", features = ["cmake-build"] }
+
+[workspace]

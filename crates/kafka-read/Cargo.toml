@@ -15,12 +15,17 @@ futures        = { workspace = true }
 bytes          = { workspace = true }
 thiserror      = { workspace = true }
 tracing        = { workspace = true }
+anyhow         = { workspace = true }
+flate2         = { workspace = true }
+lz4            = { workspace = true }
+zstd           = { workspace = true }
 
 [dev-dependencies]
 testkit            = { path = "../testkit" }
 kafka-admin        = { path = "../kafka-admin" }
 tokio              = { workspace = true }
 tracing-subscriber = { workspace = true }
+snap               = "1.1"
 
 [lints]
 workspace = true

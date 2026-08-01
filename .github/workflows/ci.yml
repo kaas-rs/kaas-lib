@@ -62,3 +62,45 @@ jobs:
 
       - name: cargo test (integration)
         run: cargo xtask integration
+
+  # `cargo-fuzz` needs nightly, so it gets its own job rather than pinning the
+  # whole workspace. Rule 2 says a malformed record must not kill the process;
+  # this is the executable form of that claim.
+  fuzz:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz the record batch decoder
+        run: cargo fuzz run --fuzz-dir fuzz record_batch -- -max_total_time=300
+
+  # Cross-client interop against rdkafka. Needs cmake and a C toolchain to
+  # build librdkafka, which is why it is neither in the workspace nor in `ci`.
+  interop:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (honours rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cmake
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - name: Pre-pull the broker image
+        run: docker pull apache/kafka:4.3.1
+
+      - name: cargo xtask interop
+        run: cargo xtask interop

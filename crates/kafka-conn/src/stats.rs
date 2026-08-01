@@ -29,12 +29,15 @@ impl ConnectionStats {
     }
 
     pub(crate) fn record_sent(&self, bytes: usize) {
+        metrics::counter!("kafka_bytes_sent_total").increment(u64::try_from(bytes).unwrap_or(0));
         self.bytes_sent
             .fetch_add(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
         self.requests_sent.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_received(&self, bytes: usize) {
+        metrics::counter!("kafka_bytes_received_total")
+            .increment(u64::try_from(bytes).unwrap_or(0));
         self.bytes_received
             .fetch_add(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
         self.responses_received.fetch_add(1, Ordering::Relaxed);

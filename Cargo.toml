@@ -65,6 +65,15 @@ base64     = "0.23"
 subtle     = "2.6"
 rand       = "0.9"
 
+# Bounded decompression for the read path. These are the same crates
+# `kafka-protocol` uses; we take them directly so a batch can be decompressed
+# through a `Read` we can `take()`, which is the only way to stop a hostile
+# producer's 1 KiB batch from becoming a 1 GiB allocation. Snappy is the
+# exception — see kafka-read/src/decompress.rs.
+flate2 = "1.1"
+lz4    = "1.28"
+zstd   = "0.13"
+
 # errors / observability
 thiserror          = "2.0"
 anyhow             = "1.0"

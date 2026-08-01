@@ -21,7 +21,11 @@ fn main() -> Result<()> {
         "ci" => ci(),
         "integration" => integration(),
         "fmt-check" => run("cargo", &["fmt", "--check"]),
-        other => bail!("unknown xtask: {other:?}. try: ci | integration | fmt-check"),
+        "fuzz" => fuzz(),
+        "interop" => interop(),
+        other => {
+            bail!("unknown xtask: {other:?}. try: ci | integration | fmt-check | fuzz | interop")
+        }
     }
 }
 
@@ -52,6 +56,47 @@ fn integration() -> Result<()> {
             "test",
             "--workspace",
             "--all-features",
+            "--",
+            "--ignored",
+            "--nocapture",
+        ],
+    )
+}
+
+/// The `cargo-fuzz` target from M11.
+///
+/// Its own task rather than part of `ci` because `cargo-fuzz` needs a nightly
+/// toolchain, and pinning the workspace to nightly for one target would drag
+/// every other crate along with it. Five minutes is PLAN.md's figure; a longer
+/// run belongs in a scheduled job.
+fn fuzz() -> Result<()> {
+    run(
+        "cargo",
+        &[
+            "+nightly",
+            "fuzz",
+            "run",
+            "--fuzz-dir",
+            "fuzz",
+            "record_batch",
+            "--",
+            "-max_total_time=300",
+        ],
+    )
+}
+
+/// Cross-client interoperability against `rdkafka`.
+///
+/// A separate crate outside the workspace: `rdkafka` builds librdkafka from C
+/// source and wants cmake, which is a reasonable thing to require of this job
+/// and an unreasonable thing to require of `ci`.
+fn interop() -> Result<()> {
+    run(
+        "cargo",
+        &[
+            "test",
+            "--manifest-path",
+            "crates/interop/Cargo.toml",
             "--",
             "--ignored",
             "--nocapture",

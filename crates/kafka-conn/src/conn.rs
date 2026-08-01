@@ -316,10 +316,18 @@ impl Connection {
             });
         }
 
+        let started = Instant::now();
         let received = with_deadline(deadline, api_key, rx).await;
         // The permit is released here whether we got a response, timed out, or
         // were cancelled — including when this future is simply dropped.
         drop(permit);
+
+        // Per-api histograms, fed by the same clock the span reports. Recorded
+        // for failures too: an api whose *timeouts* are slow is exactly what a
+        // latency panel needs to show.
+        metrics::histogram!("kafka_rpc_duration_seconds", "api" => api_key.name())
+            .record(started.elapsed().as_secs_f64());
+        metrics::counter!("kafka_rpc_total", "api" => api_key.name()).increment(1);
 
         match received {
             Ok(Ok(result)) => result,
