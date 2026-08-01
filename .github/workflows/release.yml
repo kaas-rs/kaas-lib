@@ -42,7 +42,94 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  # Everything that can say "no" runs here, in a job with NO environment, so
+  # it needs no approval to start.
+  #
+  # Splitting this out of `publish` is the whole point. `environment:` gates a
+  # job before its first step, so with the gates inside the published job the
+  # reviewer was asked to approve *before* any evidence existed — clicking
+  # blind on the one action in this repository that cannot be undone. Now the
+  # approval prompt appears only once the tag, the lints and the full
+  # acceptance suite against a real broker have all gone green, which is what
+  # RELEASING.md always claimed the reviewer was getting.
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (honours rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tag must match the workspace version
+        id: version
+        # Read the version cargo actually resolved rather than grepping the
+        # manifest, and assert all four crates agree — they inherit
+        # `version.workspace`, so a mismatch means someone pinned one by
+        # hand and the lockstep guarantee is already broken.
+        run: |
+          set -euo pipefail
+          versions=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[]
+                     | select(.name | test("^kafka-(conn|meta|admin|read)$"))
+                     | .version' | sort -u)
+          if [ "$(echo "$versions" | wc -l)" -ne 1 ]; then
+            echo "::error::published crates disagree on version:"; echo "$versions"
+            exit 1
+          fi
+          echo "workspace version: $versions"
+          echo "version=$versions" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$versions" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match workspace version $versions"
+              exit 1
+            fi
+            echo "tag ${GITHUB_REF_NAME} matches"
+          fi
+
+      - name: Gate — workflow lint
+        # The release path itself is a workflow, and a workflow expression
+        # error fails in zero seconds with no logs rather than loudly. This
+        # file carried one from the day it was written.
+        env:
+          ACTIONLINT_VERSION: v1.7.7
+        run: |
+          set -euo pipefail
+          curl -sSL "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION#v}_linux_amd64.tar.gz" \
+            | tar -xz -C /tmp actionlint
+          /tmp/actionlint -color
+
+      - name: Gate — fmt, clippy, unit tests
+        run: cargo xtask ci
+
+      - name: Gate — packaging, exactly as crates.io will see it
+        # Catches the stale inter-crate dependency requirement that no local
+        # build can: a path dependency always wins locally, so `kafka-meta`
+        # asking for `kafka-conn = "0.0.1"` while publishing 0.1.0 is green
+        # everywhere until the upload resolves against the registry — halfway
+        # through, with crates already live. See RELEASING.md.
+        run: cargo publish --workspace --dry-run
+
+      - name: Gate — acceptance suite against a real broker
+        # PLAN.md makes these the acceptance criteria for every milestone.
+        # Minutes rather than seconds, which is the correct trade for an
+        # irreversible upload.
+        run: |
+          docker pull apache/kafka:4.3.1
+          cargo xtask integration
+
+  # Only this job touches crates.io, and only this job carries the
+  # environment — so the approval prompt is the last thing between green
+  # gates and a permanent upload.
+  publish:
+    needs: gate
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -61,8 +148,11 @@ jobs:
       # when the caller asked not to. Comparing against both the boolean and
       # the string means the only way to reach a real upload is to ask for one.
       DRY_RUN: ${{ github.event_name != 'push' && inputs.dry_run != false && inputs.dry_run != 'false' }}
-      # Secrets are not available in `if:` on some runner versions; hoist it.
+      # Secrets are not available in `if:`; hoist it. `jobs.<id>.env` is a
+      # context where `secrets` *is* allowed, and the environment's secrets
+      # are in scope because this job declares `environment:`.
       HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+      WORKSPACE_VERSION: ${{ needs.gate.outputs.version }}
     steps:
       - uses: actions/checkout@v6
 
@@ -70,44 +160,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: Tag must match the workspace version
-        # Read the version cargo actually resolved rather than grepping the
-        # manifest, and assert all four crates agree — they inherit
-        # `version.workspace`, so a mismatch means someone pinned one by
-        # hand and the lockstep guarantee is already broken.
-        run: |
-          set -euo pipefail
-          versions=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[]
-                     | select(.name | test("^kafka-(conn|meta|admin|read)$"))
-                     | .version' | sort -u)
-          if [ "$(echo "$versions" | wc -l)" -ne 1 ]; then
-            echo "::error::published crates disagree on version:"; echo "$versions"
-            exit 1
-          fi
-          echo "workspace version: $versions"
-          echo "WORKSPACE_VERSION=$versions" >> "$GITHUB_ENV"
-
-          if [ "${{ github.event_name }}" = "push" ]; then
-            tag="${GITHUB_REF_NAME#v}"
-            if [ "$tag" != "$versions" ]; then
-              echo "::error::tag ${GITHUB_REF_NAME} does not match workspace version $versions"
-              exit 1
-            fi
-            echo "tag ${GITHUB_REF_NAME} matches"
-          fi
-
-      - name: Gate — fmt, clippy, unit tests
-        run: cargo xtask ci
-
-      - name: Gate — acceptance suite against a real broker
-        # PLAN.md makes these the acceptance criteria for every milestone.
-        # Minutes rather than seconds, which is the correct trade for an
-        # irreversible upload.
-        run: |
-          docker pull apache/kafka:4.3.1
-          cargo xtask integration
 
       - name: Authenticate — Trusted Publishing
         id: auth

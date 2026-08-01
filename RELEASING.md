@@ -38,10 +38,18 @@ no "pending publisher". So:
 
 ## Recommended: protect the environment
 
-The job targets the `crates-io` environment. Add a required reviewer under
-**Settings → Environments → crates-io** and every publish needs a human
-approval click. Given that publishing cannot be undone, this is worth the
-five seconds.
+The `publish` job targets the `crates-io` environment. Add a required
+reviewer under **Settings → Environments → crates-io** and every publish
+needs a human approval click. Given that publishing cannot be undone, this is
+worth the five seconds.
+
+The workflow is deliberately split into `gate` and `publish` so that click is
+informed. `environment:` blocks a job before its *first* step, so a single
+job carrying both the gates and the upload asks for approval before any
+evidence exists — the reviewer clicks blind on the one irreversible action in
+the repository. With the gates in their own unprotected job, the prompt only
+appears once the tag, the lints, the packaging check and the full acceptance
+suite are green.
 
 ## Cutting a release
 
@@ -98,18 +106,27 @@ uploads nothing. Only a tag push publishes for real.
 
 ## What the workflow gates on
 
-In order, all blocking:
+The `gate` job, in order, all blocking:
 
 1. **Tag matches the workspace version**, and all four crates agree on it.
-2. **`cargo xtask ci`** — fmt, clippy with `-D warnings`, unit tests.
-3. **`cargo xtask integration`** — the full acceptance suite against a real
+2. **`actionlint`** — the release path is itself a workflow, and a workflow
+   expression error fails in zero seconds with no jobs and no logs rather
+   than loudly. This file carried one for its entire existence, so every
+   push produced a red Release run and the publish path had never executed.
+3. **`cargo xtask ci`** — fmt, clippy with `-D warnings`, unit tests.
+4. **`cargo publish --workspace --dry-run`** — packaging exactly as crates.io
+   will see it. The only gate that catches a stale inter-crate version
+   requirement before the upload does, because a path dependency wins every
+   local build.
+5. **`cargo xtask integration`** — the full acceptance suite against a real
    `apache/kafka:4.3.1` broker. Minutes rather than seconds, which is the
    right trade for an irreversible upload. A green `cargo build` is not
    evidence that a release works.
 
-Then it authenticates and runs `cargo publish --workspace`, which resolves
-the order itself (`kafka-conn` → `kafka-meta` → `kafka-admin`/`kafka-read`)
-and waits for each crate to reach the index before publishing its dependents.
+Only then does `publish` start and pause for the environment's reviewer. It
+authenticates and runs `cargo publish --workspace`, which resolves the order
+itself (`kafka-conn` → `kafka-meta` → `kafka-admin`/`kafka-read`) and waits
+for each crate to reach the index before publishing its dependents.
 
 ## If something goes wrong
 
