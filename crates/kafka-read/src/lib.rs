@@ -5,6 +5,21 @@
 //! and the answer is a bounded stream that never materialises a `Vec` and never
 //! grows with the size of the topic.
 //!
+//! # Browsing, tailing, and walking backwards
+//!
+//! Three shapes, and picking the wrong one is the usual way a Kafka UI ends up
+//! reading a whole partition to render twenty rows.
+//!
+//! * [`scan`] **browses**: it plans against the log end as it stood when it
+//!   started and finishes there. [`ScanEvent::Done`] means the window is read.
+//! * [`ScanSpec::following`] makes the same call **tail**: reaching the log end
+//!   is not an ending, the fetch long-polls for what has not been written yet,
+//!   and the stream ends when it is dropped. Without it, a scan from
+//!   [`StartPosition::Latest`] finishes immediately having emitted nothing,
+//!   which looks exactly like a working live view of an idle topic.
+//! * [`tail`] **walks backwards** from the log end — or, with
+//!   [`TailSpec::ending_at`], from an arbitrary offset or instant.
+//!
 //! # Tolerant decoding
 //!
 //! The point of the whole design. One batch that will not decode does not fail
@@ -36,6 +51,12 @@
 //!         _ => {}
 //!     }
 //! }
+//!
+//! // Or follow the log, which is the same call that does not stop.
+//! let live = ScanSpec::new("orders")
+//!     .from(StartPosition::Latest)
+//!     .following();
+//! let mut tailing = Box::pin(kafka_read::scan(cluster, live).await?);
 //!
 //! // Or read the tail — the most-used view in any Kafka UI.
 //! let tails = kafka_read::tail(cluster, &TailSpec::new("orders", 500)).await?;

@@ -122,6 +122,14 @@ pub struct ScanSpec {
     pub from: StartPosition,
     /// Stop after this many *emitted* records, or `None` to reach the end.
     pub limit: Option<usize>,
+    /// Whether to keep waiting at the end of the log instead of finishing.
+    ///
+    /// `false` — the default — is a *browse*: the scan plans against the log
+    /// end as it stood when it started, and [`ScanEvent::Done`] means the
+    /// window is read. `true` is a *tail*: reaching the end is not an ending,
+    /// the fetch long-polls for what has not been written yet, and the stream
+    /// only finishes when the caller drops it or a `limit` is reached.
+    pub follow: bool,
     /// Filter applied after decoding.
     pub filter: Option<RecordFilter>,
     /// Whether aborted-transaction records are visible.
@@ -146,6 +154,7 @@ impl ScanSpec {
             partitions: None,
             from: StartPosition::Earliest,
             limit: None,
+            follow: false,
             filter: None,
             visibility: Visibility::default(),
             partition_max_bytes: 1024 * 1024,
@@ -171,6 +180,16 @@ impl ScanSpec {
     /// Stop after `limit` records.
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
+        self
+    }
+
+    /// Keep the scan open at the end of the log, waiting for new records.
+    ///
+    /// Turns [`StartPosition::Latest`] from a scan of nothing into a tail. It
+    /// is still not a consumer: there is no group, no membership and no commit
+    /// — the stream ends when it is dropped.
+    pub fn following(mut self) -> Self {
+        self.follow = true;
         self
     }
 
@@ -261,6 +280,21 @@ pub enum ScanEvent {
     },
     /// The scan finished. Always the last event.
     Done(ScanProgress),
+}
+
+/// Whether a partition with an empty buffer is worth fetching for right now.
+///
+/// * `behind` — it has offsets it has not read. Always worth a fetch; this is
+///   the only rule a browse needs.
+/// * following and `idle` — nothing at all is buffered, so the only way to
+///   make progress is to long-poll the log end.
+///
+/// The case this exists to exclude is a *tail with records already buffered*:
+/// polling every partition sitting at its log end before emitting them costs
+/// one `max_wait_ms` per record, which on a topic with one busy partition and
+/// fifteen quiet ones is a couple of records a second.
+fn should_fetch(behind: bool, follow: bool, idle: bool) -> bool {
+    behind || (follow && idle)
 }
 
 /// One partition's position in a scan.
@@ -393,7 +427,10 @@ async fn plan(cluster: &Cluster, spec: &ScanSpec) -> Result<(Vec<PartitionCursor
             end_offset: latest,
             start_offset: start,
             buffered: VecDeque::new(),
-            finished: start >= latest,
+            // A partition that starts at its own log end has nothing to read
+            // — unless the scan is following, in which case that is precisely
+            // where it is supposed to sit and wait.
+            finished: start >= latest && !spec.follow,
         });
     }
     Ok((cursors, topic_id))
@@ -442,9 +479,14 @@ impl ScanState {
     }
 
     fn all_exhausted(&self) -> bool {
-        self.cursors
-            .iter()
-            .all(|cursor| cursor.exhausted() && cursor.buffered.is_empty())
+        // A following scan is never finished. "Every partition is at its log
+        // end" is the steady state of a tail, not the end of one, and the
+        // stream ends by being dropped.
+        !self.spec.follow
+            && self
+                .cursors
+                .iter()
+                .all(|cursor| cursor.exhausted() && cursor.buffered.is_empty())
     }
 
     /// Fetch for partitions that need it. Returns whether anything was read.
@@ -457,9 +499,19 @@ impl ScanState {
 
         // Group the partitions that need data by leader, so one broker gets one
         // request rather than one per partition.
+        //
+        // A partition sitting at its log end is only worth polling when there
+        // is nothing else to emit. Polling it every round would make a tail
+        // pay one `max_wait_ms` long-poll on every idle partition per record
+        // — sixteen partitions and one busy one is two records a second, which
+        // reads as a hung UI rather than a slow one.
+        let idle = self.buffered_total == 0;
         let mut by_leader: HashMap<i32, Vec<FetchTarget>> = HashMap::new();
         for cursor in &self.cursors {
-            if cursor.exhausted() || !cursor.buffered.is_empty() {
+            if !cursor.buffered.is_empty() {
+                continue;
+            }
+            if !should_fetch(!cursor.exhausted(), self.spec.follow, idle) {
                 continue;
             }
             by_leader
@@ -530,11 +582,12 @@ impl ScanState {
                     if decoded.control_batches_skipped > 0 || decoded.aborted_records_skipped > 0 {
                         cursor.next_offset = cursor.next_offset.saturating_add(1);
                     } else if !decoded.truncated_tail {
-                        cursor.finished = cursor.next_offset >= cursor.end_offset;
-                        if !cursor.finished {
-                            // The broker had nothing for us right now.
-                            cursor.finished = true;
-                        }
+                        // The broker had nothing for us right now. For a
+                        // browse that is the end of the partition; for a tail
+                        // it is an idle moment, and latching `finished` here
+                        // would retire the partition the first time nobody
+                        // wrote to it.
+                        cursor.finished = !self.spec.follow;
                     } else {
                         // A single batch larger than the per-partition budget.
                         // Growing the budget for this one fetch is the only way
@@ -577,8 +630,27 @@ impl ScanState {
                     .count();
                 self.progress.malformed_batches += u64::try_from(bad).unwrap_or(0);
 
-                self.buffered_total += decoded.outcomes.len();
-                cursor.buffered.extend(decoded.outcomes);
+                // A fetch begins at whatever *batch* contains the requested
+                // offset, so the first one routinely hands back records from
+                // before the scan's start. They are dropped rather than
+                // emitted — "scan from offset N" that answers with N-59 is
+                // wrong, and the backward walk has always filtered here.
+                //
+                // A malformed batch is kept whatever its base: the batch
+                // containing the start offset covers it, and its whole reason
+                // for existing is to say where the damage is.
+                let start = cursor.start_offset;
+                let kept: Vec<RecordOutcome> = decoded
+                    .outcomes
+                    .into_iter()
+                    .filter(|outcome| match outcome {
+                        RecordOutcome::Ok(record) => record.offset >= start,
+                        RecordOutcome::Malformed { .. } => true,
+                    })
+                    .collect();
+
+                self.buffered_total += kept.len();
+                cursor.buffered.extend(kept);
             }
         }
         Ok(read_anything)
@@ -624,7 +696,10 @@ impl ScanState {
         self.progress.records_scanned += 1;
         self.progress.offsets_consumed += 1;
 
-        if exhausted {
+        // Not while following: a partition draining to its head is a tail
+        // catching up, and reporting it complete every time the buffer empties
+        // would emit the event once per record on a quiet topic.
+        if exhausted && !self.spec.follow {
             self.progress.partitions_active = self
                 .cursors
                 .iter()
@@ -789,6 +864,40 @@ mod tests {
             finished: false,
         };
         assert!(cursor.exhausted());
+    }
+
+    #[test]
+    fn a_scan_browses_unless_it_is_told_to_follow() {
+        // Additive: every caller written before `following` existed keeps
+        // getting a bounded browse that ends at the log end it planned for.
+        assert!(!ScanSpec::new("orders").follow);
+        assert!(ScanSpec::new("orders").following().follow);
+    }
+
+    #[test]
+    fn a_browse_only_ever_fetches_for_a_partition_that_is_behind() {
+        // Unchanged behaviour, asserted so the follow rules cannot quietly
+        // widen it: a bounded scan never polls a partition it has read to the
+        // end, whatever else is going on.
+        assert!(should_fetch(true, false, true));
+        assert!(should_fetch(true, false, false));
+        assert!(!should_fetch(false, false, true));
+        assert!(!should_fetch(false, false, false));
+    }
+
+    #[test]
+    fn a_tail_polls_the_log_end_only_when_it_has_nothing_left_to_emit() {
+        // Both halves matter. Never polling means the tail never sees a new
+        // record; always polling means every record costs a long-poll on every
+        // idle partition.
+        assert!(
+            should_fetch(false, true, true),
+            "a tail must poll when idle"
+        );
+        assert!(
+            !should_fetch(false, true, false),
+            "a tail with records in hand must emit them first"
+        );
     }
 
     #[test]

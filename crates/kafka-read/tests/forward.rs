@@ -320,6 +320,170 @@ async fn a_scan_from_a_timestamp_skips_what_came_before() {
 
 #[tokio::test]
 #[ignore = "needs Docker"]
+async fn a_scan_from_an_offset_never_emits_records_before_it() {
+    // A fetch begins at whatever *batch* contains the offset, so the first one
+    // routinely hands back records from before it. The walk in `backward` has
+    // always filtered them; this asserts the forward path agrees. Without it,
+    // "browse from offset 1000037" answers with 1000005 and the reader has no
+    // way to tell that from an off-by-N in their own bookkeeping.
+    let (fixture, cluster, _admin) = setup(1).await;
+    produce(&fixture, "scanned", 1, 5000, "none").await;
+
+    // Several starts, because whether one lands mid-batch depends on the
+    // producer's batching — a single offset can pass by luck.
+    for start in [37i64, 991, 1_234, 2_500] {
+        let mut stream = Box::pin(
+            kafka_read::scan(
+                &cluster,
+                ScanSpec::new("scanned")
+                    .with_partitions([0])
+                    .from(StartPosition::Offset(start))
+                    .with_limit(20),
+            )
+            .await
+            .unwrap(),
+        );
+
+        let mut first = None;
+        while let Some(event) = stream.next().await {
+            if let ScanEvent::Record(record) = event.unwrap() {
+                assert!(
+                    record.offset >= start,
+                    "scan from {start} emitted offset {}",
+                    record.offset
+                );
+                first.get_or_insert(record.offset);
+            }
+        }
+        assert_eq!(
+            first,
+            Some(start),
+            "the first record must be the one asked for, not the next batch"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_following_scan_waits_at_the_log_end_and_sees_what_arrives_next() {
+    // Without `following`, a scan from `Latest` plans against a log end it is
+    // already standing on and finishes immediately having emitted nothing —
+    // which looks exactly like a working live view of an idle topic, and is
+    // not one.
+    let (fixture, cluster, _admin) = setup(3).await;
+    produce(&fixture, "scanned", 1, 100, "none").await;
+
+    let mut stream = Box::pin(
+        kafka_read::scan(
+            &cluster,
+            ScanSpec::new("scanned")
+                .from(StartPosition::Latest)
+                .following(),
+        )
+        .await
+        .unwrap(),
+    );
+
+    // Nothing has been written since the scan opened, so it must be waiting
+    // rather than finished.
+    let idle = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await;
+    assert!(
+        idle.is_err(),
+        "a following scan must not end on an idle topic, got {:?}",
+        idle.map(|event| event.map(|e| e.map(|_| ())))
+    );
+
+    produce(&fixture, "scanned", 101, 20, "none").await;
+
+    let mut seen = 0;
+    while seen < 20 {
+        match tokio::time::timeout(std::time::Duration::from_secs(20), stream.next()).await {
+            Ok(Some(Ok(ScanEvent::Record(record)))) => {
+                assert!(record.offset >= 0);
+                seen += 1;
+            }
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(error))) => panic!("scan failed: {error}"),
+            Ok(None) => panic!("a following scan ended by itself after {seen} records"),
+            Err(_) => panic!("only {seen} of 20 records arrived"),
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn following_does_not_stall_behind_an_idle_partition() {
+    // The regression this guards: a tail that polls every idle partition
+    // before emitting anything pays one `max_wait_ms` per record. On a topic
+    // where one partition is busy and the rest are silent — the normal case —
+    // that is a couple of records a second, which reads as a hung UI.
+    let (fixture, cluster, _admin) = setup(6).await;
+    produce(&fixture, "scanned", 1, 60, "none").await;
+
+    let mut stream = Box::pin(
+        kafka_read::scan(
+            &cluster,
+            ScanSpec::new("scanned")
+                .from(StartPosition::Earliest)
+                .following(),
+        )
+        .await
+        .unwrap(),
+    );
+
+    let started = std::time::Instant::now();
+    let mut seen = 0;
+    while seen < 60 {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), stream.next()).await {
+            Ok(Some(Ok(ScanEvent::Record(_)))) => seen += 1,
+            Ok(Some(Ok(_))) => {}
+            Ok(Some(Err(error))) => panic!("scan failed: {error}"),
+            Ok(None) => panic!("a following scan ended by itself"),
+            Err(_) => panic!("only {seen} of 60 records arrived"),
+        }
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "60 buffered records took {elapsed:?}; the tail is polling idle partitions per record"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn dropping_a_following_scan_stops_it() {
+    // The same cancel-safety property as a bounded scan, on the stream that
+    // actually stays open long enough for a leak to matter.
+    let (fixture, cluster, _admin) = setup(3).await;
+    produce(&fixture, "scanned", 1, 500, "none").await;
+
+    for _ in 0..2 {
+        let mut stream = Box::pin(
+            kafka_read::scan(&cluster, ScanSpec::new("scanned").following())
+                .await
+                .unwrap(),
+        );
+        for _ in 0..5 {
+            let _ = stream.next().await;
+        }
+    }
+
+    let before = cluster.pool().live_connections().await;
+    {
+        let mut stream = Box::pin(
+            kafka_read::scan(&cluster, ScanSpec::new("scanned").following())
+                .await
+                .unwrap(),
+        );
+        for _ in 0..5 {
+            let _ = stream.next().await;
+        }
+    }
+    assert_eq!(cluster.pool().live_connections().await, before);
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
 async fn dropping_a_scan_stops_it() {
     // Cancel safety, at the scan level. The stream does its own work as it is
     // polled, so dropping it must free everything immediately rather than
