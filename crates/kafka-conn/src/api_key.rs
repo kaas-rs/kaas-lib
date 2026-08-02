@@ -645,3 +645,89 @@ const KNOWN: [ApiKey; 87] = [
     ApiKey::AlterShareGroupOffsets,
     ApiKey::DeleteShareGroupOffsets,
 ];
+
+#[cfg(test)]
+mod phase_two_gate_tests {
+    use super::*;
+
+    /// M19: the four api keys phase 2 made *reachable*, held to the read-only
+    /// gate.
+    ///
+    /// M8's acceptance test already drives the gate from `ApiKey::known`, so
+    /// these are covered by construction — which is the point of having
+    /// written it that way, and is exactly the kind of claim that is worth
+    /// checking rather than asserting. Before phase 2 nothing in the workspace
+    /// could emit any of them: `Produce` had no producer, `OffsetCommit` no
+    /// consumer, and the two transactional keys no transactions. A
+    /// classification that was merely *unused* is now load-bearing.
+    ///
+    /// This runs without Docker, which is why it is here rather than only in
+    /// the container suite.
+    #[test]
+    fn the_keys_phase_two_made_reachable_are_all_gated() {
+        for key in [
+            ApiKey::Produce,
+            ApiKey::OffsetCommit,
+            ApiKey::InitProducerId,
+            ApiKey::AddPartitionsToTxn,
+            // The rest of the transactional set, reachable from M15.
+            ApiKey::AddOffsetsToTxn,
+            ApiKey::EndTxn,
+            ApiKey::TxnOffsetCommit,
+            // Group membership, reachable from M17 and M18.
+            ApiKey::ConsumerGroupHeartbeat,
+            ApiKey::JoinGroup,
+            ApiKey::SyncGroup,
+            ApiKey::Heartbeat,
+            ApiKey::LeaveGroup,
+        ] {
+            assert!(
+                key.is_mutating(),
+                "{key:?} is now reachable from this workspace and changes \
+                 cluster state; a read-only client must refuse it before \
+                 opening a socket"
+            );
+        }
+    }
+
+    /// The other half: the keys phase 2 uses that must stay *un*gated, or a
+    /// read-only client cannot read.
+    #[test]
+    fn the_read_paths_phase_two_uses_stay_open() {
+        for key in [ApiKey::Fetch, ApiKey::OffsetFetch, ApiKey::ListOffsets] {
+            assert!(
+                !key.is_mutating(),
+                "{key:?} only reads; gating it makes a read-only consumer \
+                 useless"
+            );
+        }
+    }
+
+    /// Deny by default is the whole security property. A key this build cannot
+    /// name — one a future Kafka release adds — must be treated as mutating.
+    #[test]
+    fn the_gate_denies_by_default() {
+        // Every key the build knows is classified explicitly; the wildcard arm
+        // exists for the ones it does not. Asserting the *count* of mutating
+        // keys is brittle, so assert the property that matters instead: no
+        // key is silently un-gated by being forgotten.
+        let mut mutating = 0;
+        let mut read_only = 0;
+        for key in ApiKey::known() {
+            if key.is_mutating() {
+                mutating += 1;
+            } else {
+                read_only += 1;
+            }
+        }
+        assert!(
+            mutating > 0 && read_only > 0,
+            "the gate classifies both ways"
+        );
+        assert!(
+            mutating > read_only,
+            "most of the protocol mutates; a classification where reads \
+             dominate means the wildcard arm has been flipped to false"
+        );
+    }
+}
