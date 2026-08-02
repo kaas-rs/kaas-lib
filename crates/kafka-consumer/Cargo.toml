@@ -25,6 +25,9 @@ bytes          = { workspace = true }
 futures        = { workspace = true }
 tracing        = { workspace = true }
 uuid           = { workspace = true }
+# KIP-848 has the *client* generate its member id, so we need randomness for
+# one 16-byte value per member.
+rand           = { workspace = true }
 
 [dev-dependencies]
 testkit            = { path = "../testkit" }

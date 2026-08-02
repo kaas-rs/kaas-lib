@@ -1131,6 +1131,7 @@ dependencies = [
  "kafka-produce",
  "kafka-protocol",
  "kafka-read",
+ "rand 0.9.5",
  "testkit",
  "tokio",
  "tracing",

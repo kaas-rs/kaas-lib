@@ -195,6 +195,83 @@ impl Consumer {
         Ok(())
     }
 
+    /// Resolve and remember topic ids without changing the assignment.
+    ///
+    /// A group member needs these before its first heartbeat: the broker's
+    /// assignment names topics by uuid, and one we cannot name is one we
+    /// cannot act on.
+    pub(crate) async fn learn_topics(&mut self, topics: &[String]) -> Result<()> {
+        let names: Vec<&str> = topics.iter().map(String::as_str).collect();
+        let snapshot = self.cluster.refresh_topics(&names).await?;
+        for topic in topics {
+            if let Some(info) = snapshot.topic(topic) {
+                self.topic_ids.insert(topic.clone(), info.topic_id);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn topic_ids(&self) -> &HashMap<String, TopicId> {
+        &self.topic_ids
+    }
+
+    /// Replace the assignment, keeping the position of partitions that stay.
+    ///
+    /// Distinct from [`Consumer::assign`], which resolves fresh positions: a
+    /// rebalance that re-resolved a partition this member already held would
+    /// re-read or skip records it had already accounted for.
+    pub(crate) async fn reassign(&mut self, partitions: Vec<(String, i32)>) -> Result<()> {
+        let wanted: HashSet<(String, i32)> = partitions.iter().cloned().collect();
+        self.assignment.retain(|key, _| wanted.contains(key));
+
+        let fresh: Vec<(String, i32)> = partitions
+            .into_iter()
+            .filter(|key| !self.assignment.contains_key(key))
+            .collect();
+        if !fresh.is_empty() {
+            let starts = self.committed_or_earliest(&fresh).await?;
+            for key in fresh {
+                let position = starts.get(&key).copied().unwrap_or(0);
+                self.assignment.insert(
+                    key,
+                    Assigned {
+                        position,
+                        paused: false,
+                        high_watermark: -1,
+                    },
+                );
+            }
+        }
+
+        // Records buffered for a partition we no longer own must not be
+        // delivered: somebody else owns it now.
+        self.buffered
+            .retain(|record| wanted.contains(&(record.topic.clone(), record.partition)));
+        Ok(())
+    }
+
+    /// Where a newly-gained partition starts: its committed position where the
+    /// group has one, the log start otherwise.
+    async fn committed_or_earliest(
+        &self,
+        partitions: &[(String, i32)],
+    ) -> Result<HashMap<(String, i32), i64>> {
+        let mut out = HashMap::new();
+        if let Ok(group) = self.group() {
+            for (key, committed) in offsets::fetch(&self.cluster, group, partitions).await? {
+                out.insert(key, committed.offset);
+            }
+        }
+        for key in partitions {
+            if !out.contains_key(key) {
+                let (earliest, _) =
+                    kafka_read::partition_bounds(&self.cluster, &key.0, key.1).await?;
+                out.insert(key.clone(), earliest);
+            }
+        }
+        Ok(out)
+    }
+
     /// The current assignment.
     pub fn assignment(&self) -> Vec<(String, i32)> {
         let mut keys: Vec<(String, i32)> = self.assignment.keys().cloned().collect();
@@ -484,5 +561,133 @@ impl Consumer {
             }
         }
         Ok(out)
+    }
+}
+
+/// A consumer that joins a KIP-848 group and lets the broker assign it
+/// partitions.
+///
+/// Wraps [`Consumer`] rather than replacing it: the fetch path, the sessions
+/// and the decoding are identical, and the only thing membership changes is
+/// *where the assignment comes from*. That is also why the manual mode
+/// survives — it is not a degraded group consumer, it is the same engine with
+/// the assignment supplied by the caller.
+#[derive(Debug)]
+pub struct GroupConsumer {
+    inner: Consumer,
+    membership: crate::group::Membership,
+    /// Whether to commit owned positions before giving a partition up.
+    auto_commit: bool,
+}
+
+impl GroupConsumer {
+    /// Join `group_id` and subscribe to `topics`.
+    ///
+    /// The client generates its own member id (KIP-848 inverts the classic
+    /// protocol here) and the **broker** computes the assignment; nothing is
+    /// owned until the first heartbeat comes back with one.
+    pub async fn subscribe(
+        cluster: Cluster,
+        mut config: ConsumerConfig,
+        group_id: impl Into<String>,
+        topics: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self> {
+        let group_id = group_id.into();
+        let subscription: Vec<String> = topics.into_iter().map(Into::into).collect();
+        config.group_id = Some(group_id.clone());
+
+        let mut inner = Consumer::new(cluster, config);
+        // Resolve topic ids up front: the broker's assignment names topics by
+        // uuid, and an assignment we cannot name is an assignment we cannot
+        // act on.
+        inner.learn_topics(&subscription).await?;
+
+        Ok(Self {
+            inner,
+            membership: crate::group::Membership::new(group_id, subscription, None, 30_000),
+            auto_commit: true,
+        })
+    }
+
+    /// Join as a **static** member, so a restart inside the session timeout
+    /// does not trigger a rebalance.
+    #[must_use]
+    pub fn with_instance_id(mut self, instance_id: impl Into<String>) -> Self {
+        self.membership.set_instance_id(instance_id.into());
+        self
+    }
+
+    /// Whether to commit owned positions before revoking a partition.
+    #[must_use]
+    pub fn auto_commit(mut self, enabled: bool) -> Self {
+        self.auto_commit = enabled;
+        self
+    }
+
+    /// The partitions this member currently owns.
+    pub fn assignment(&self) -> Vec<(String, i32)> {
+        self.inner.assignment()
+    }
+
+    /// This member's id.
+    ///
+    /// Generated by the client, not the broker — KIP-848 inverts the classic
+    /// protocol here, and an empty one is rejected outright.
+    pub fn member_id(&self) -> &str {
+        self.membership.member_id()
+    }
+
+    /// The underlying cluster handle.
+    pub fn cluster(&self) -> &Cluster {
+        self.inner.cluster()
+    }
+
+    /// Heartbeat if due, reconcile any new assignment, then read.
+    ///
+    /// # The ordering that matters
+    ///
+    /// A rebalance is handled as **revoke, then acknowledge**, across two
+    /// beats. Partitions this member has lost are dropped — and committed
+    /// first, when `auto_commit` is on — before the next heartbeat tells the
+    /// broker what is now owned. Acknowledging first would mean two consumers
+    /// holding the same partition at once, which delivers every record twice
+    /// and reports nothing.
+    pub async fn poll(&mut self) -> Result<Vec<Record>> {
+        if self.membership.beat_due() {
+            let topic_ids = self.inner.topic_ids().clone();
+            let outcome = self
+                .membership
+                .beat(self.inner.cluster(), &topic_ids)
+                .await?;
+
+            if outcome.changed {
+                // Commit what we are about to give up, while we still own it.
+                if self.auto_commit && !outcome.revoked.is_empty() {
+                    let _ = self.inner.commit().await;
+                }
+                let owned: Vec<(String, i32)> = self.membership.owned().iter().cloned().collect();
+                self.inner.reassign(owned).await?;
+            }
+        }
+        self.inner.poll().await
+    }
+
+    /// Commit the current positions.
+    pub async fn commit(&self) -> Result<Vec<((String, i32), Result<()>)>> {
+        self.inner.commit().await
+    }
+
+    /// How far behind the log end a partition is.
+    pub fn lag(&self, topic: &str, partition: i32) -> Option<i64> {
+        self.inner.lag(topic, partition)
+    }
+
+    /// Leave the group, releasing the assignment — or parking it, for a static
+    /// member.
+    pub async fn leave(&mut self) -> Result<()> {
+        if self.auto_commit {
+            let _ = self.inner.commit().await;
+        }
+        self.membership.leave(self.inner.cluster()).await
     }
 }

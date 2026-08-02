@@ -15,7 +15,7 @@ use anyhow::{Result, bail};
 use bytes::Bytes;
 use futures::StreamExt;
 use kafka_admin::{Admin, NewTopic};
-use kafka_consumer::{Consumer, ConsumerConfig, Position};
+use kafka_consumer::{Consumer, ConsumerConfig, GroupConsumer, Position};
 use kafka_meta::Cluster;
 use kafka_produce::{Compression, Producer, ProducerConfig, ProducerRecord, partition_for_key};
 use kafka_read::{ScanEvent, ScanSpec, StartPosition, Visibility};
@@ -303,6 +303,90 @@ async fn run(cluster: &Cluster, admin: &Admin, topic: &str, report: &mut Report)
     //    sessions rather than one-shot scans.
     consume(cluster, topic, report).await?;
 
+    // 8. KIP-848 group membership (M17), against a real group coordinator.
+    group(cluster, topic, report).await?;
+
+    Ok(())
+}
+
+/// M17: two members join one group, and between them own every partition
+/// exactly once.
+///
+/// Full coverage and empty intersection is the assertion that matters. A
+/// reconciliation that acknowledges before revoking produces an *overlap*,
+/// which delivers records twice and reports nothing at all — so counting
+/// records would pass while the bug is live.
+async fn group(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<()> {
+    let group_id = format!("kaaslib-live-group-{}", run_token());
+    let config = || {
+        ConsumerConfig::new()
+            .visibility(Visibility::All)
+            .max_wait_ms(200)
+    };
+
+    let mut first = GroupConsumer::subscribe(cluster.clone(), config(), &group_id, [topic]).await?;
+    let mut second =
+        GroupConsumer::subscribe(cluster.clone(), config(), &group_id, [topic]).await?;
+
+    // Poll both until the coordinator has settled an assignment on each.
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(90);
+    while Instant::now() < deadline {
+        first.poll().await?;
+        second.poll().await?;
+        let a = first.assignment().len();
+        let b = second.assignment().len();
+        if a + b == usize::try_from(PARTITIONS).unwrap_or(0) && a > 0 && b > 0 {
+            break;
+        }
+    }
+
+    let a: std::collections::BTreeSet<(String, i32)> = first.assignment().into_iter().collect();
+    let b: std::collections::BTreeSet<(String, i32)> = second.assignment().into_iter().collect();
+
+    report.set("group.settle_ms", started.elapsed().as_millis());
+    report.set("group.member_a", a.len());
+    report.set("group.member_b", b.len());
+    report.set("group.member_a_id_issued", !first.member_id().is_empty());
+    report.set("group.member_b_id_issued", !second.member_id().is_empty());
+
+    let overlap: Vec<_> = a.intersection(&b).collect();
+    report.set("group.overlap", overlap.len());
+    if !overlap.is_empty() {
+        bail!(
+            "two members own the same partitions, which delivers every record              twice and reports nothing: {overlap:?}"
+        );
+    }
+
+    let union: std::collections::BTreeSet<_> = a.union(&b).collect();
+    report.set("group.union", union.len());
+    if union.len() != usize::try_from(PARTITIONS).unwrap_or(0) {
+        bail!(
+            "the group covers {} of {PARTITIONS} partitions; a gap means              records nobody is reading",
+            union.len()
+        );
+    }
+    report.set("group.covers_every_partition", true);
+
+    // Leaving releases the assignment rather than stranding it.
+    first.leave().await?;
+    let rebalanced = Instant::now() + Duration::from_secs(90);
+    while Instant::now() < rebalanced {
+        second.poll().await?;
+        if second.assignment().len() == usize::try_from(PARTITIONS).unwrap_or(0) {
+            break;
+        }
+    }
+    report.set("group.after_leave", second.assignment().len());
+    if second.assignment().len() != usize::try_from(PARTITIONS).unwrap_or(0) {
+        bail!(
+            "after one member left, the survivor holds {} of {PARTITIONS}              partitions; the rest are assigned to nobody",
+            second.assignment().len()
+        );
+    }
+    report.set("group.reassigned_on_leave", true);
+    second.leave().await?;
+
     Ok(())
 }
 
@@ -445,7 +529,20 @@ async fn transactions(cluster: &Cluster, topic: &str, report: &mut Report) -> Re
     };
 
     let everything = read_partition_with(cluster, topic, 1, Visibility::All).await?;
-    let committed = read_partition_with(cluster, topic, 1, Visibility::CommittedOnly).await?;
+
+    // Poll rather than read once. `CommittedOnly` stops at the last stable
+    // offset, which does not advance until the commit marker has been written
+    // and replicated — so an immediate read can legitimately see none of a
+    // transaction that has already been acknowledged. Racing it here would
+    // report a filter bug that is really replication lag.
+    let settle = Instant::now() + SETTLE_TIMEOUT;
+    let committed = loop {
+        let seen = read_partition_with(cluster, topic, 1, Visibility::CommittedOnly).await?;
+        if ours(&seen, "committed") == TXN_RECORDS || Instant::now() >= settle {
+            break seen;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
 
     report.set("txn.all.committed_records", ours(&everything, "committed"));
     report.set("txn.all.aborted_records", ours(&everything, "aborted"));
