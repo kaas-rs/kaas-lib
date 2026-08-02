@@ -336,10 +336,43 @@ const NO_GENERATION: i32 = -1;
 /// capabilities the assignors here do not have.
 const PROTOCOL_VERSION: i16 = 0;
 
+/// Strip the two-byte version prefix and return the version it named.
+fn take_version(bytes: &mut bytes::Bytes) -> Result<i16> {
+    if bytes.len() < 2 {
+        return Err(Error::decode(
+            "consumer protocol payload",
+            "shorter than its two-byte version prefix".to_owned(),
+        ));
+    }
+    // `split_to` then read, rather than indexing: rule 2 forbids indexing in
+    // library code, and a two-byte prefix is exactly the place a malformed
+    // payload from another client would otherwise panic the process.
+    let prefix = bytes.split_to(2);
+    let (Some(high), Some(low)) = (prefix.first(), prefix.get(1)) else {
+        return Err(Error::decode(
+            "consumer protocol payload",
+            "version prefix vanished between the length check and the read".to_owned(),
+        ));
+    };
+    Ok(i16::from_be_bytes([*high, *low]))
+}
+
 /// Encode the subscription a member sends in JoinGroup.
 ///
-/// `ConsumerProtocolSubscription` is a real schema in the codec, so this is
-/// not hand-rolled — which matters because a Java group leader decodes it.
+/// `ConsumerProtocolSubscription` is a real schema in the codec, so the struct
+/// is not hand-rolled — which matters because a Java group leader, and the
+/// coordinator itself, decode it.
+///
+/// # The two bytes the schema does not include
+///
+/// Java's `ConsumerProtocol.serializeSubscription` writes the protocol
+/// **version as an `int16` ahead of the struct**, and `deserializeSubscription`
+/// reads it back before parsing. That prefix is part of the payload's contract
+/// and is *not* part of the message schema, so `Encodable::encode` does not
+/// write it — the codec encodes a struct, and the framing around it belongs to
+/// the caller.
+///
+/// Omit it and every field lands two bytes early.
 fn encode_subscription(topics: &[String]) -> Result<bytes::Bytes> {
     let subscription = ConsumerProtocolSubscription::default().with_topics(
         topics
@@ -348,6 +381,7 @@ fn encode_subscription(topics: &[String]) -> Result<bytes::Bytes> {
             .collect(),
     );
     let mut buf = bytes::BytesMut::new();
+    buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
     subscription
         .encode(&mut buf, PROTOCOL_VERSION)
         .map_err(|error| {
@@ -357,7 +391,8 @@ fn encode_subscription(topics: &[String]) -> Result<bytes::Bytes> {
 }
 
 fn decode_subscription(mut bytes: bytes::Bytes) -> Result<Vec<String>> {
-    let subscription = ConsumerProtocolSubscription::decode(&mut bytes, PROTOCOL_VERSION)
+    let version = take_version(&mut bytes)?;
+    let subscription = ConsumerProtocolSubscription::decode(&mut bytes, version.max(0))
         .map_err(|error| Error::decode("consumer protocol subscription", error.to_string()))?;
     Ok(subscription
         .topics
@@ -378,6 +413,9 @@ fn encode_assignment(assigned: &BTreeMap<String, Vec<i32>>) -> Result<bytes::Byt
             .collect(),
     );
     let mut buf = bytes::BytesMut::new();
+    // Same two-byte version prefix as the subscription. A Java member decodes
+    // this one.
+    buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
     assignment
         .encode(&mut buf, PROTOCOL_VERSION)
         .map_err(|error| {
@@ -390,7 +428,8 @@ fn decode_assignment(mut bytes: bytes::Bytes) -> Result<Vec<(String, i32)>> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
-    let assignment = ConsumerProtocolAssignment::decode(&mut bytes, PROTOCOL_VERSION)
+    let version = take_version(&mut bytes)?;
+    let assignment = ConsumerProtocolAssignment::decode(&mut bytes, version.max(0))
         .map_err(|error| Error::decode("consumer protocol assignment", error.to_string()))?;
     Ok(assignment
         .assigned_partitions
@@ -664,6 +703,32 @@ mod wire_tests {
     #[test]
     fn an_empty_assignment_decodes_to_nothing_rather_than_failing() {
         assert!(decode_assignment(bytes::Bytes::new()).unwrap().is_empty());
+    }
+
+    /// The two bytes Java writes and the message schema does not.
+    ///
+    /// Asserted on the wire rather than only through a round trip, because a
+    /// round trip is exactly what stays green when *both* halves omit the
+    /// prefix — which is how this shipped broken.
+    #[test]
+    fn the_payload_carries_javas_two_byte_version_prefix() {
+        let encoded = encode_subscription(&["t".to_owned()]).unwrap();
+        assert_eq!(
+            &encoded[..2],
+            &PROTOCOL_VERSION.to_be_bytes(),
+            "Java's ConsumerProtocol.serializeSubscription writes the version \
+             ahead of the struct; without it every field lands two bytes early"
+        );
+
+        let mut assigned = BTreeMap::new();
+        assigned.insert("t".to_owned(), vec![0]);
+        let encoded = encode_assignment(&assigned).unwrap();
+        assert_eq!(&encoded[..2], &PROTOCOL_VERSION.to_be_bytes());
+    }
+
+    #[test]
+    fn a_payload_too_short_to_hold_a_version_is_a_decode_error() {
+        assert!(decode_subscription(bytes::Bytes::from_static(&[0])).is_err());
     }
 
     #[test]
