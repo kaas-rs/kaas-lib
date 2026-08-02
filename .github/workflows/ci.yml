@@ -77,6 +77,30 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+      # The ARC runners intermittently start a job with the toolchain
+      # installed but not on PATH: `cargo: command not found` from a step whose
+      # "Install Rust toolchain" reported success. It has hit `interop` and
+      # `integration` on consecutive runs of the same unchanged workflow, and
+      # it costs a full broker-booting run to discover.
+      #
+      # Re-export the directory explicitly rather than trusting PATH to be
+      # inherited, and prove `cargo` runs *here*. A broken environment then
+      # fails at setup with a legible message instead of as a bare exit 127
+      # several minutes later, and a working one stops depending on which pod
+      # the job landed on.
+      - name: Put cargo on PATH, and prove it
+        run: |
+          set -eu
+          for dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" /usr/local/cargo/bin; do
+            if [ -x "$dir/cargo" ]; then
+              printf '%s\n' "$dir" >> "$GITHUB_PATH"
+              echo "cargo -> $dir"
+              "$dir/cargo" --version
+              exit 0
+            fi
+          done
+          echo "::error::no cargo found (looked in CARGO_HOME, ~/.cargo, /usr/local/cargo)"
+          exit 1
 
       - name: cargo fmt
         run: cargo fmt --check
@@ -137,6 +161,30 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+      # The ARC runners intermittently start a job with the toolchain
+      # installed but not on PATH: `cargo: command not found` from a step whose
+      # "Install Rust toolchain" reported success. It has hit `interop` and
+      # `integration` on consecutive runs of the same unchanged workflow, and
+      # it costs a full broker-booting run to discover.
+      #
+      # Re-export the directory explicitly rather than trusting PATH to be
+      # inherited, and prove `cargo` runs *here*. A broken environment then
+      # fails at setup with a legible message instead of as a bare exit 127
+      # several minutes later, and a working one stops depending on which pod
+      # the job landed on.
+      - name: Put cargo on PATH, and prove it
+        run: |
+          set -eu
+          for dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" /usr/local/cargo/bin; do
+            if [ -x "$dir/cargo" ]; then
+              printf '%s\n' "$dir" >> "$GITHUB_PATH"
+              echo "cargo -> $dir"
+              "$dir/cargo" --version
+              exit 0
+            fi
+          done
+          echo "::error::no cargo found (looked in CARGO_HOME, ~/.cargo, /usr/local/cargo)"
+          exit 1
 
       - name: Pre-pull the broker image
         run: docker pull apache/kafka:4.3.1
@@ -185,6 +233,30 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
 
       - uses: Swatinem/rust-cache@v2
+      # The ARC runners intermittently start a job with the toolchain
+      # installed but not on PATH: `cargo: command not found` from a step whose
+      # "Install Rust toolchain" reported success. It has hit `interop` and
+      # `integration` on consecutive runs of the same unchanged workflow, and
+      # it costs a full broker-booting run to discover.
+      #
+      # Re-export the directory explicitly rather than trusting PATH to be
+      # inherited, and prove `cargo` runs *here*. A broken environment then
+      # fails at setup with a legible message instead of as a bare exit 127
+      # several minutes later, and a working one stops depending on which pod
+      # the job landed on.
+      - name: Put cargo on PATH, and prove it
+        run: |
+          set -eu
+          for dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" /usr/local/cargo/bin; do
+            if [ -x "$dir/cargo" ]; then
+              printf '%s\n' "$dir" >> "$GITHUB_PATH"
+              echo "cargo -> $dir"
+              "$dir/cargo" --version
+              exit 0
+            fi
+          done
+          echo "::error::no cargo found (looked in CARGO_HOME, ~/.cargo, /usr/local/cargo)"
+          exit 1
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
@@ -281,6 +353,30 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+      # The ARC runners intermittently start a job with the toolchain
+      # installed but not on PATH: `cargo: command not found` from a step whose
+      # "Install Rust toolchain" reported success. It has hit `interop` and
+      # `integration` on consecutive runs of the same unchanged workflow, and
+      # it costs a full broker-booting run to discover.
+      #
+      # Re-export the directory explicitly rather than trusting PATH to be
+      # inherited, and prove `cargo` runs *here*. A broken environment then
+      # fails at setup with a legible message instead of as a bare exit 127
+      # several minutes later, and a working one stops depending on which pod
+      # the job landed on.
+      - name: Put cargo on PATH, and prove it
+        run: |
+          set -eu
+          for dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" /usr/local/cargo/bin; do
+            if [ -x "$dir/cargo" ]; then
+              printf '%s\n' "$dir" >> "$GITHUB_PATH"
+              echo "cargo -> $dir"
+              "$dir/cargo" --version
+              exit 0
+            fi
+          done
+          echo "::error::no cargo found (looked in CARGO_HOME, ~/.cargo, /usr/local/cargo)"
+          exit 1
 
       # librdkafka needs cmake *and* a C toolchain; the ARC image has
       # neither. `sudo` exists there (uid 1001 is in group 27), but guard
