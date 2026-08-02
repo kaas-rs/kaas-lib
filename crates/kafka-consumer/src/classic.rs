@@ -409,15 +409,20 @@ impl ClassicMembership {
             generation_id: NO_GENERATION,
             leader: false,
             protocol: RANGE.to_owned(),
-            session_timeout_ms: 45_000,
-            // Deliberately below the connection's own request timeout.
+            // Both deliberately small, and in this order.
             //
             // `JoinGroup` *blocks* on the coordinator until every member has
-            // joined or this expires — it is the one RPC in the protocol whose
-            // normal behaviour is to sit there. Set it above the request
-            // timeout and the socket gives up first, which surfaces as a
-            // timeout on a rebalance that was proceeding perfectly well.
-            rebalance_timeout_ms: 10_000,
+            // joined or the rebalance timeout expires — it is the one RPC in
+            // the protocol whose normal behaviour is to sit there. So the
+            // rebalance timeout has to fit inside the connection's own request
+            // timeout, or the socket gives up first and reports a timeout on a
+            // rebalance that was proceeding perfectly well.
+            //
+            // And `rebalance >= session`, matching Java, which pairs
+            // `max.poll.interval.ms` (300s) with `session.timeout.ms` (45s).
+            // Inverting them is not a configuration Kafka is tested against.
+            session_timeout_ms: 6_000,
+            rebalance_timeout_ms: 12_000,
         }
     }
 
