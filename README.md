@@ -15,17 +15,19 @@ topic rather than for joining a consumer group.
 | [`kafka-meta`](crates/kafka-meta) | metadata cache, RPC routing, connection pool, error taxonomy |
 | [`kafka-admin`](crates/kafka-admin) | 31 admin RPCs, one result per resource |
 | [`kafka-read`](crates/kafka-read) | streaming forward scans, backward tails, tolerant decoding |
+| [`kafka-produce`](crates/kafka-produce) | record batch encoding, murmur2 and sticky partitioning, acknowledged produce |
 
 ```toml
 [dependencies]
-kafka-admin = "0.1"
-kafka-read  = "0.1"
+kafka-admin   = "0.2"
+kafka-read    = "0.2"
+kafka-produce = "0.2"
 ```
 
-The four crates publish to crates.io in lockstep at a single version — they
-are one library split along a layering boundary, not four independently
-useful things, so `kafka-admin` 0.2 against `kafka-conn` 0.1 is not a
-combination anyone tests. Pull whichever layers you need at the same version.
+The crates publish to crates.io in lockstep at a single version — they are one
+library split along a layering boundary, not several independently useful
+things, so `kafka-admin` 0.2 against `kafka-conn` 0.1 is not a combination
+anyone tests. Pull whichever layers you need at the same version.
 
 Pre-1.0, so breaking changes land in the minor position. See
 [RELEASING.md](RELEASING.md).
@@ -64,10 +66,20 @@ Most of the design follows from four statements, covered in the
 37 of the protocol's 87 api keys — see the
 [API support matrix](https://kaas-rs.github.io/kaas-lib/compat/api-matrix.html).
 
-**There is no producer and no consumer-group membership.** That is the
-current scope boundary, and lifting it is the project's stretch goal — see
-[Roadmap](https://kaas-rs.github.io/kaas-lib/guide/roadmap.html).
-**Contributions are very welcome**, particularly on that work.
+The scope boundary is moving. `kafka-produce` writes records — batch
+encoding, Java-compatible murmur2 partitioning, KIP-480 sticky partitioning
+for unkeyed records, and every compression codec — so this is no longer a
+read-only library. What it does **not** yet have is a batching accumulator,
+idempotence, transactions, or consumer-group membership; a produce is one
+round trip per record and is never retried on an ambiguous failure, because
+retrying without a sequence number is how a producer duplicates data.
+
+`acks=0` is deliberately not offered. See the
+[`kafka-produce` documentation](crates/kafka-produce) for the reasoning.
+
+See [Roadmap](https://kaas-rs.github.io/kaas-lib/guide/roadmap.html).
+**Contributions are very welcome**, particularly on the remaining write and
+consume work.
 
 ## Development
 

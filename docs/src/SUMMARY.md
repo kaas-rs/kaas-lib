@@ -34,6 +34,7 @@
   - [kafka-meta](code-tour/kafka-meta.md)
   - [kafka-admin](code-tour/kafka-admin.md)
   - [kafka-read](code-tour/kafka-read.md)
+  - [kafka-produce](code-tour/kafka-produce.md)
   - [testkit](code-tour/testkit.md)
   - [livetest](code-tour/livetest.md)
   - [xtask](code-tour/xtask.md)

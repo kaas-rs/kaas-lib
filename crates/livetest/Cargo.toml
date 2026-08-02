@@ -16,6 +16,7 @@ kafka-conn  = { path = "../kafka-conn" }
 kafka-meta  = { path = "../kafka-meta" }
 kafka-admin = { path = "../kafka-admin" }
 kafka-read  = { path = "../kafka-read" }
+kafka-produce = { path = "../kafka-produce" }
 testkit     = { path = "../testkit" }
 
 tokio              = { workspace = true }

@@ -69,14 +69,14 @@ jobs:
       - name: Tag must match the workspace version
         id: version
         # Read the version cargo actually resolved rather than grepping the
-        # manifest, and assert all four crates agree — they inherit
+        # manifest, and assert every published crate agrees — they inherit
         # `version.workspace`, so a mismatch means someone pinned one by
         # hand and the lockstep guarantee is already broken.
         run: |
           set -euo pipefail
           versions=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[]
-                     | select(.name | test("^kafka-(conn|meta|admin|read)$"))
+                     | select(.name | test("^kafka-(conn|meta|admin|read|produce)$"))
                      | .version' | sort -u)
           if [ "$(echo "$versions" | wc -l)" -ne 1 ]; then
             echo "::error::published crates disagree on version:"; echo "$versions"
@@ -217,7 +217,7 @@ jobs:
               echo "Dry run — nothing uploaded."
             else
               echo "Published to crates.io:"
-              for c in kafka-conn kafka-meta kafka-admin kafka-read; do
+              for c in kafka-conn kafka-meta kafka-admin kafka-read kafka-produce; do
                 echo "- [\`$c\`](https://crates.io/crates/$c/${WORKSPACE_VERSION})"
               done
             fi

@@ -67,16 +67,17 @@ correct — these are not controller-only APIs even though they mutate.
 
 Not implemented, and they fall into four groups.
 
-**Producer and consumer-group membership — the real gap.** `Produce` (0),
-`InitProducerId` (18), the transaction write path
+**Consumer-group membership and the transactional write path — the real gap.**
+`Produce` (0) is implemented; what remains is `InitProducerId` (18) and the
+transaction write path
 (`AddPartitionsToTxn` 20, `AddOffsetsToTxn` 21, `EndTxn` 22,
 `TxnOffsetCommit` 24), classic membership (`JoinGroup` 7, `Heartbeat` 8,
 `LeaveGroup` 9, `SyncGroup` 10), KIP-848 membership
 (`ConsumerGroupHeartbeat` 64), and share consumption (`ShareGroupHeartbeat`
 72, `ShareFetch` 74, `ShareAcknowledge` 75).
 
-This is the scope boundary, not an oversight — the library observes groups
-and transactions without joining or starting one. See
+This is the scope boundary, not an oversight — the library writes records, but
+observes groups and transactions without joining or starting one. See
 [Non-goals](non-goals.md) and [Roadmap](../guide/roadmap.md).
 
 **Broker-internal and KRaft APIs**, which a client has no business sending:

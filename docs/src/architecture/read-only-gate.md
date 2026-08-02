@@ -87,8 +87,11 @@ Several keys that read like queries are classified mutating, correctly:
 - `OffsetCommit`, `OffsetDelete` — they write group state
 - `InitProducerId`, `AddPartitionsToTxn` — they allocate and fence producer
   state
-- `Produce` — obviously, and it is already gated even though nothing in the
-  workspace can send one yet
+- `Produce` — obviously. It was classified and gated before anything in the
+  workspace could send one, which is the point of gating on `ApiKey` rather
+  than over a method surface: `kafka-produce` arrived already covered, and its
+  acceptance suite asserts a read-only client refuses to produce without the
+  gate having heard of the crate
 
 ## What it does and does not protect
 

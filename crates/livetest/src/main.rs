@@ -20,6 +20,7 @@
 )]
 
 mod probe;
+mod produce;
 mod read;
 mod report;
 mod smoke;
@@ -57,6 +58,10 @@ async fn main() -> Result<()> {
         // captures exactly the diffable body and nothing else.
         "probe" => emit(report::Outcome::ok(probe::probe(&target).await?)),
         "smoke" => emit(smoke::smoke(&target).await?),
+        "produce" => {
+            let options = produce::Options::parse(&rest)?;
+            emit(produce::produce(&target, &options).await?)
+        }
         "read" => {
             let options = read::Options::parse(&rest)?;
             emit(read::read(&target, &options).await?)
@@ -93,7 +98,7 @@ fn print_help() {
         "livetest — run kaas-lib against a real Kafka cluster
 
 USAGE
-    livetest <probe|smoke|read|sweep> [options]
+    livetest <probe|smoke|produce|read|sweep> [options]
 
 COMMANDS
     probe    Read-only inventory and negotiated version table. Touches
@@ -101,6 +106,12 @@ COMMANDS
              clusters and diff the results for a conformance check.
     smoke    Admin round trip: create, describe, alter, verify, delete. Creates
              only prefixed resources and removes them again.
+    produce  Write path round trip: produce with every codec, an explicit
+             partition, a tombstone and a keyed spread, then read it all back
+             through kafka-read. Creates only prefixed resources.
+               --topic <name>      use an existing topic instead of creating
+                                   one, so its leader map can be diffed
+                                   against another client's view of it
     read     Scan and tail topics, asserting the decoder against real data
              written by clients we did not write.
                --topic <name>      read this topic (repeatable)

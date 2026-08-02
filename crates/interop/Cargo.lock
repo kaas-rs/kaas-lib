@@ -1101,6 +1101,7 @@ dependencies = [
  "futures",
  "kafka-admin",
  "kafka-conn",
+ "kafka-produce",
  "kafka-read",
  "rdkafka",
  "testkit",
@@ -1154,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-admin"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1168,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-conn"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.0",
  "bytes",
@@ -1193,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-meta"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -1204,6 +1205,20 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "kafka-produce"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "kafka-conn",
+ "kafka-meta",
+ "kafka-protocol",
+ "rand 0.9.5",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1227,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-read"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2311,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "testkit"
-version = "0.0.1"
+version = "0.2.0"
 dependencies = [
  "futures",
  "testcontainers",

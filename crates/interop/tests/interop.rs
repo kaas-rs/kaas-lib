@@ -252,3 +252,96 @@ async fn a_group_offset_we_commit_is_the_offset_rdkafka_resumes_from() {
          we thought it meant"
     );
 }
+
+/// M12 acceptance, third leg: our murmur2 is Java's murmur2.
+///
+/// The reason this cannot be a unit test is the reason the whole crate exists.
+/// A partitioner that is *nearly* right returns a partition for every key,
+/// round trips through our own reader, and passes any assertion written
+/// against ourselves — it just puts keys where a Java or C client would not
+/// look for them, which breaks co-partitioned joins and compacted-topic
+/// semantics silently and much later.
+///
+/// Note `partitioner=murmur2_random`, set explicitly. librdkafka's *default*
+/// partitioner is not the Java-compatible one, so a test that left this unset
+/// would compare our murmur2 against a different hash entirely and fail for
+/// the wrong reason — or, worse, be "fixed" by changing our implementation to
+/// match it.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_thousand_keys_land_where_rdkafka_puts_them() {
+    const PARTITIONS: i32 = 12;
+    const KEYS: u32 = 1_000;
+
+    let fixture = testkit::single_broker().await.unwrap();
+    let bootstrap = fixture.bootstrap()[0].clone();
+    let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
+        .await
+        .unwrap();
+    admin
+        .create_topics([NewTopic::new("murmur2", PARTITIONS, 1)])
+        .await
+        .unwrap();
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &bootstrap)
+        .set("partitioner", "murmur2_random")
+        .set("message.timeout.ms", "10000")
+        .create()
+        .expect("rdkafka producer");
+
+    for i in 0..KEYS {
+        let key = format!("key-{i}");
+        producer
+            .send(
+                FutureRecord::to("murmur2").key(&key).payload(&key),
+                Duration::from_secs(10),
+            )
+            .await
+            .expect("rdkafka produced");
+    }
+
+    // Read every partition back and check each key against our own answer.
+    let cluster = admin.cluster().clone();
+    let mut stream = Box::pin(
+        kafka_read::scan(&cluster, ScanSpec::new("murmur2"))
+            .await
+            .unwrap(),
+    );
+
+    let mut checked = 0u32;
+    while let Some(event) = stream.next().await {
+        match event.expect("no scan failure") {
+            ScanEvent::Record(record) => {
+                let key = record.key.as_deref().expect("keyed");
+                let ours = kafka_produce::partition_for_key(key, PARTITIONS);
+                assert_eq!(
+                    ours,
+                    record.partition,
+                    "key {} : rdkafka chose partition {}, we chose {ours}",
+                    String::from_utf8_lossy(key),
+                    record.partition,
+                );
+                checked += 1;
+            }
+            ScanEvent::Malformed { offset, reason, .. } => {
+                panic!("malformed batch at {offset}: {reason}")
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(checked, KEYS, "did not read back every key");
+
+    // A partitioner that sent everything to one partition would agree with
+    // itself on all 1000 keys above if rdkafka did the same. It does not, but
+    // assert the spread anyway so the agreement above is meaningful.
+    let spread: std::collections::HashSet<i32> = (0..KEYS)
+        .map(|i| kafka_produce::partition_for_key(format!("key-{i}").as_bytes(), PARTITIONS))
+        .collect();
+    assert_eq!(
+        spread.len(),
+        usize::try_from(PARTITIONS).unwrap(),
+        "1000 keys should reach all {PARTITIONS} partitions"
+    );
+}

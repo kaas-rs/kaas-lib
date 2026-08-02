@@ -1,7 +1,8 @@
 # Releasing
 
-The four library crates — `kafka-conn`, `kafka-meta`, `kafka-admin`,
-`kafka-read` — publish to crates.io **in lockstep** at a single version held
+The five library crates — `kafka-conn`, `kafka-meta`, `kafka-admin`,
+`kafka-read`, `kafka-produce` — publish to crates.io **in lockstep** at a
+single version held
 in `[workspace.package]`. `testkit`, `livetest`, `xtask` and `interop` are
 `publish = false`.
 
@@ -32,7 +33,8 @@ upload of the run. Harmless when it happens (the first crate never uploads,
 so nothing is claimed and the version is still free), just slow to discover.
 
 **1. The crate names must be available.** As of the last check
-`kafka-conn`, `kafka-meta`, `kafka-admin` and `kafka-read` were all
+`kafka-conn`, `kafka-meta`, `kafka-admin`, `kafka-read` and
+`kafka-produce` were all
 unclaimed on crates.io. Confirm before releasing — publishing claims them
 permanently, and they are generic names in a flat namespace. If that gives
 you pause, rename first; it is far cheaper now than after.
@@ -141,7 +143,8 @@ The `gate` job, in order, all blocking:
 
 Only then does `publish` start and pause for the environment's reviewer. It
 authenticates and runs `cargo publish --workspace`, which resolves the order
-itself (`kafka-conn` → `kafka-meta` → `kafka-admin`/`kafka-read`) and waits
+itself (`kafka-conn` → `kafka-meta` →
+`kafka-admin`/`kafka-read`/`kafka-produce`) and waits
 for each crate to reach the index before publishing its dependents.
 
 ## If something goes wrong

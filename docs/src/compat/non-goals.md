@@ -4,19 +4,26 @@ The fastest honest answer to "can I use this". Everything here is a decision,
 not a gap waiting to be closed by accident — though
 [Roadmap](../guide/roadmap.md) covers which ones are on the list to lift.
 
-## This is not a general-purpose Kafka client
+## This is not yet a general-purpose Kafka client
 
-**There is no producer.** `Produce` is classified, routed and gated, and
-nothing sends one. You cannot write a record with this library.
+**There is a producer, and it is deliberately a small one.**
+[`kafka-produce`](../code-tour/kafka-produce.md) encodes v2 record batches,
+partitions by Java-compatible murmur2, sticks unkeyed records to one partition
+per KIP-480, and writes with every compression codec. What it does not have
+is a batching accumulator, idempotence or transactions, so a produce costs one
+round trip per record, and an ambiguous failure — a timeout, a dropped
+connection — is reported rather than retried, because re-sending without a
+sequence number is how a producer duplicates data. `acks=0` is refused at the
+type level; see that crate's documentation for why.
 
 **There is no consumer-group membership.** The library *describes* groups
 thoroughly — all three describable kinds, members, assignments, committed
 offsets — but it never joins one. No `JoinGroup`, no
 `ConsumerGroupHeartbeat`, no rebalance, no auto-commit, no poll loop.
 
-If you want to produce or to consume as a group member today, use
-[`rdkafka`](https://crates.io/crates/rdkafka). It wraps librdkafka, needs
-cmake and a C toolchain, and is the mature option.
+If you need high-throughput producing, exactly-once semantics, or group
+membership today, use [`rdkafka`](https://crates.io/crates/rdkafka). It wraps
+librdkafka, needs cmake and a C toolchain, and is the mature option.
 
 ## The read path is browse-shaped, not consumer-shaped
 
