@@ -131,5 +131,21 @@ pub use partition::{Partitioner, murmur2, partition_for_key};
 pub use producer::{Delivery, Producer};
 pub use record::{ProducerRecord, RecordMetadata};
 
+/// Encode records into one v2 batch, for the round-trip fuzz target.
+///
+/// Not part of the supported surface: the encoder is an internal detail of the
+/// producer, and the only reason it is reachable at all is that M19 fuzzes what
+/// this crate *writes* through the decoder in `kafka-read` that has to read it
+/// back. A mutual misreading of the spec by both halves round-trips cleanly and
+/// is still wrong on the wire, so this exists to catch the narrower thing: the
+/// pair disagreeing with itself.
+#[doc(hidden)]
+pub fn encode_for_fuzzing(
+    records: &[ProducerRecord],
+    compression: Compression,
+) -> Result<bytes::Bytes> {
+    encode::encode_batch(records, compression, 0, None)
+}
+
 pub use kafka_conn::{Error, Result};
 pub use kafka_meta::{Cluster, ClusterConfig};

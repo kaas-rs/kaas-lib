@@ -15,10 +15,21 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 bytes         = "1.12"
 kafka-read    = { path = "../crates/kafka-read" }
+# The encoder half of the round-trip target: M19 fuzzes what we *write*
+# through the decoder that has to read it back.
+kafka-produce = { path = "../crates/kafka-produce" }
+arbitrary     = { version = "1", features = ["derive"] }
 
 [[bin]]
 name              = "record_batch"
 path              = "fuzz_targets/record_batch.rs"
+test              = false
+doc               = false
+bench             = false
+
+[[bin]]
+name              = "record_batch_roundtrip"
+path              = "fuzz_targets/record_batch_roundtrip.rs"
 test              = false
 doc               = false
 bench             = false

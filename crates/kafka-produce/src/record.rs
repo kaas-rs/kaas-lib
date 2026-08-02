@@ -27,8 +27,24 @@ pub struct ProducerRecord {
     /// Headers, in the order they will be written.
     ///
     /// A `Vec` rather than a map because Kafka headers are an ordered list and
-    /// may repeat a name — collapsing them into a map would silently drop
-    /// duplicates a Java producer is entitled to write.
+    /// may repeat a name.
+    ///
+    /// # A duplicate name cannot currently be written
+    ///
+    /// This type preserves duplicates, and [`kafka_read`] returns them
+    /// faithfully — but the encoder cannot emit them.
+    /// `kafka_protocol::records::Record::headers` is an `IndexMap`, so a
+    /// repeated name collapses to its last value on the way to the wire, with
+    /// no error. Reading records a Java producer wrote is unaffected; only
+    /// writing them is impossible.
+    ///
+    /// An upstream limitation rather than something to route around: the
+    /// alternative is hand-rolling the record format, which CLAUDE.md rules
+    /// out. `a_duplicate_header_name_is_dropped_and_that_is_an_upstream_limit`
+    /// in `tests/roundtrip.rs` pins the behaviour so the day upstream changes
+    /// the field to a list, the test tells us.
+    ///
+    /// [`kafka_read`]: https://docs.rs/kafka-read
     pub headers: Vec<(String, Option<Bytes>)>,
     /// The record timestamp in milliseconds, when the caller is choosing it.
     ///
