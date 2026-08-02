@@ -20,7 +20,7 @@
 //! ```no_run
 //! # async fn example(cluster: &kafka_meta::Cluster) -> kafka_read::Result<()> {
 //! use futures::StreamExt;
-//! use kafka_read::{ScanEvent, ScanSpec, StartPosition, TailSpec};
+//! use kafka_read::{ScanEvent, ScanSpec, StartPosition, TailAnchor, TailSpec};
 //!
 //! // Browse forwards.
 //! let mut stream = Box::pin(
@@ -39,6 +39,10 @@
 //!
 //! // Or read the tail — the most-used view in any Kafka UI.
 //! let tails = kafka_read::tail(cluster, &TailSpec::new("orders", 500)).await?;
+//!
+//! // The same walk, ending somewhere other than the log end.
+//! let ending_at = TailSpec::new("orders", 500).ending_at(TailAnchor::Offset(16_733));
+//! let window = kafka_read::tail(cluster, &ending_at).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -61,7 +65,7 @@ mod offsets;
 mod record;
 mod scan;
 
-pub use backward::{PartitionTail, TailSpec, tail};
+pub use backward::{PartitionTail, TailAnchor, TailSpec, tail};
 pub use batch::{AbortedTransaction, DecodeOptions, DecodedPartition, Visibility, decode_records};
 pub use record::{DecodeError, Record, RecordOutcome, TimestampType};
 pub use scan::{RecordFilter, ScanEvent, ScanProgress, ScanSpec, StartPosition, scan};

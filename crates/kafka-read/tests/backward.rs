@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use kafka_admin::{Admin, ClusterConfig, NewTopic, OffsetSpec};
-use kafka_read::{Cluster, TailSpec};
+use kafka_read::{Cluster, TailAnchor, TailSpec};
 use testkit::{BrokerConfig, Cluster as _, KafkaCluster};
 
 /// Produce with deliberately varied batch sizes, so batch boundaries do not
@@ -292,6 +292,318 @@ async fn a_multi_partition_tail_spreads_the_limit() {
     for tail in &tails {
         assert!(tail.records.len() <= 100, "{} records", tail.records.len());
     }
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn an_offset_anchored_tail_includes_the_anchor_and_stops_there() {
+    // The property the whole anchor exists for: `Offset(n)` is an *inclusive*
+    // upper bound. An off-by-one here is invisible on a live cluster — the
+    // window still looks plausible — so it is asserted on both ends.
+    let (fixture, cluster) = setup("anchored", 1, BrokerConfig::new()).await;
+    produce_randomised(&fixture, "anchored", 100_000).await;
+
+    let anchor = 40_000i64;
+    let tails = kafka_read::tail(
+        &cluster,
+        &TailSpec::new("anchored", 500).ending_at(TailAnchor::Offset(anchor)),
+    )
+    .await
+    .expect("anchored tail");
+
+    let records = &tails[0].records;
+    assert_eq!(records.len(), 500, "exactly the number asked for");
+    assert_eq!(
+        records.last().map(|r| r.offset),
+        Some(anchor),
+        "the anchor itself must be the newest record in the window"
+    );
+    assert_eq!(
+        records.first().map(|r| r.offset),
+        Some(anchor - 499),
+        "and the window must extend backwards from it, not forwards"
+    );
+    assert!(
+        records.iter().all(|r| r.offset <= anchor),
+        "nothing above the anchor may appear"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_partition_whose_log_end_is_below_the_anchor_yields_its_own_tail() {
+    // Partitions of one topic sit at different offsets, so a single anchor is
+    // routinely past the end of some of them. That is a result, not an error:
+    // the alternative is a multi-partition window that fails whenever the
+    // partitions are unevenly filled, which is always.
+    let (fixture, cluster) = setup("shortanchor", 1, BrokerConfig::new()).await;
+    fixture
+        .exec(
+            0,
+            vec![
+                "bash".to_owned(),
+                "-c".to_owned(),
+                "seq 1 40 | /opt/kafka/bin/kafka-console-producer.sh \
+                 --bootstrap-server localhost:9093 --topic shortanchor"
+                    .to_owned(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let tails = tokio::time::timeout(
+        Duration::from_secs(30),
+        kafka_read::tail(
+            &cluster,
+            &TailSpec::new("shortanchor", 10).ending_at(TailAnchor::Offset(9_000_000)),
+        ),
+    )
+    .await
+    .expect("an anchor past the log end must not loop")
+    .expect("tail");
+
+    let anchored = &tails[0].records;
+    assert_eq!(anchored.len(), 10);
+
+    let plain = kafka_read::tail(&cluster, &TailSpec::new("shortanchor", 10))
+        .await
+        .unwrap();
+    assert_eq!(
+        anchored.iter().map(|r| r.offset).collect::<Vec<_>>(),
+        plain[0]
+            .records
+            .iter()
+            .map(|r| r.offset)
+            .collect::<Vec<_>>(),
+        "clamped to the log end, an anchored tail is the ordinary tail"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn an_anchor_below_the_log_start_is_an_empty_result() {
+    let (fixture, cluster) = setup("expired", 1, BrokerConfig::new()).await;
+    fixture
+        .exec(
+            0,
+            vec![
+                "bash".to_owned(),
+                "-c".to_owned(),
+                "seq 1 40 | /opt/kafka/bin/kafka-console-producer.sh \
+                 --bootstrap-server localhost:9093 --topic expired"
+                    .to_owned(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    // Offset -1 is below any log start. Invariant 3: a window with nothing in
+    // it is a successful description of a partition, not a failure of one.
+    let tails = tokio::time::timeout(
+        Duration::from_secs(30),
+        kafka_read::tail(
+            &cluster,
+            &TailSpec::new("expired", 10).ending_at(TailAnchor::Offset(-1)),
+        ),
+    )
+    .await
+    .expect("must not loop below the log start")
+    .expect("an out-of-range anchor is a result, not an error");
+    assert!(tails[0].records.is_empty());
+    assert_eq!(tails[0].fetches, 0, "and it costs no fetch");
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn an_anchored_tail_converges_on_a_compacted_topic() {
+    // The step-growing behaviour is the reason §3.3 could be additive rather
+    // than a second implementation: an arbitrary anchor faces exactly the
+    // offset gaps the log end does, and needs exactly the same convergence.
+    let (fixture, cluster) = setup(
+        "compactedanchor",
+        1,
+        BrokerConfig::new()
+            .with_property("log.cleaner.enable", "true")
+            .with_property("log.cleaner.backoff.ms", "1000")
+            .with_property("log.cleaner.min.cleanable.ratio", "0.01")
+            .with_property("log.segment.bytes", "1048576")
+            .with_property("log.roll.ms", "1000"),
+    )
+    .await;
+
+    let admin = Admin::new(cluster.clone());
+    admin
+        .alter_configs([(
+            kafka_admin::ConfigResource::topic("compactedanchor"),
+            vec![
+                kafka_admin::ConfigChange::set("cleanup.policy", "compact"),
+                kafka_admin::ConfigChange::set("min.cleanable.dirty.ratio", "0.01"),
+                kafka_admin::ConfigChange::set("segment.bytes", "16384"),
+                kafka_admin::ConfigChange::set("delete.retention.ms", "1000"),
+                kafka_admin::ConfigChange::set("max.compaction.lag.ms", "1000"),
+            ],
+        )])
+        .await
+        .unwrap();
+
+    fixture
+        .exec(
+            0,
+            vec![
+                "bash".to_owned(),
+                "-c".to_owned(),
+                "for round in $(seq 1 50); do \
+                   for k in $(seq 1 200); do echo \"key$k:v$round\"; done \
+                 done | /opt/kafka/bin/kafka-console-producer.sh \
+                   --bootstrap-server localhost:9093 --topic compactedanchor \
+                   --property parse.key=true --property key.separator=:"
+                    .to_owned(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_secs(25)).await;
+
+    let latest = admin
+        .list_offsets([("compactedanchor".to_owned(), 0)], OffsetSpec::Latest)
+        .await
+        .unwrap();
+    let end = latest[0].1.as_ref().unwrap().offset.unwrap();
+    // Anchor well inside the compacted region, where the offsets are sparse
+    // and a fixed step would crawl.
+    let anchor = end / 2;
+
+    let started = std::time::Instant::now();
+    let tails = tokio::time::timeout(
+        Duration::from_secs(60),
+        kafka_read::tail(
+            &cluster,
+            &TailSpec::new("compactedanchor", 100).ending_at(TailAnchor::Offset(anchor)),
+        ),
+    )
+    .await
+    .expect("an anchored walk must converge over offset gaps too")
+    .expect("tail");
+
+    let records = &tails[0].records;
+    assert_eq!(records.len(), 100, "exact count despite the offset gaps");
+    assert!(
+        records.iter().all(|r| r.offset <= anchor),
+        "nothing above the anchor"
+    );
+    assert!(
+        records.windows(2).all(|w| w[0].offset < w[1].offset),
+        "out of order"
+    );
+    println!(
+        "anchored compacted tail took {:?} and {} fetches",
+        started.elapsed(),
+        tails[0].fetches
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_timestamp_anchor_stops_at_or_before_the_instant() {
+    let (fixture, cluster) = setup("timed", 1, BrokerConfig::new()).await;
+
+    let produce = |range: &'static str| {
+        let fixture = &fixture;
+        async move {
+            fixture
+                .exec(
+                    0,
+                    vec![
+                        "bash".to_owned(),
+                        "-c".to_owned(),
+                        format!(
+                            "seq {range} | /opt/kafka/bin/kafka-console-producer.sh \
+                             --bootstrap-server localhost:9093 --topic timed"
+                        ),
+                    ],
+                )
+                .await
+                .unwrap();
+        }
+    };
+
+    produce("1 500").await;
+    // Wide enough that clock skew between the test process and the broker
+    // cannot move a record across the boundary.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let boundary = now_millis();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    produce("501 1000").await;
+
+    let tails = kafka_read::tail(
+        &cluster,
+        &TailSpec::new("timed", 50).ending_at(TailAnchor::Timestamp(boundary)),
+    )
+    .await
+    .expect("timestamp-anchored tail");
+
+    let records = &tails[0].records;
+    assert_eq!(records.len(), 50);
+    assert!(
+        records.iter().all(|r| r.timestamp <= boundary),
+        "a timestamp anchor is an at-or-before bound"
+    );
+    // The newest record in the window must be the last one written before the
+    // boundary — the 500th — rather than merely *some* record before it.
+    assert_eq!(
+        records.last().map(|r| r.offset),
+        Some(499),
+        "the window must end at the boundary, not short of it"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_timestamp_anchor_after_every_record_reads_the_whole_tail() {
+    let (fixture, cluster) = setup("timedpast", 1, BrokerConfig::new()).await;
+    fixture
+        .exec(
+            0,
+            vec![
+                "bash".to_owned(),
+                "-c".to_owned(),
+                "seq 1 100 | /opt/kafka/bin/kafka-console-producer.sh \
+                 --bootstrap-server localhost:9093 --topic timedpast"
+                    .to_owned(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    // `ListOffsets` answers -1 — "no offset at or after this" — which means
+    // every record is at or before the instant, not that there is nothing to
+    // read. Reading that as an empty window is the obvious wrong turn.
+    let far_future = now_millis() + 86_400_000;
+
+    let tails = kafka_read::tail(
+        &cluster,
+        &TailSpec::new("timedpast", 10).ending_at(TailAnchor::Timestamp(far_future)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(tails[0].records.len(), 10);
+    assert_eq!(tails[0].records.last().map(|r| r.offset), Some(99));
+}
+
+/// Wall-clock now, in the units the wire uses.
+///
+/// `try_from` rather than `as`: the workspace denies silent narrowing in tests
+/// too, and a truncated timestamp would make a timestamp-anchored assertion
+/// fail for a reason that has nothing to do with the anchor.
+fn now_millis() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
 }
 
 /// Bytes read from every connection in the pool.

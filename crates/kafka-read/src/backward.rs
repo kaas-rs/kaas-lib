@@ -28,6 +28,16 @@
 //! * **The loop must terminate.** It stops at the partition's log start, and
 //!   the step only ever grows, so a partition with a thousand-fold offset gap
 //!   converges rather than crawling.
+//!
+//! # Anchoring
+//!
+//! The walk does not have to start at the log end. [`TailAnchor`] moves it to
+//! an explicit offset or a wall-clock instant, which is what "the 500 records
+//! ending at offset N" and "what did this topic look like at 14:30" need. The
+//! anchor only decides where `window_end` starts; everything above — the
+//! growing step, the batch-boundary filtering, the termination guard — is the
+//! same code, because an arbitrary anchor faces the same offset gaps the log
+//! end does.
 
 use std::collections::VecDeque;
 
@@ -39,6 +49,24 @@ use crate::fetch::{FetchTarget, fetch};
 use crate::record::{Record, RecordOutcome};
 use crate::scan::RecordFilter;
 
+/// Where a backward walk starts.
+///
+/// Both explicit anchors are **inclusive upper bounds**: `Offset(16733)` yields
+/// 16733 and the records before it, and `Timestamp(t)` yields the last record
+/// written at or before `t`. An anchor beyond a partition's log end is not an
+/// error — that partition simply yields its own tail — and one below its log
+/// start yields nothing, which is a result rather than a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TailAnchor {
+    /// The current end of the log. The original behaviour, and the default.
+    #[default]
+    LogEnd,
+    /// The same explicit offset in every partition.
+    Offset(i64),
+    /// The last record at or before a wall-clock time, in epoch milliseconds.
+    Timestamp(i64),
+}
+
 /// How to read the tail of a partition.
 #[derive(Debug, Clone)]
 pub struct TailSpec {
@@ -46,6 +74,8 @@ pub struct TailSpec {
     pub topic: String,
     /// Partitions, or `None` for every partition.
     pub partitions: Option<Vec<i32>>,
+    /// Where the walk starts. [`TailAnchor::LogEnd`] unless set.
+    pub anchor: TailAnchor,
     /// How many records to return, in total across partitions.
     pub limit: usize,
     /// Filter applied after decoding.
@@ -74,6 +104,7 @@ impl TailSpec {
         Self {
             topic: topic.into(),
             partitions: None,
+            anchor: TailAnchor::LogEnd,
             limit,
             filter: None,
             visibility: Visibility::default(),
@@ -88,6 +119,16 @@ impl TailSpec {
     /// Restrict to specific partitions.
     pub fn with_partitions(mut self, partitions: impl IntoIterator<Item = i32>) -> Self {
         self.partitions = Some(partitions.into_iter().collect());
+        self
+    }
+
+    /// Walk backwards from somewhere other than the log end.
+    ///
+    /// The convergence behaviour is unchanged — an arbitrary anchor needs the
+    /// step to grow across offset gaps for exactly the same reason the log end
+    /// does.
+    pub fn ending_at(mut self, anchor: TailAnchor) -> Self {
+        self.anchor = anchor;
         self
     }
 
@@ -201,7 +242,16 @@ async fn tail_partition(
     let mut malformed = 0usize;
     let mut fetches = 0usize;
     // The exclusive upper bound of the window we still need.
-    let mut window_end = log_end;
+    let mut window_end = resolve_anchor(
+        cluster,
+        &spec.topic,
+        partition,
+        leader,
+        spec.anchor,
+        log_start,
+        log_end,
+    )
+    .await?;
     let mut step = first_step.clamp(1, spec.max_step);
 
     while collected.len() < limit && window_end > log_start {
@@ -259,6 +309,60 @@ async fn tail_partition(
         malformed,
         fetches,
     })
+}
+
+/// The exclusive upper bound the walk starts from, for one partition.
+///
+/// Every anchor resolves to an offset in `[log_start, log_end]`, so the walk
+/// itself is identical whatever it was anchored at. A [`TailAnchor::Timestamp`]
+/// costs one `ListOffsets` — the same RPC [`crate::StartPosition::Timestamp`]
+/// already uses, so there is no new api key to negotiate.
+async fn resolve_anchor(
+    cluster: &Cluster,
+    topic: &str,
+    partition: i32,
+    leader: i32,
+    anchor: TailAnchor,
+    log_start: i64,
+    log_end: i64,
+) -> Result<i64> {
+    match anchor {
+        TailAnchor::LogEnd => Ok(log_end),
+        TailAnchor::Offset(offset) => Ok(clamp_bound(offset.saturating_add(1), log_start, log_end)),
+        TailAnchor::Timestamp(millis) => {
+            // `ListOffsets` answers "the first offset at or *after* this
+            // instant", and the anchor is inclusive — so ask about the
+            // millisecond after it. A record written exactly at `millis` is
+            // then inside the window rather than one short of it.
+            //
+            // The clamp to zero is not defensive tidying: negative values are
+            // sentinels on the wire, -1 meaning LATEST and -2 EARLIEST, so a
+            // pre-epoch timestamp reaching the broker unclamped would silently
+            // become a completely different query.
+            let probe = timestamp_probe(millis);
+            match crate::offsets::at_timestamp(cluster, topic, partition, leader, probe).await? {
+                Some(offset) => Ok(clamp_bound(offset, log_start, log_end)),
+                // Nothing was written after the instant, so the whole
+                // partition is at or before it.
+                None => Ok(log_end),
+            }
+        }
+    }
+}
+
+/// The instant to ask `ListOffsets` about for an inclusive timestamp anchor.
+fn timestamp_probe(millis: i64) -> i64 {
+    millis.saturating_add(1).max(0)
+}
+
+/// Hold an exclusive upper bound inside what the partition actually retains.
+///
+/// A bound above the log end becomes the log end — a partition that has not
+/// reached the requested offset yields its own tail rather than an error. A
+/// bound below the log start becomes the log start, which makes the walk's
+/// `window_end > log_start` guard false and yields an empty tail.
+fn clamp_bound(bound: i64, log_start: i64, log_end: i64) -> i64 {
+    bound.clamp(log_start.min(log_end), log_end)
 }
 
 /// Read `[start, end)` of a partition, following batch boundaries.
@@ -364,6 +468,65 @@ mod tests {
         assert_eq!(spec.first_step(6), 168);
         // And never absurdly small, which would cost a round trip per record.
         assert_eq!(TailSpec::new("orders", 1).first_step(1), 64);
+    }
+
+    #[test]
+    fn the_default_anchor_is_the_log_end() {
+        // Rule: additive. Every caller written before anchors existed must
+        // keep reading the end of the log without saying so.
+        assert_eq!(TailSpec::new("orders", 500).anchor, TailAnchor::LogEnd);
+        assert_eq!(TailAnchor::default(), TailAnchor::LogEnd);
+    }
+
+    #[test]
+    fn an_offset_anchor_is_an_inclusive_upper_bound() {
+        // `Offset(16733)` yields 16733 and the records before it, so the
+        // exclusive bound handed to the walk is one past it.
+        assert_eq!(clamp_bound(16_733 + 1, 0, 100_000), 16_734);
+    }
+
+    #[test]
+    fn an_anchor_above_the_log_end_yields_the_partitions_own_tail() {
+        // Not an error: partitions of one topic are at different offsets, and
+        // asking for "ending at 900" across all of them must not fail the ones
+        // that have not got there yet.
+        assert_eq!(clamp_bound(901, 100, 500), 500);
+    }
+
+    #[test]
+    fn an_anchor_below_the_log_start_yields_nothing() {
+        // The walk's guard is `window_end > log_start`, so clamping to the log
+        // start is what makes an expired anchor an empty result.
+        let log_start = 12_000i64;
+        let bound = clamp_bound(43, log_start, 16_733);
+        assert_eq!(bound, log_start);
+        assert!(!(bound > log_start), "the walk must not run");
+    }
+
+    #[test]
+    fn an_empty_partition_clamps_to_itself() {
+        // log_start == log_end is the empty partition, and `clamp` panics if
+        // its bounds cross — which they would here without the `min`.
+        assert_eq!(clamp_bound(5, 7, 7), 7);
+        assert_eq!(clamp_bound(9, 7, 7), 7);
+    }
+
+    #[test]
+    fn a_timestamp_anchor_asks_about_the_millisecond_after() {
+        // `ListOffsets` answers "first offset at or after", and the anchor is
+        // inclusive, so a record written exactly at the instant must be inside
+        // the window rather than one short of it.
+        assert_eq!(timestamp_probe(1_754_040_945_671), 1_754_040_945_672);
+    }
+
+    #[test]
+    fn a_timestamp_probe_never_reaches_the_wire_negative() {
+        // -1 is LATEST and -2 is EARLIEST on this request. A pre-epoch
+        // timestamp arriving unclamped would not fail — it would quietly
+        // answer a different question.
+        assert_eq!(timestamp_probe(-1), 0);
+        assert_eq!(timestamp_probe(-5_000), 0);
+        assert_eq!(timestamp_probe(i64::MAX), i64::MAX);
     }
 
     #[test]
