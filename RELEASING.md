@@ -47,7 +47,7 @@ no "pending publisher". So:
    `publish-new` and `publish-update`.
 2. Add it as the repository secret `CARGO_REGISTRY_TOKEN`.
 3. Run the release (below).
-4. **Then** configure Trusted Publishing for each of the four crates at
+4. **Then** configure Trusted Publishing for each of the five crates at
    `https://crates.io/crates/<name>/settings` — repository
    `kaas-rs/kaas-lib`, workflow `release.yml`, environment `crates-io`.
 5. **Delete the `CARGO_REGISTRY_TOKEN` secret.** The workflow detects its
@@ -73,10 +73,10 @@ suite are green.
 
 ```sh
 # 1. Bump BOTH version lines in the root Cargo.toml. They are adjacent.
-#      [workspace.package]  version = "0.2.0"
+#      [workspace.package]  version = "0.2.1"
 #      [workspace.dependencies]
-#        kafka-conn = { path = "...", version = "0.2.0" }
-#        kafka-meta = { path = "...", version = "0.2.0" }
+#        kafka-conn = { path = "...", version = "0.2.1" }
+#        kafka-meta = { path = "...", version = "0.2.1" }
 $EDITOR Cargo.toml
 cargo check                 # refresh Cargo.lock
 
@@ -86,16 +86,16 @@ cargo xtask integration
 cargo publish --dry-run --workspace
 
 # 3. Land it.
-git commit -am "chore(release): 0.2.0"
+git commit -am "chore(release): 0.2.1"
 git push origin main
 
 # 4. Tag. The tag push is what publishes.
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 The tag must be `v` + the workspace version exactly. The workflow reads the
-version cargo actually resolved, asserts all four crates agree on it, and
+version cargo actually resolved, asserts all five crates agree on it, and
 refuses to run if the tag disagrees.
 
 ### Why two version lines and not one
@@ -106,7 +106,7 @@ separate string, and crates.io needs it to name a version that exists.
 
 Leaving it stale is uniquely nasty: everything builds locally, because the
 path dependency wins; `cargo xtask ci` is green; and the failure lands
-partway through a four-crate publish, after some crates are already live and
+partway through a five-crate publish, after some crates are already live and
 irreversibly so, as a resolver error about a version nobody has uploaded.
 Keeping both lines in the root manifest means one file and two adjacent
 edits — `cargo publish --dry-run --workspace` in step 2 is what catches it if
@@ -126,7 +126,7 @@ uploads nothing. Only a tag push publishes for real.
 
 The `gate` job, in order, all blocking:
 
-1. **Tag matches the workspace version**, and all four crates agree on it.
+1. **Tag matches the workspace version**, and all five crates agree on it.
 2. **`actionlint`** — the release path is itself a workflow, and a workflow
    expression error fails in zero seconds with no jobs and no logs rather
    than loudly. This file carried one for its entire existence, so every
@@ -156,7 +156,7 @@ version, so a re-run at the same version will not repair it.
 
 **A bad version is live.** `cargo yank --version X.Y.Z <crate>` stops new
 dependents resolving to it. It does **not** delete it, and existing
-`Cargo.lock` files keep working. Yank all four together or you strand
+`Cargo.lock` files keep working. Yank all five together or you strand
 consumers on a broken combination.
 
 **Secrets to check** if authentication fails: either `CARGO_REGISTRY_TOKEN`

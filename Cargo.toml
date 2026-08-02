@@ -12,11 +12,11 @@ members = [
 ]
 
 [workspace.package]
-# The four published crates release in lockstep: they are one library split
-# along a layering boundary, not four independently useful things, and a
+# The five published crates release in lockstep: they are one library split
+# along a layering boundary, not five independently useful things, and a
 # consumer pulling kafka-admin 0.2 against kafka-conn 0.1 is not a
 # combination anyone tests. Bump here, not per crate.
-version      = "0.2.0"
+version      = "0.2.1"
 edition      = "2024"
 license      = "Apache-2.0"
 repository   = "https://github.com/kaas-rs/kaas-lib"
@@ -28,14 +28,14 @@ rust-version = "1.97"
 # five manifests because a `cargo publish` dependency requirement is not
 # inherited from `[workspace.package] version` — it is a separate string that
 # has to be bumped in lockstep, and getting it wrong is not caught by any
-# local check. It fails partway through a four-crate publish, after some
+# local check. It fails partway through a five-crate publish, after some
 # crates are already live and irreversibly so, with a resolver error about a
 # version that does not exist yet.
 #
 # So: two adjacent lines in one file, not six scattered across five. Bump the
 # `version` below together with `[workspace.package] version` above.
-kafka-conn = { path = "crates/kafka-conn", version = "0.2.0" }
-kafka-meta = { path = "crates/kafka-meta", version = "0.2.0" }
+kafka-conn = { path = "crates/kafka-conn", version = "0.2.1" }
+kafka-meta = { path = "crates/kafka-meta", version = "0.2.1" }
 
 # The codec, and the only place protocol types are allowed to appear.
 # See CLAUDE.md: `client` drops the broker half of the codegen, and
