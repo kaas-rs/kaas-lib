@@ -275,7 +275,7 @@ async fn an_unkeyed_record_sticks_to_one_partition() {
 
 #[tokio::test]
 #[ignore = "needs Docker"]
-async fn acks_leader_is_acknowledged_too() {
+async fn acks_leader_is_acknowledged_before_the_record_is_readable() {
     let (_fixture, cluster, _admin) = setup("acked", 1).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new().acks(Acks::Leader));
 
@@ -285,7 +285,37 @@ async fn acks_leader_is_acknowledged_too() {
         .expect("acks=1 should be acknowledged");
     assert_eq!(metadata.offset, 0);
 
-    assert_eq!(read_partition(&cluster, "acked", 0).await.len(), 1);
+    // The acknowledgement means the *leader* wrote the record, not that the
+    // ISR did. A consumer reads only up to the high watermark, and that does
+    // not advance until the followers have replicated — so on this RF=3 topic
+    // the record is acknowledged strictly *before* it becomes visible.
+    //
+    // The poll is the assertion rather than a workaround for one: it proves
+    // the record does arrive, and the fact that it is not there instantly is
+    // the semantic difference between `Acks::Leader` and `Acks::All`. Every
+    // other test here uses the default `Acks::All`, where the ack already
+    // implies the ISR has the record and an immediate read is sound — which
+    // is exactly why this was the only case that failed.
+    let records = await_visible(&cluster, "acked", 0, 1).await;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].value.as_deref(), Some(&b"v"[..]));
+}
+
+/// Poll until a partition holds at least `expected` records.
+async fn await_visible(
+    cluster: &Cluster,
+    topic: &str,
+    partition: i32,
+    expected: usize,
+) -> Vec<kafka_read::Record> {
+    for _ in 0..100 {
+        let records = read_partition(cluster, topic, partition).await;
+        if records.len() >= expected {
+            return records;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("{topic}-{partition} never reached {expected} visible record(s)");
 }
 
 #[tokio::test]

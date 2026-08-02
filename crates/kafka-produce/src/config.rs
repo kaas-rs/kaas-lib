@@ -19,6 +19,14 @@ pub enum Acks {
     /// Fast, and lossy exactly once: if the leader fails before a follower
     /// replicates the record, the record is gone and the caller was told it
     /// arrived.
+    ///
+    /// **The acknowledgement also arrives before the record is readable.** A
+    /// consumer reads only up to the high watermark, which does not advance
+    /// until the in-sync replicas have the record — so on a replicated topic
+    /// there is a window where [`crate::Producer::send`] has returned an
+    /// offset that a scan of that partition will not yet show. That is not a
+    /// bug to work around; it is what this variant means, and code that reads
+    /// its own writes back should use [`Acks::All`].
     Leader,
     /// Every in-sync replica has written the record.
     ///
