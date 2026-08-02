@@ -19,6 +19,19 @@ assuming anything here is still current.
 schema in the crate**. They occupy wire codes a 4.1+ broker advertises and
 `kafka-protocol` 0.17 leaves unassigned.
 
+The codes are **88** (`StreamsGroupHeartbeat`) and **89**
+(`StreamsGroupDescribe`), and the shape of the gap is worth naming exactly,
+because the obvious mental model is wrong. This is a **hole, not a
+truncation**: the crate's `ApiKey` enum runs `ReadShareGroupStateSummary = 87`
+straight to `DescribeShareGroupOffsets = 90`, so it knows three keys *above*
+the two it is missing. "Our schemas stop at key N" does not describe it, and a
+codec bump that raises the ceiling elsewhere is not automatically the thing
+that fills this. Upstream marked the streams-group APIs stable in KAFKA-19869,
+so a crate regenerated after that should pick them up.
+
+Two keys reported as `Unknown` in the middle of a version table is therefore
+**expected output**, not a symptom. So is `ours: None` on those rows.
+
 The consequence is concrete and it will hit any real cluster: a 4.1+ broker
 running Kafka Streams reports `groupType=streams` in `ListGroups`, and we
 cannot describe those groups.
@@ -83,6 +96,14 @@ negotiating from the api key alone picks v10 and the encoder then refuses.
 The fix is `ApiVersions::negotiate_with`, which takes the specific request
 and response types' own `VERSIONS` rather than the api key's. See
 [Version negotiation](../architecture/version-negotiation.md).
+
+`InitProducerId` is the second instance — **request v5, response v6** — and it
+is the one that shows the symptom where it is most likely to be mistaken for a
+bug. A version table renders `ours = 0..6` against a 4.2 broker's `0..5`: our
+declared ceiling sits *above* the broker's, on a key where the encoder would in
+fact refuse v6. Nothing ever sends at v6, because `Connection::send` goes
+through `negotiate_with`; the discrepancy is confined to the reported range.
+Expect it on any key whose response schema outruns its request.
 
 ## 5. Raw snappy does not decode
 

@@ -64,6 +64,33 @@ schema for that key. Returning `None` rather than guessing is the whole point
 `broker_ahead()` reports the normal case against a newer broker, and is what
 the acceptance test asserts on to prove the clamp is happening on our side.
 
+### What "ahead" looks like in practice
+
+Measured against a Kafka **4.2.0** broker, 8 of the 75 advertised keys are
+ahead of `kafka-protocol` 0.17 — every one of them by exactly one version.
+The numbers move with each broker release; the shape does not.
+
+| key | `ours` | broker |
+|---|---|---|
+| `ListOffsets` | 1..10 | 1..11 |
+| `WriteTxnMarkers` | 1..1 | 1..2 |
+| `ShareFetch` | 1..1 | 1..2 |
+| `ShareAcknowledge` | 1..1 | 1..2 |
+| `AddRaftVoter` | 0..0 | 0..1 |
+| `WriteShareGroupState` | 0..0 | 0..1 |
+| `ReadShareGroupStateSummary` | 0..0 | 0..1 |
+| `DescribeShareGroupOffsets` | 0..0 | 0..1 |
+
+**This is the steady state, not a defect to chase.** Each of these negotiates
+to our max and works; five are share-group APIs still settling upstream. Only
+one costs a feature — `ListOffsets` v11 is what puts the `-6` sentinel out of
+reach, in [The upstream schema gap](../compat/upstream-gap.md).
+
+`ours` comes from `ApiKey::valid_versions()` and nothing else — this workspace
+declares no version support of its own, so every row above is a fact about the
+codec crate rather than a decision made here. Bumping the crate is the only
+thing that moves any of them.
+
 ## Why `negotiate_with` exists
 
 There are two ways to ask "what version can we send", and the difference
