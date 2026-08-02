@@ -290,7 +290,223 @@ async fn run(cluster: &Cluster, admin: &Admin, topic: &str, report: &mut Report)
     }
     report.set("produce.keys_routed", routed);
 
+    // 5. The accumulator (M13). Everything above sends one record per request,
+    //    which is the shape M12 shipped; this is the assertion that the
+    //    batching added on top is real.
+    batching(cluster, topic, report).await?;
+
     Ok(())
+}
+
+/// How many records the batching section writes.
+const BATCHED: usize = 20_000;
+
+/// M13: many records, few requests, and the log in the order they were
+/// enqueued.
+///
+/// The request count is the load-bearing number. A producer whose accumulator
+/// does nothing still delivers every record in order and passes every
+/// correctness check here — it just sends 20,000 requests to do it. Against a
+/// three-broker cluster this also exercises the part a single-broker fixture
+/// cannot: batches for partitions on different leaders are grouped into one
+/// request *per broker*, so the count should scale with brokers, not with
+/// partitions.
+async fn batching(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<()> {
+    // A run-unique marker, because `--topic` may point at a topic that already
+    // holds records from an earlier run. Counting everything in the partition
+    // would then measure someone else's traffic and call it a pass.
+    let marker = format!("m13-{}", run_token());
+    let producer = Producer::new(cluster.clone(), ProducerConfig::new());
+
+    // Captured once and reused for both ends of the measurement — see
+    // `Traffic`. Taken before the warmup produce, because a produce can
+    // invalidate the snapshot out from under the very refresh that reads it.
+    let brokers = broker_ids(cluster).await?;
+    report.set("batching.brokers", brokers.len());
+
+    // Warm the pool before the mark so the delta is produce traffic and not
+    // the first Metadata round trip to each broker.
+    producer
+        .send(
+            ProducerRecord::new(topic)
+                .partition(0)
+                .value(format!("{marker}-warmup")),
+        )
+        .await?;
+
+    let mark = traffic(cluster, &brokers).await;
+    let started = Instant::now();
+
+    // Enqueue everything before awaiting anything: awaiting each send in turn
+    // keeps exactly one record in flight and batches nothing.
+    let mut pending = Vec::with_capacity(BATCHED);
+    for i in 0..BATCHED {
+        pending.push(
+            producer
+                .enqueue(
+                    ProducerRecord::new(topic)
+                        .partition(0)
+                        .value(format!("{marker}-{i}")),
+                )
+                .await?,
+        );
+    }
+    let mut delivered = 0;
+    for delivery in pending {
+        delivery.await?;
+        delivered += 1;
+    }
+
+    let after = traffic(cluster, &brokers).await;
+    let used = after.snapshot.since(&mark.snapshot);
+    report.set("batching.records", delivered);
+    report.set("batching.requests", used.requests_sent);
+    report.set("batching.bytes_sent", used.bytes_sent);
+    report.set("batching.elapsed_ms", started.elapsed().as_millis());
+    report.set(
+        "batching.records_per_request",
+        u64::try_from(delivered)
+            .unwrap_or(u64::MAX)
+            .checked_div(used.requests_sent)
+            .unwrap_or(0),
+    );
+
+    if delivered != BATCHED {
+        bail!("enqueued {BATCHED} records, {delivered} were delivered");
+    }
+
+    // Before believing the count, check that it was measured at all.
+    //
+    // The first live run of this section reported zero requests for 20,000
+    // delivered records and *passed*, because a sum that silently skipped a
+    // broker came back lower than the mark and saturating subtraction floored
+    // the delta at zero. A vacuous pass here is worse than no assertion: the
+    // whole point of counting requests is to catch a producer that batches
+    // nothing, and a measurement that can read zero cannot distinguish perfect
+    // batching from a broken counter.
+    if mark.sampled != after.sampled {
+        bail!(
+            "request counting is unreliable: sampled {} brokers before and {} after",
+            mark.sampled,
+            after.sampled
+        );
+    }
+    if used.requests_sent == 0 {
+        bail!(
+            "request counting is broken: {BATCHED} records were delivered and \
+             acknowledged across {} broker connections, which cannot have taken \
+             zero requests",
+            after.sampled
+        );
+    }
+    // Deliberately loose: the exact number depends on the broker's batch
+    // validation and on how fast the round trips come back. What it rules out
+    // is the failure this section exists for — no batching at all.
+    if used.requests_sent >= 500 {
+        bail!(
+            "batching did not happen: {} requests for {BATCHED} records",
+            used.requests_sent
+        );
+    }
+
+    // Order is the property the one-batch-per-partition rule protects, and
+    // partition 0 is where it can be checked.
+    let records = read_partition(cluster, topic, 0).await?;
+    let observed: Vec<usize> = records
+        .iter()
+        .filter_map(|record| record.value.as_deref())
+        .filter_map(|value| {
+            let text = String::from_utf8_lossy(value);
+            text.strip_prefix(&format!("{marker}-"))
+                .and_then(|suffix| suffix.parse().ok())
+        })
+        .collect();
+
+    report.set("batching.read_back", observed.len());
+    if observed.len() != BATCHED {
+        bail!(
+            "wrote {BATCHED} records and read back {}",
+            observed.len()
+        );
+    }
+    if observed.iter().copied().ne(0..BATCHED) {
+        bail!("the log's order does not match the order records were enqueued in");
+    }
+    report.set("batching.in_order", true);
+
+    Ok(())
+}
+
+/// Traffic summed across a fixed set of broker connections, and how many of
+/// them the sum actually covers.
+///
+/// Summed rather than per-connection because the accumulator groups batches by
+/// leader, so on a three-broker cluster the requests are spread over three
+/// sockets by design.
+///
+/// # Why the broker ids are passed in rather than read from the snapshot
+///
+/// [`Cluster::invalidate`] installs an *empty* snapshot rather than marking the
+/// existing one stale, and the produce dispatcher invalidates whenever a batch
+/// comes back with an error a refresh would fix — an ordinary occurrence while
+/// a freshly created topic settles its leaders. A helper that reads
+/// `snapshot.brokers()` at both ends of a measurement therefore samples three
+/// brokers before the run and *zero* after it, and `saturating_sub` turns that
+/// into a delta of zero. That is exactly what happened on the first live run of
+/// this section: it reported zero requests for 20,000 delivered records and
+/// passed.
+///
+/// Capturing the ids once makes both ends cover the same set by construction,
+/// and `sampled` catches the residual case where the pool declines to hand a
+/// connection back.
+#[derive(Debug, Clone, Copy)]
+struct Traffic {
+    snapshot: kafka_conn::StatsSnapshot,
+    sampled: usize,
+}
+
+/// The cluster's broker ids, retried until the snapshot actually has some.
+///
+/// `Cluster::invalidate` installs an empty snapshot, and a produce running
+/// concurrently invalidates on any error a refresh would fix. That race can
+/// empty the snapshot *between* `refresh_topics` fetching and returning it, so
+/// even an explicit refresh can hand back zero brokers — observed on one live
+/// run in three. Retrying is the honest fix here; the alternative is a
+/// measurement that silently covers nothing.
+async fn broker_ids(cluster: &Cluster) -> Result<Vec<i32>> {
+    for _ in 0..10 {
+        let ids: Vec<i32> = cluster
+            .refresh()
+            .await?
+            .brokers()
+            .iter()
+            .map(|broker| broker.node_id)
+            .collect();
+        if !ids.is_empty() {
+            return Ok(ids);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    bail!("the cluster reported no brokers after ten refreshes")
+}
+
+async fn traffic(cluster: &Cluster, brokers: &[i32]) -> Traffic {
+    let mut total = kafka_conn::StatsSnapshot::default();
+    let mut sampled = 0;
+    for node_id in brokers {
+        if let Ok(connection) = cluster.pool().get(*node_id).await {
+            let stats = connection.stats_snapshot();
+            total.bytes_sent += stats.bytes_sent;
+            total.bytes_received += stats.bytes_received;
+            total.requests_sent += stats.requests_sent;
+            total.responses_received += stats.responses_received;
+            sampled += 1;
+        }
+    }
+    Traffic {
+        snapshot: total,
+        sampled,
+    }
 }
 
 fn check(what: &str, holds: bool) -> Result<()> {

@@ -52,14 +52,44 @@
 //! accumulator in M13 provides safely, by batching rather than by throwing the
 //! acknowledgement away.
 //!
+//! # Batching, and how to get it
+//!
+//! Records are buffered per partition and sent together. [`Producer::send`]
+//! accepts one record and waits for it, which means a loop of `send().await`
+//! keeps exactly one record in flight and batches nothing. To get the
+//! throughput, use [`Producer::enqueue`], which returns as soon as the record
+//! is buffered, and await the [`Delivery`] handles together:
+//!
+//! ```no_run
+//! # async fn example(producer: &kafka_produce::Producer) -> kafka_produce::Result<()> {
+//! # use kafka_produce::ProducerRecord;
+//! let mut pending = Vec::new();
+//! for i in 0..10_000 {
+//!     pending.push(producer.enqueue(ProducerRecord::new("t").value(format!("{i}"))).await?);
+//! }
+//! for delivery in pending {
+//!     delivery.await?;
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! `linger` defaults to zero and that is not a reason to raise it: a partition
+//! holds one batch on the wire at a time, so records arriving during a round
+//! trip accumulate into the next batch on their own. Batching scales with load
+//! rather than with the setting.
+//!
 //! # What this milestone is, and is not
 //!
-//! M12 is one record on the wire, acked, and readable back. There is no
-//! accumulator yet: [`Producer::send`] encodes a single-record batch and awaits
-//! its response, so throughput is one round trip per record. M13 adds batching
-//! behind the same signature. Idempotence and transactions are M14 and M15;
-//! until M14 lands, a produce is **not** retried, because retrying without
-//! sequence numbers is how a duplicate is written.
+//! M13 is batching, bounded buffer memory and per-record delivery futures.
+//! Idempotence and transactions are M14 and M15; until M14 lands a produce is
+//! retried **only** when the broker rejected it, because re-sending a request
+//! whose outcome is unknown is how a duplicate is written.
+//!
+//! One consequence of that is visible in the configuration: at most one batch
+//! per partition is in flight, because retrying a rejected batch while a later
+//! one is already on the wire reorders the log with no error anywhere. See
+//! [`accumulator`](crate) — M14 is what lifts it.
 
 #![cfg_attr(
     test,
@@ -71,7 +101,9 @@
     )
 )]
 
+mod accumulator;
 mod config;
+mod dispatch;
 mod encode;
 mod partition;
 mod producer;
@@ -79,7 +111,7 @@ mod record;
 
 pub use config::{Acks, Compression, ProducerConfig};
 pub use partition::{Partitioner, murmur2, partition_for_key};
-pub use producer::Producer;
+pub use producer::{Delivery, Producer};
 pub use record::{ProducerRecord, RecordMetadata};
 
 pub use kafka_conn::{Error, Result};

@@ -93,16 +93,54 @@ pub struct ProducerConfig {
     /// retries all read the same stale answer and fail identically, which is a
     /// retry loop that has only made the error message longer.
     pub retry: RetryPolicy,
+    /// How long an open batch waits for company before it is sent.
+    ///
+    /// Zero — the default, and Java's — does **not** mean one record per
+    /// request. A partition holds at most one batch on the wire at a time, so
+    /// records arriving while that request is outstanding accumulate into the
+    /// next batch and are sent together the moment it lands. Batching therefore
+    /// scales with load rather than with this setting: an idle producer pays no
+    /// latency, and a busy one batches anyway.
+    ///
+    /// Raising it trades latency for larger batches on a producer whose records
+    /// arrive in bursts smaller than the round trip.
+    pub linger: Duration,
+    /// The size, in accounted bytes, at which an open batch is closed and sent.
+    ///
+    /// A record larger than this still gets sent — in a batch of its own, which
+    /// is the only way it can be sent at all.
+    pub batch_size: usize,
+    /// The ceiling on one partition's batch, in accounted bytes.
+    ///
+    /// A record accounted larger than this is refused at
+    /// [`crate::Producer::send`] with `MESSAGE_TOO_LARGE` before it is ever
+    /// buffered, so it fails alone rather than taking a batch with it.
+    pub max_request_size: usize,
+    /// How many bytes of unsent records may be buffered before `send` waits.
+    ///
+    /// This bound is the difference between backpressure and an OOM: without
+    /// it, a producer whose broker has stopped acknowledging accepts records
+    /// until the process dies. Reaching it makes `send` wait, which is the
+    /// signal a caller can actually act on.
+    pub buffer_memory: usize,
 }
 
 impl ProducerConfig {
     /// The defaults: acknowledged by the full ISR, uncompressed.
+    ///
+    /// The batching defaults match Java's, because they are the numbers every
+    /// operator's intuition is calibrated against: 16 KiB batches, no linger,
+    /// a 1 MiB request ceiling and a 32 MiB buffer.
     pub fn new() -> Self {
         Self {
             acks: Acks::All,
             compression: Compression::None,
             delivery_timeout: Duration::from_secs(30),
             retry: RetryPolicy::default(),
+            linger: Duration::ZERO,
+            batch_size: 16 * 1024,
+            max_request_size: 1024 * 1024,
+            buffer_memory: 32 * 1024 * 1024,
         }
     }
 
@@ -134,9 +172,47 @@ impl ProducerConfig {
         self
     }
 
+    /// How long an open batch waits for company before it is sent.
+    #[must_use]
+    pub fn linger(mut self, linger: Duration) -> Self {
+        self.linger = linger;
+        self
+    }
+
+    /// The size at which an open batch is closed and sent.
+    #[must_use]
+    pub fn batch_size(mut self, bytes: usize) -> Self {
+        self.batch_size = bytes;
+        self
+    }
+
+    /// The ceiling on one partition's batch.
+    #[must_use]
+    pub fn max_request_size(mut self, bytes: usize) -> Self {
+        self.max_request_size = bytes;
+        self
+    }
+
+    /// How many bytes of unsent records may be buffered before `send` waits.
+    #[must_use]
+    pub fn buffer_memory(mut self, bytes: usize) -> Self {
+        self.buffer_memory = bytes;
+        self
+    }
+
     /// The delivery timeout in the milliseconds the request field wants.
     pub(crate) fn delivery_timeout_ms(&self) -> i32 {
         i32::try_from(self.delivery_timeout.as_millis()).unwrap_or(i32::MAX)
+    }
+
+    /// The buffer bound as a semaphore permit count.
+    ///
+    /// Permits are counted in `usize` by the semaphore but acquired in `u32`,
+    /// so a buffer configured past `u32::MAX` would be unreachable in one
+    /// acquisition. Clamping here keeps the two halves consistent.
+    pub(crate) fn buffer_memory_permits(&self) -> usize {
+        let clamped = u32::try_from(self.buffer_memory).unwrap_or(u32::MAX);
+        usize::try_from(clamped).unwrap_or(usize::MAX)
     }
 }
 

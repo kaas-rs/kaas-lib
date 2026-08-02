@@ -20,6 +20,9 @@ tokio          = { workspace = true }
 bytes          = { workspace = true }
 tracing        = { workspace = true }
 uuid           = { workspace = true }
+# `join_all` over one send per leader: the batches bound for different brokers
+# in one dispatch have no reason to wait for each other.
+futures        = { workspace = true }
 # The sticky partitioner's initial pick. Random rather than "always partition
 # zero", so N producers on one topic do not pile onto the same partition.
 rand           = { workspace = true }

@@ -192,6 +192,62 @@ impl Error {
     }
 }
 
+/// One failure often has to be reported to many callers: every record in a
+/// rejected produce batch, every partition in a request whose connection died.
+/// Without `Clone` each of those sites has to invent a way to fan an error out,
+/// and they invent different ones.
+///
+/// Two variants cannot be duplicated faithfully and are **reconstructed**:
+///
+/// * [`Error::Transport`] keeps its [`std::io::ErrorKind`] and its rendering,
+///   but a cloned `io::Error` loses the raw OS error code.
+/// * [`Error::Decode`] keeps its source's rendering rather than its concrete
+///   type, so downcasting the clone will not find the original.
+///
+/// Everything [`Error::retriable`], [`Error::code`],
+/// [`Error::needs_metadata_refresh`] and `Display` read is preserved exactly,
+/// which is the whole of what callers branch on. Derived rather than hand-
+/// written is not an option — `io::Error` and a boxed source are not `Clone`.
+impl Clone for Error {
+    fn clone(&self) -> Self {
+        match self {
+            Error::Transport { context, source } => Error::Transport {
+                context,
+                source: std::io::Error::new(source.kind(), source.to_string()),
+            },
+            Error::ConnectionClosed { peer } => Error::ConnectionClosed { peer: peer.clone() },
+            Error::Timeout { api_key, elapsed } => Error::Timeout {
+                api_key: *api_key,
+                elapsed: *elapsed,
+            },
+            Error::Authentication(message) => Error::Authentication(message.clone()),
+            Error::Authorization(code) => Error::Authorization(*code),
+            Error::Broker { code, message } => Error::Broker {
+                code: *code,
+                message: message.clone(),
+            },
+            Error::Decode { context, source } => Error::Decode {
+                context,
+                source: source.to_string().into(),
+            },
+            Error::ReadOnly { api_key } => Error::ReadOnly {
+                api_key: *api_key,
+            },
+            Error::UnsupportedApi {
+                api_key,
+                broker,
+                ours,
+            } => Error::UnsupportedApi {
+                api_key: *api_key,
+                broker: *broker,
+                ours: *ours,
+            },
+            Error::Unsupported(message) => Error::Unsupported(message.clone()),
+            Error::InvalidRequest(message) => Error::InvalidRequest(message.clone()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
