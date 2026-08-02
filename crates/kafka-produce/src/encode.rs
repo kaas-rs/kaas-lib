@@ -15,6 +15,7 @@ use kafka_conn::protocol::records::{
 use kafka_conn::{Error, Result};
 
 use crate::config::Compression;
+use crate::idempotence::BatchIdentity;
 use crate::record::ProducerRecord;
 
 /// The record batch version. 2 is the only one we write.
@@ -36,10 +37,15 @@ impl Compression {
 ///
 /// `now` is passed in rather than read here so a batch's records share one
 /// clock reading, and so the unit tests are not racing `SystemTime`.
+///
+/// `identity` is `Some` for an idempotent producer and stamps the batch with
+/// the producer id, epoch and base sequence the broker deduplicates on. `None`
+/// writes the pre-M14 shape: no producer id, and a base sequence of -1.
 pub(crate) fn encode_batch(
     records: &[ProducerRecord],
     compression: Compression,
     now: i64,
+    identity: Option<BatchIdentity>,
 ) -> Result<Bytes> {
     let wire: Vec<WireRecord> = records
         .iter()
@@ -48,8 +54,8 @@ pub(crate) fn encode_batch(
             transactional: false,
             control: false,
             partition_leader_epoch: NO_PARTITION_LEADER_EPOCH,
-            producer_id: NO_PRODUCER_ID,
-            producer_epoch: NO_PRODUCER_EPOCH,
+            producer_id: identity.map_or(NO_PRODUCER_ID, |id| id.producer_id),
+            producer_epoch: identity.map_or(NO_PRODUCER_EPOCH, |id| id.producer_epoch),
             timestamp_type: TimestampType::Creation,
             // Offsets within a batch are relative and start at zero; the
             // broker rewrites them to absolute ones on append. `index` cannot
@@ -69,12 +75,17 @@ pub(crate) fn encode_batch(
             //
             // The batch header stores `base_sequence` plus a per-record offset
             // delta, and the decoder reconstructs `sequence` as the sum. So
-            // counting up from `NO_SEQUENCE` is not a trick to satisfy the
-            // check: it is the value the wire format implies, and it makes the
-            // encoder write `base_sequence = -1` (`records.rs:287`), which is
-            // what a non-idempotent producer must send. M14 replaces the base
-            // with a real one from `InitProducerId`.
-            sequence: NO_SEQUENCE.wrapping_add(i32::try_from(index).unwrap_or(0)),
+            // counting up from the base is not a trick to satisfy the check: it
+            // is the value the wire format implies.
+            //
+            // Without an identity the base is `NO_SEQUENCE`, which makes the
+            // encoder write `base_sequence = -1` (`records.rs:287`) — what a
+            // non-idempotent producer must send. With one it is the number the
+            // broker expects next for this partition, and a gap there makes it
+            // reject every later batch as out of order.
+            sequence: identity
+                .map_or(NO_SEQUENCE, |id| id.base_sequence)
+                .wrapping_add(i32::try_from(index).unwrap_or(0)),
             timestamp: record.timestamp.unwrap_or(now),
             key: record.key.clone(),
             value: record.value.clone(),
@@ -111,7 +122,7 @@ mod tests {
     // empty value.
 
     fn one(record: ProducerRecord) -> Bytes {
-        encode_batch(&[record], Compression::None, 1_700_000_000_000).unwrap()
+        encode_batch(&[record], Compression::None, 1_700_000_000_000, None).unwrap()
     }
 
     #[test]
@@ -132,8 +143,8 @@ mod tests {
             Compression::Zstd,
         ] {
             let record = ProducerRecord::new("t").key("k").value("v");
-            let encoded =
-                encode_batch(&[record], compression, 1_700_000_000_000).expect("encode failed");
+            let encoded = encode_batch(&[record], compression, 1_700_000_000_000, None)
+                .expect("encode failed");
             assert!(
                 encoded.len() > 16,
                 "{compression:?} produced a batch too short to be one"
@@ -157,7 +168,7 @@ mod tests {
         let records: Vec<ProducerRecord> = (0..3)
             .map(|i| ProducerRecord::new("t").value(format!("v{i}")))
             .collect();
-        let encoded = encode_batch(&records, Compression::None, 1_700_000_000_000).unwrap();
+        let encoded = encode_batch(&records, Compression::None, 1_700_000_000_000, None).unwrap();
 
         // `lastOffsetDelta` is a big-endian i32 at byte 23; for three records
         // in one batch it is 2. Zero here means the encoder split the records
@@ -188,7 +199,7 @@ mod tests {
         let records: Vec<ProducerRecord> = (0..1_000)
             .map(|i| ProducerRecord::new("t").value(format!("v{i}")))
             .collect();
-        let encoded = encode_batch(&records, Compression::None, 1_700_000_000_000).unwrap();
+        let encoded = encode_batch(&records, Compression::None, 1_700_000_000_000, None).unwrap();
 
         assert_eq!(encoded.get(23..27), Some([0, 0, 0x03, 0xe7].as_slice()));
         assert_eq!(encoded.get(57..61), Some([0, 0, 0x03, 0xe8].as_slice()));

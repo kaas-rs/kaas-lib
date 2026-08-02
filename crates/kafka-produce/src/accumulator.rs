@@ -40,6 +40,9 @@ use tokio::time::Instant;
 use crate::config::ProducerConfig;
 use crate::dispatch::{Dispatcher, Outbound};
 use crate::encode::encode_batch;
+use crate::idempotence::{
+    BatchIdentity, ProducerIdentity, Sequences, init_producer_id, invalidates_producer_state,
+};
 use crate::record::{ProducerRecord, RecordMetadata};
 
 /// How many commands may queue before `send` waits.
@@ -120,6 +123,9 @@ struct Ready {
     topic: String,
     partition: i32,
     records: Vec<Queued>,
+    /// The producer id, epoch and base sequence stamped onto these records.
+    /// `None` for a non-idempotent producer.
+    identity: Option<BatchIdentity>,
 }
 
 #[derive(Debug)]
@@ -132,10 +138,19 @@ enum Command {
     Flush(oneshot::Sender<()>),
 }
 
-/// Partitions a send task has finished with.
-#[derive(Debug)]
+/// What a send task finished with, and what the actor must do about it.
+#[derive(Debug, Default)]
 struct Completed {
+    /// Partitions whose next batch may now go.
     partitions: Vec<(String, i32)>,
+    /// Reservations to give back, because the batch was never appended.
+    ///
+    /// Keeping them would leave a hole in the partition's sequence and the
+    /// broker would reject every later batch as out of order — permanently.
+    released: Vec<((String, i32), i32)>,
+    /// The broker no longer recognises our producer id: re-init and restart
+    /// every partition's sequence from zero.
+    reset_identity: bool,
 }
 
 /// The caller-side handle to the accumulator task.
@@ -236,6 +251,9 @@ struct Actor {
     flush_waiters: Vec<oneshot::Sender<()>>,
     completions_tx: mpsc::Sender<Completed>,
     completions_rx: mpsc::Receiver<Completed>,
+    /// The identity `InitProducerId` issued, once claimed.
+    identity: Option<ProducerIdentity>,
+    sequences: Sequences,
 }
 
 impl Actor {
@@ -249,6 +267,8 @@ impl Actor {
             flush_waiters: Vec::new(),
             completions_tx,
             completions_rx,
+            identity: None,
+            sequences: Sequences::default(),
         }
     }
 
@@ -272,16 +292,13 @@ impl Actor {
                 },
                 completed = self.completions_rx.recv() => {
                     if let Some(completed) = completed {
-                        for key in completed.partitions {
-                            if let Some(state) = self.partitions.get_mut(&key) {
-                                state.in_flight = false;
-                            }
-                        }
+                        self.settle(completed);
                     }
                 }
                 () = sleep_until(deadline) => self.close_expired(),
             }
 
+            self.ensure_identity().await;
             self.dispatch_ready();
             self.settle_flushes();
             self.forget_idle();
@@ -314,10 +331,7 @@ impl Actor {
         let max_request = self.config.max_request_size;
         let now = Instant::now();
 
-        let state = self
-            .partitions
-            .entry((topic, partition))
-            .or_default();
+        let state = self.partitions.entry((topic, partition)).or_default();
 
         // Close the open batch when this record would push it past either
         // bound. A record that is itself over `batch_size` then lands in a
@@ -339,6 +353,63 @@ impl Actor {
         if reached_target && let Some(full) = state.open.take() {
             state.pending.push_back(full);
         }
+    }
+
+    /// Apply a finished send task's bookkeeping.
+    fn settle(&mut self, completed: Completed) {
+        for key in completed.partitions {
+            if let Some(state) = self.partitions.get_mut(&key) {
+                state.in_flight = false;
+            }
+        }
+        for (key, base) in completed.released {
+            self.sequences.release(key, base);
+        }
+        if completed.reset_identity {
+            // Both halves, together: a new producer id is only usable if every
+            // partition also restarts its numbering, and resetting the
+            // sequences under the *old* id would make the next batch a
+            // duplicate rather than a fresh start.
+            tracing::warn!("the broker no longer recognises our producer id; re-initialising");
+            self.identity = None;
+            self.sequences.reset();
+        }
+    }
+
+    /// Claim a producer id before the first idempotent batch goes out.
+    ///
+    /// Done here rather than at construction because `Producer::new` is not
+    /// async, and because a producer that is never used should not open a
+    /// connection to claim an id it will not spend.
+    ///
+    /// A failure leaves `identity` unset and the batches buffered: the next
+    /// tick tries again. That is deliberate — `InitProducerId` failing is
+    /// usually a broker that is not ready yet, and failing every buffered
+    /// record for it would turn a transient condition into data loss.
+    async fn ensure_identity(&mut self) {
+        if !self.config.idempotent || self.identity.is_some() || !self.has_work() {
+            return;
+        }
+        match init_producer_id(self.dispatcher.cluster()).await {
+            Ok(identity) => {
+                tracing::debug!(
+                    producer_id = identity.producer_id,
+                    epoch = identity.producer_epoch,
+                    "claimed a producer id"
+                );
+                self.identity = Some(identity);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not claim a producer id; retrying");
+            }
+        }
+    }
+
+    /// Whether any partition has a batch waiting for the wire.
+    fn has_work(&self) -> bool {
+        self.partitions
+            .values()
+            .any(|state| !state.pending.is_empty())
     }
 
     /// The earliest moment an open batch's linger expires.
@@ -380,6 +451,13 @@ impl Actor {
     /// dispatcher re-resolves each partition itself, so a wrong guess here
     /// costs an extra request rather than a wrong answer.
     fn dispatch_ready(&mut self) {
+        // An idempotent producer with no id yet holds everything back rather
+        // than sending a batch that would have to be re-sent under a different
+        // identity. `ensure_identity` runs first on every tick.
+        if self.config.idempotent && self.identity.is_none() {
+            return;
+        }
+
         let snapshot = self.dispatcher.cluster().snapshot();
         let mut groups: HashMap<Option<i32>, Vec<Ready>> = HashMap::new();
 
@@ -397,10 +475,22 @@ impl Actor {
                 .and_then(|info| info.partition(*partition))
                 .and_then(|info| info.leader);
 
+            // Numbers are reserved at dispatch, not at append, so they are
+            // handed out in the order batches reach the wire. With one batch
+            // per partition in flight that order is the log's order.
+            let identity = self.identity.map(|issued| BatchIdentity {
+                producer_id: issued.producer_id,
+                producer_epoch: issued.producer_epoch,
+                base_sequence: self
+                    .sequences
+                    .reserve((topic.clone(), *partition), batch.records.len()),
+            });
+
             groups.entry(leader).or_default().push(Ready {
                 topic: topic.clone(),
                 partition: *partition,
                 records: batch.records,
+                identity,
             });
         }
 
@@ -409,8 +499,8 @@ impl Actor {
             let compression = self.config.compression;
             let completions = self.completions_tx.clone();
             tokio::spawn(async move {
-                let partitions = send_group(dispatcher, compression, group).await;
-                let _ = completions.send(Completed { partitions }).await;
+                let completed = send_group(dispatcher, compression, group).await;
+                let _ = completions.send(completed).await;
             });
         }
     }
@@ -454,15 +544,19 @@ async fn send_group(
     dispatcher: Dispatcher,
     compression: crate::config::Compression,
     group: Vec<Ready>,
-) -> Vec<(String, i32)> {
+) -> Completed {
     let now = now_millis();
-    let mut partitions = Vec::with_capacity(group.len());
+    let mut completed = Completed::default();
     let mut outbound = Vec::with_capacity(group.len());
     let mut records: HashMap<(String, i32), Vec<Queued>> = HashMap::new();
+    let mut bases: HashMap<(String, i32), i32> = HashMap::new();
 
     for ready in group {
         let key = (ready.topic.clone(), ready.partition);
-        partitions.push(key.clone());
+        completed.partitions.push(key.clone());
+        if let Some(identity) = ready.identity {
+            bases.insert(key.clone(), identity.base_sequence);
+        }
 
         match encode_batch(
             &ready
@@ -472,6 +566,7 @@ async fn send_group(
                 .collect::<Vec<_>>(),
             compression,
             now,
+            ready.identity,
         ) {
             Ok(encoded) => {
                 outbound.push(Outbound {
@@ -482,7 +577,11 @@ async fn send_group(
                 records.insert(key, ready.records);
             }
             Err(error) => {
-                // An unencodable batch fails its own records and no others.
+                // An unencodable batch fails its own records and no others —
+                // and gives its sequence numbers back, since nothing was sent.
+                if let Some(base) = bases.remove(&key) {
+                    completed.released.push((key, base));
+                }
                 for queued in ready.records {
                     queued.resolve(Err(error.clone()));
                 }
@@ -491,14 +590,15 @@ async fn send_group(
     }
 
     if outbound.is_empty() {
-        return partitions;
+        return completed;
     }
 
     for (key, outcome) in dispatcher.dispatch(outbound).await {
         let Some(queued) = records.remove(&key) else {
             continue;
         };
-        let (topic, partition) = key;
+        let base = bases.remove(&key);
+        let (topic, partition) = key.clone();
         match outcome {
             Ok(ack) => {
                 for (index, record) in queued.into_iter().enumerate() {
@@ -514,6 +614,15 @@ async fn send_group(
                 }
             }
             Err(error) => {
+                // The batch did not land, so its numbers must not be spent —
+                // a hole in the sequence makes the broker reject every later
+                // batch for this partition, permanently.
+                if let Some(base) = base {
+                    completed.released.push((key, base));
+                }
+                if error.code().is_some_and(invalidates_producer_state) {
+                    completed.reset_identity = true;
+                }
                 for record in queued {
                     record.resolve(Err(error.clone()));
                 }
@@ -523,13 +632,16 @@ async fn send_group(
 
     // Anything the dispatcher did not answer for — it always answers for every
     // batch it was given, so this is defence rather than an expected path.
-    for (_, queued) in records {
+    for (key, queued) in records {
+        if let Some(base) = bases.remove(&key) {
+            completed.released.push((key, base));
+        }
         for record in queued {
             record.resolve(Err(producer_gone()));
         }
     }
 
-    partitions
+    completed
 }
 
 /// Wait until `deadline`, or forever when there is nothing to wait for.

@@ -72,12 +72,23 @@ impl Attempt {
         }
     }
 
-    /// Only a rejection may be repeated: a response carrying an error code
-    /// proves the record was never appended.
-    fn retriable(&self, attempt: u32, policy: &RetryPolicy) -> bool {
+    /// Whether another attempt is allowed.
+    ///
+    /// A rejection may always be repeated: a response carrying an error code
+    /// proves the records were never appended.
+    ///
+    /// An ambiguous failure may be repeated **only under idempotence**. The
+    /// records may already be in the log, and without a producer id and
+    /// sequence the broker cannot tell a re-send from a new batch — so
+    /// retrying is how a duplicate is written. With them it recognises the
+    /// batch and answers with the original offsets, which is the entire point
+    /// of M14 and the reason a leader election stops being a delivery failure.
+    fn retriable(&self, attempt: u32, policy: &RetryPolicy, idempotent: bool) -> bool {
         match self {
             Attempt::Rejected(error) => error.retriable() && policy.should_retry(attempt),
-            Attempt::Ambiguous(_) => false,
+            Attempt::Ambiguous(error) => {
+                idempotent && error.retriable() && policy.should_retry(attempt)
+            }
         }
     }
 }
@@ -114,7 +125,10 @@ impl Dispatcher {
     /// completes and discards the response or closes. Callers that need the
     /// records resolved regardless run this inside a task rather than inline,
     /// which is what the accumulator does.
-    pub(crate) async fn dispatch(&self, batches: Vec<Outbound>) -> Vec<((String, i32), Result<Ack>)> {
+    pub(crate) async fn dispatch(
+        &self,
+        batches: Vec<Outbound>,
+    ) -> Vec<((String, i32), Result<Ack>)> {
         let mut resolved: Vec<((String, i32), Result<Ack>)> = Vec::with_capacity(batches.len());
         let mut pending = batches;
         let mut attempt: u32 = 1;
@@ -133,7 +147,9 @@ impl Dispatcher {
                         if error.needs_metadata_refresh() {
                             refresh = true;
                         }
-                        match (failure.retriable(attempt, &self.config.retry), outbound) {
+                        let may_retry =
+                            failure.retriable(attempt, &self.config.retry, self.config.idempotent);
+                        match (may_retry, outbound) {
                             (true, Some(outbound)) => retry.push(outbound),
                             (_, _) => resolved.push((key, Err(failure.into_error()))),
                         }
@@ -180,7 +196,11 @@ impl Dispatcher {
     async fn round(
         &self,
         batches: Vec<Outbound>,
-    ) -> Vec<((String, i32), std::result::Result<Ack, Attempt>, Option<Outbound>)> {
+    ) -> Vec<(
+        (String, i32),
+        std::result::Result<Ack, Attempt>,
+        Option<Outbound>,
+    )> {
         let mut groups: HashMap<i32, Vec<Outbound>> = HashMap::new();
         let mut results = Vec::new();
 
@@ -216,7 +236,11 @@ impl Dispatcher {
         &self,
         leader: i32,
         group: Vec<Outbound>,
-    ) -> Vec<((String, i32), std::result::Result<Ack, Attempt>, Option<Outbound>)> {
+    ) -> Vec<(
+        (String, i32),
+        std::result::Result<Ack, Attempt>,
+        Option<Outbound>,
+    )> {
         // A failure before the request exists applies to the whole group and
         // is a rejection: nothing reached the wire.
         macro_rules! reject_group {
@@ -262,11 +286,12 @@ impl Dispatcher {
                 .map(|outbound| {
                     let key = outbound.key();
                     // Unknown outcome: the records may well have been written
-                    // and the acknowledgement lost. Re-sending is how a
-                    // non-idempotent producer duplicates, so the batch is not
-                    // handed back for retry. M14's sequence numbers are what
-                    // lift this.
-                    (key, Err(Attempt::Ambiguous(error.clone())), None)
+                    // and the acknowledgement lost. The batch is handed back so
+                    // an *idempotent* producer can re-send it — the broker
+                    // deduplicates on its sequence. `Attempt::retriable` is
+                    // what refuses this for a non-idempotent one, and it is the
+                    // only thing standing between a timeout and a duplicate.
+                    (key, Err(Attempt::Ambiguous(error.clone())), Some(outbound))
                 })
                 .collect(),
         }
@@ -276,14 +301,11 @@ impl Dispatcher {
     async fn build_request(&self, group: &[Outbound], version: i16) -> Result<ProduceRequest> {
         let mut by_topic: HashMap<String, Vec<PartitionProduceData>> = HashMap::new();
         for outbound in group {
-            by_topic
-                .entry(outbound.topic.clone())
-                .or_default()
-                .push(
-                    PartitionProduceData::default()
-                        .with_index(outbound.partition)
-                        .with_records(Some(outbound.encoded.clone())),
-                );
+            by_topic.entry(outbound.topic.clone()).or_default().push(
+                PartitionProduceData::default()
+                    .with_index(outbound.partition)
+                    .with_records(Some(outbound.encoded.clone())),
+            );
         }
 
         let mut topic_data = Vec::with_capacity(by_topic.len());
@@ -338,7 +360,11 @@ impl Dispatcher {
 fn read_response(
     response: ProduceResponse,
     group: Vec<Outbound>,
-) -> Vec<((String, i32), std::result::Result<Ack, Attempt>, Option<Outbound>)> {
+) -> Vec<(
+    (String, i32),
+    std::result::Result<Ack, Attempt>,
+    Option<Outbound>,
+)> {
     let mut answers: HashMap<i32, (i16, Option<String>, i64, i64)> = HashMap::new();
     for topic_response in response.responses {
         for partition in topic_response.partition_responses {
@@ -376,8 +402,7 @@ fn read_response(
                                 // Passing it through as a timestamp would date
                                 // every record to a millisecond before the
                                 // epoch.
-                                log_append_time_ms: Some(*log_append_time_ms)
-                                    .filter(|ts| *ts >= 0),
+                                log_append_time_ms: Some(*log_append_time_ms).filter(|ts| *ts >= 0),
                             }),
                             None,
                         )
@@ -388,7 +413,7 @@ fn read_response(
                         "{}-{}: the broker did not answer a partition we sent",
                         outbound.topic, outbound.partition
                     ));
-                    (key, Err(Attempt::Ambiguous(error)), None)
+                    (key, Err(Attempt::Ambiguous(error)), Some(outbound))
                 }
             }
         })
@@ -421,7 +446,14 @@ mod tests {
             "a timeout is retriable as a read, which is exactly why produce \
              must not route through that check"
         );
-        assert!(!Attempt::Ambiguous(timeout).retriable(1, &policy));
+        assert!(
+            !Attempt::Ambiguous(timeout.clone()).retriable(1, &policy, false),
+            "without a producer id, re-sending an unknown outcome duplicates"
+        );
+        assert!(
+            Attempt::Ambiguous(timeout).retriable(1, &policy, true),
+            "with one, the broker deduplicates the re-send — that is M14"
+        );
     }
 
     #[test]
@@ -434,7 +466,10 @@ mod tests {
         ] {
             let error = Error::from_code(code, None);
             assert!(error.needs_metadata_refresh(), "{code:?} must refresh");
-            assert!(Attempt::Rejected(error).retriable(1, &policy), "{code:?}");
+            assert!(
+                Attempt::Rejected(error).retriable(1, &policy, false),
+                "{code:?}"
+            );
         }
     }
 
@@ -447,7 +482,10 @@ mod tests {
             ErrorCode::TopicAuthorizationFailed,
         ] {
             let error = Error::from_code(code, None);
-            assert!(!Attempt::Rejected(error).retriable(1, &policy), "{code:?}");
+            assert!(
+                !Attempt::Rejected(error).retriable(1, &policy, true),
+                "{code:?}"
+            );
         }
     }
 
@@ -488,7 +526,10 @@ mod tests {
             .collect();
 
         assert!(matches!(by_partition.get(&0), Some(Ok(ack)) if ack.base_offset == 100));
-        assert!(matches!(by_partition.get(&1), Some(Err(Attempt::Rejected(_)))));
+        assert!(matches!(
+            by_partition.get(&1),
+            Some(Err(Attempt::Rejected(_)))
+        ));
         assert!(matches!(by_partition.get(&2), Some(Ok(ack)) if ack.base_offset == 200));
     }
 
@@ -524,9 +565,15 @@ mod tests {
         let results = read_response(response, vec![outbound("t", 7)]);
         let (_, outcome, retry) = results.into_iter().next().expect("one result");
         assert!(matches!(outcome, Err(Attempt::Ambiguous(_))));
+
+        // The batch *is* handed back, because an idempotent producer can
+        // safely re-send it. Whether it actually is re-sent is
+        // `Attempt::retriable`'s decision, and that is where the
+        // non-idempotent refusal lives — see
+        // `an_ambiguous_failure_is_never_retriable`.
         assert!(
-            retry.is_none(),
-            "an ambiguous batch must never be handed back for retry"
+            retry.is_some(),
+            "an ambiguous batch must still be available to an idempotent retry"
         );
     }
 }

@@ -79,17 +79,32 @@
 //! trip accumulate into the next batch on their own. Batching scales with load
 //! rather than with the setting.
 //!
+//! # Idempotence, and what it changes
+//!
+//! On by default. The producer claims a producer id and numbers every record,
+//! so the broker recognises a re-sent batch and answers with the original
+//! offsets instead of appending it twice.
+//!
+//! That is what makes an **ambiguous** failure retriable. Without it, a
+//! timeout or a connection that died in flight can never be re-sent — the
+//! records may already be in the log — so an ordinary leader election surfaces
+//! to the caller as a delivery failure. With it, the producer rides the
+//! election out. [`ProducerConfig::idempotent`] turns it off for brokers that
+//! cannot issue a producer id; it does not make the producer faster, it makes
+//! it lossier.
+//!
+//! At most one batch per partition is on the wire regardless, so ordering does
+//! not depend on [`Producer::max_in_flight`]. That clamp — one without
+//! idempotence, five with it — is defence for the connection layer rather than
+//! the mechanism that keeps the log in order.
+//!
 //! # What this milestone is, and is not
 //!
 //! M13 is batching, bounded buffer memory and per-record delivery futures.
-//! Idempotence and transactions are M14 and M15; until M14 lands a produce is
-//! retried **only** when the broker rejected it, because re-sending a request
-//! whose outcome is unknown is how a duplicate is written.
-//!
-//! One consequence of that is visible in the configuration: at most one batch
-//! per partition is in flight, because retrying a rejected batch while a later
-//! one is already on the wire reorders the log with no error anywhere. See
-//! [`accumulator`](crate) — M14 is what lifts it.
+//! M14 is idempotence. Transactions are M15: there is no `transactional_id`
+//! here, no `AddPartitionsToTxn`, and `kafka-read`'s
+//! `Visibility::CommittedOnly` still has nothing in this workspace that can
+//! produce an aborted transaction to test it against.
 
 #![cfg_attr(
     test,
@@ -105,6 +120,7 @@ mod accumulator;
 mod config;
 mod dispatch;
 mod encode;
+mod idempotence;
 mod partition;
 mod producer;
 mod record;

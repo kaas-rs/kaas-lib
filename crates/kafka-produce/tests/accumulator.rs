@@ -408,7 +408,11 @@ async fn records_keep_their_order_within_a_partition() {
     for i in 0..RECORDS {
         pending.push(
             producer
-                .enqueue(ProducerRecord::new(TOPIC).partition(0).value(format!("{i}")))
+                .enqueue(
+                    ProducerRecord::new(TOPIC)
+                        .partition(0)
+                        .value(format!("{i}")),
+                )
                 .await
                 .expect("enqueued"),
         );

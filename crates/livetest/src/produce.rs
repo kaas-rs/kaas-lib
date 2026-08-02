@@ -424,10 +424,7 @@ async fn batching(cluster: &Cluster, topic: &str, report: &mut Report) -> Result
 
     report.set("batching.read_back", observed.len());
     if observed.len() != BATCHED {
-        bail!(
-            "wrote {BATCHED} records and read back {}",
-            observed.len()
-        );
+        bail!("wrote {BATCHED} records and read back {}", observed.len());
     }
     if observed.iter().copied().ne(0..BATCHED) {
         bail!("the log's order does not match the order records were enqueued in");

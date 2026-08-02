@@ -230,9 +230,7 @@ impl Clone for Error {
                 context,
                 source: source.to_string().into(),
             },
-            Error::ReadOnly { api_key } => Error::ReadOnly {
-                api_key: *api_key,
-            },
+            Error::ReadOnly { api_key } => Error::ReadOnly { api_key: *api_key },
             Error::UnsupportedApi {
                 api_key,
                 broker,

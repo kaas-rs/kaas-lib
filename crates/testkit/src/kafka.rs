@@ -143,6 +143,26 @@ impl KafkaCluster {
         Ok(())
     }
 
+    /// Bring a stopped node back.
+    ///
+    /// The counterpart to [`KafkaCluster::stop_node`], for M14: proving an
+    /// idempotent producer loses and duplicates nothing across a leader
+    /// election needs the old leader to *return*, not merely to die. A test
+    /// that only kills a broker measures failover; one that restarts it also
+    /// measures what the producer did with the records that were in flight
+    /// when the socket went away.
+    ///
+    /// The container keeps its identity and its data volume, so the broker
+    /// rejoins as the same node id rather than as a new one.
+    pub async fn start_node(&self, index: usize) -> Result<()> {
+        let container = self.containers.get(index).ok_or(Error::NoSuchNode {
+            index,
+            size: self.containers.len(),
+        })?;
+        container.start().await?;
+        Ok(())
+    }
+
     /// Run one of the Kafka shell tools bundled in the image.
     ///
     /// `--bootstrap-server` is filled in from the node's *internal* listener,

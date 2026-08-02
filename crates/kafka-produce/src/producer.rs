@@ -65,15 +65,40 @@ impl Producer {
     }
 
     /// Connect to a cluster and produce to it.
+    ///
+    /// Clamps the connections it opens to the number of in-flight requests the
+    /// producer's guarantees permit: one without idempotence, five with it.
+    /// See [`Producer::max_in_flight`].
     pub async fn connect(
         bootstrap: impl IntoIterator<Item = impl Into<String>>,
-        cluster_config: kafka_meta::ClusterConfig,
+        mut cluster_config: kafka_meta::ClusterConfig,
         config: ProducerConfig,
     ) -> Result<Self> {
+        cluster_config.connection = cluster_config
+            .connection
+            .with_max_in_flight(config.max_in_flight());
         Ok(Self::new(
             kafka_meta::Cluster::connect(bootstrap, cluster_config).await?,
             config,
         ))
+    }
+
+    /// How many requests this producer's connections may have in flight.
+    ///
+    /// One without idempotence, five with it — the broker tracks exactly five
+    /// in-flight sequence windows per partition, so five is a ceiling rather
+    /// than a tuning knob.
+    ///
+    /// [`Producer::connect`] applies this to the connections it opens.
+    /// [`Producer::new`] cannot: the cluster handed to it is shared with
+    /// whatever else is using it, and clamping a pool the admin and read paths
+    /// also use would slow them down to protect a guarantee they do not need.
+    /// That is safe here because ordering does not rest on this number — the
+    /// accumulator holds at most one batch per partition on the wire, so a
+    /// re-sent batch can never overtake a later one regardless. The clamp is
+    /// defence for the connection layer, not the mechanism.
+    pub fn max_in_flight(&self) -> usize {
+        self.cluster.pool().config().max_in_flight
     }
 
     /// The underlying cluster handle.
@@ -110,15 +135,16 @@ impl Producer {
     ///   that made us ask the wrong broker.
     /// * **The outcome is unknown.** A timeout, or a connection that died with
     ///   the request in flight. The records may well have been written and the
-    ///   acknowledgement lost. Re-sending here is how a non-idempotent producer
-    ///   silently duplicates, so these are surfaced to the caller, who knows
-    ///   whether a duplicate is worse than a gap. M14's sequence numbers are
-    ///   what makes retrying these safe, and the restriction lifts there rather
-    ///   than being loosened by hand.
+    ///   acknowledgement lost. Whether this is retried depends entirely on
+    ///   [`ProducerConfig::idempotent`]: with a producer id the broker
+    ///   recognises the re-sent batch and answers with the original offsets, so
+    ///   it is safe; without one, re-sending is how a duplicate is written, so
+    ///   the error is surfaced to the caller, who knows whether a duplicate is
+    ///   worse than a gap.
     ///
-    /// Collapsing the two is a bug in either direction: retry everything and
-    /// you duplicate on every timeout; retry nothing and an ordinary leader
-    /// election becomes a delivery failure.
+    /// Collapsing the two is a bug in either direction: retry everything
+    /// without sequence numbers and you duplicate on every timeout; retry
+    /// nothing and an ordinary leader election becomes a delivery failure.
     ///
     /// # Cancel safety
     ///
@@ -141,7 +167,11 @@ impl Producer {
     pub async fn enqueue(&self, record: ProducerRecord) -> Result<Delivery> {
         let topic = record.topic.clone();
         let partition = self.resolve_partition(&record).await?;
-        let receiver = self.accumulator().await.append(topic, partition, record).await?;
+        let receiver = self
+            .accumulator()
+            .await
+            .append(topic, partition, record)
+            .await?;
         Ok(Delivery(receiver))
     }
 

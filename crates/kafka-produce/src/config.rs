@@ -123,6 +123,18 @@ pub struct ProducerConfig {
     /// until the process dies. Reaching it makes `send` wait, which is the
     /// signal a caller can actually act on.
     pub buffer_memory: usize,
+    /// Whether to claim a producer id and number every record.
+    ///
+    /// On by default, as it is in Java since 3.0, because it is what makes a
+    /// re-send safe. Without it a request whose outcome is unknown — a
+    /// timeout, a connection that died in flight — can never be retried, so an
+    /// ordinary leader election surfaces to the caller as a delivery failure.
+    /// With it the broker recognises the re-sent batch and answers with the
+    /// original offsets instead of appending it twice.
+    ///
+    /// Turning it off is for brokers that do not support `InitProducerId` at
+    /// all. It does not make the producer faster; it makes it lossier.
+    pub idempotent: bool,
 }
 
 impl ProducerConfig {
@@ -141,6 +153,7 @@ impl ProducerConfig {
             batch_size: 16 * 1024,
             max_request_size: 1024 * 1024,
             buffer_memory: 32 * 1024 * 1024,
+            idempotent: true,
         }
     }
 
@@ -198,6 +211,28 @@ impl ProducerConfig {
     pub fn buffer_memory(mut self, bytes: usize) -> Self {
         self.buffer_memory = bytes;
         self
+    }
+
+    /// Whether to claim a producer id and number every record.
+    #[must_use]
+    pub fn idempotent(mut self, idempotent: bool) -> Self {
+        self.idempotent = idempotent;
+        self
+    }
+
+    /// How many requests a connection carrying this producer may have in
+    /// flight.
+    ///
+    /// One without idempotence, five with it. Kafka's own default is five and
+    /// the broker tracks exactly five in-flight sequence windows per
+    /// partition, so five is the ceiling rather than a tuning knob.
+    ///
+    /// The reason for the clamp is that M13 retries rejected batches: a
+    /// re-sent batch travelling behind a later one reorders the log with no
+    /// error and no log line. Sequence numbers are what let the broker put
+    /// them back in order, so without them the only safe answer is one.
+    pub(crate) fn max_in_flight(&self) -> usize {
+        if self.idempotent { 5 } else { 1 }
     }
 
     /// The delivery timeout in the milliseconds the request field wants.
