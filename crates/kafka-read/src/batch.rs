@@ -227,6 +227,24 @@ pub fn decode_records(
     decode_partition(topic, partition, records, &[], options)
 }
 
+/// Decode a partition's records with the fetch response's aborted-transaction
+/// list applied.
+///
+/// [`decode_records`] is the one-shot form for a caller that has no such list
+/// — a fuzz target, or a scan reading `Visibility::All`. A consumer does have
+/// one, and passing it is what makes `Visibility::CommittedOnly` mean anything:
+/// without it the filter has nothing to filter *by* and silently shows aborted
+/// records.
+pub fn decode_records_with_aborted(
+    topic: &str,
+    partition: i32,
+    records: bytes::Bytes,
+    aborted: &[AbortedTransaction],
+    options: &DecodeOptions,
+) -> DecodedPartition {
+    decode_partition(topic, partition, records, aborted, options)
+}
+
 /// Decode one partition's records tolerantly.
 pub(crate) fn decode_partition(
     topic: &str,

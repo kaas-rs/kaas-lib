@@ -8,6 +8,7 @@ members = [
     "crates/kafka-admin",
     "crates/kafka-read",
     "crates/kafka-produce",
+    "crates/kafka-consumer",
     "crates/livetest",
 ]
 

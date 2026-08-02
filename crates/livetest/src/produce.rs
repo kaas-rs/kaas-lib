@@ -15,6 +15,7 @@ use anyhow::{Result, bail};
 use bytes::Bytes;
 use futures::StreamExt;
 use kafka_admin::{Admin, NewTopic};
+use kafka_consumer::{Consumer, ConsumerConfig, Position};
 use kafka_meta::Cluster;
 use kafka_produce::{Compression, Producer, ProducerConfig, ProducerRecord, partition_for_key};
 use kafka_read::{ScanEvent, ScanSpec, StartPosition, Visibility};
@@ -297,6 +298,92 @@ async fn run(cluster: &Cluster, admin: &Admin, topic: &str, report: &mut Report)
 
     // 6. Transactions (M15), against a real transaction coordinator.
     transactions(cluster, topic, report).await?;
+
+    // 7. The consumer (M16): read it all back through incremental fetch
+    //    sessions rather than one-shot scans.
+    consume(cluster, topic, report).await?;
+
+    Ok(())
+}
+
+/// M16: assign every partition, drain the topic, and prove the fetch session
+/// is incremental rather than a full fetch wearing a session id.
+///
+/// Against a three-broker cluster this also exercises the part the container
+/// fixture cannot: partitions spread over three leaders, which is what makes
+/// "one request per broker" mean anything.
+async fn consume(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<()> {
+    let assignment: Vec<(String, i32)> = (0..PARTITIONS).map(|p| (topic.to_owned(), p)).collect();
+    let mut consumer = Consumer::new(
+        cluster.clone(),
+        ConsumerConfig::new()
+            .visibility(Visibility::All)
+            .max_wait_ms(200)
+            .group_id(format!("kaaslib-live-consume-{}", run_token())),
+    );
+    consumer
+        .assign(assignment.clone(), Position::Earliest)
+        .await?;
+    report.set("consume.assigned", consumer.assignment().len());
+
+    // Drain to the end. Bounded by wall clock rather than by an expected
+    // count, because with `--topic` the topic may already hold records from
+    // an earlier run.
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(120);
+    let mut total = 0usize;
+    let mut idle = 0;
+    while Instant::now() < deadline && idle < 5 {
+        let batch = consumer.poll().await?;
+        if batch.is_empty() {
+            idle += 1;
+        } else {
+            idle = 0;
+            total += batch.len();
+        }
+    }
+    report.set("consume.records", total);
+    report.set("consume.drain_ms", started.elapsed().as_millis());
+
+    if total == 0 {
+        bail!("the consumer read nothing from a topic we had just written to");
+    }
+
+    // Caught up and unchanged: this is where an incremental session shows.
+    let brokers = broker_ids(cluster).await?;
+    let mark = traffic(cluster, &brokers).await;
+    for _ in 0..10 {
+        consumer.poll().await?;
+    }
+    let used = traffic(cluster, &brokers)
+        .await
+        .snapshot
+        .since(&mark.snapshot);
+
+    report.set("consume.steady_requests", used.requests_sent);
+    report.set("consume.steady_bytes", used.bytes_sent);
+    if used.requests_sent == 0 {
+        bail!("request counting is broken: ten polls cannot take zero requests");
+    }
+    let per_request = used.bytes_sent / used.requests_sent;
+    report.set("consume.steady_bytes_per_request", per_request);
+    if per_request >= 200 {
+        bail!(
+            "steady-state fetches average {per_request} bytes, which is a full              fetch wearing a session id rather than an incremental one"
+        );
+    }
+    report.set("consume.session_incremental", true);
+
+    // Offsets for a non-member.
+    for (key, result) in consumer.commit().await? {
+        result.map_err(|error| anyhow::anyhow!("{}-{} did not commit: {error}", key.0, key.1))?;
+    }
+    let committed = consumer.committed().await?;
+    report.set("consume.committed_partitions", committed.len());
+    if committed.is_empty() {
+        bail!("a commit that reads back as nothing committed is not a commit");
+    }
+    report.set("consume.offsets_round_trip", true);
 
     Ok(())
 }

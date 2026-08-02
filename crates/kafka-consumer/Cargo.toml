@@ -1,0 +1,37 @@
+[package]
+name        = "kafka-consumer"
+description = "Kafka 4.x consume path: incremental fetch sessions, a streaming fetcher, and manual-assignment offsets"
+readme      = "README.md"
+keywords    = ["kafka", "consumer", "fetch", "streaming", "async"]
+categories  = ["network-programming", "asynchronous"]
+
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+homepage.workspace     = true
+rust-version.workspace = true
+
+[dependencies]
+kafka-conn     = { workspace = true }
+kafka-meta     = { workspace = true }
+kafka-protocol = { workspace = true }
+# The tolerant record decoder and bounded decompression, which are
+# general-purpose already and must not be built a second time. See PLAN.md's
+# list of what phase 2 does not rebuild.
+kafka-read     = { path = "../kafka-read", version = "0.2.1" }
+tokio          = { workspace = true }
+bytes          = { workspace = true }
+futures        = { workspace = true }
+tracing        = { workspace = true }
+uuid           = { workspace = true }
+
+[dev-dependencies]
+testkit            = { path = "../testkit" }
+kafka-admin        = { path = "../kafka-admin" }
+kafka-produce      = { path = "../kafka-produce" }
+tokio              = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

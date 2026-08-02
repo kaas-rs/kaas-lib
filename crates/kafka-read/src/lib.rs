@@ -87,7 +87,11 @@ mod record;
 mod scan;
 
 pub use backward::{PartitionTail, TailAnchor, TailSpec, tail};
-pub use batch::{AbortedTransaction, DecodeOptions, DecodedPartition, Visibility, decode_records};
+pub use batch::{
+    AbortedTransaction, DecodeOptions, DecodedPartition, Visibility, decode_records,
+    decode_records_with_aborted,
+};
+pub use offsets::partition_bounds;
 pub use record::{DecodeError, Record, RecordOutcome, TimestampType};
 pub use scan::{RecordFilter, ScanEvent, ScanProgress, ScanSpec, StartPosition, scan};
 

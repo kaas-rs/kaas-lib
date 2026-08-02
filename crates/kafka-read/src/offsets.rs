@@ -12,6 +12,22 @@ const CONSUMER_REPLICA_ID: i32 = -1;
 const EARLIEST: i64 = -2;
 const LATEST: i64 = -1;
 
+/// The `(earliest, latest)` offsets of a partition, routed to its leader.
+///
+/// The public form of [`bounds`], for callers outside this crate that need a
+/// starting offset — a consumer resolving `Position::Earliest`, say. Exposed
+/// rather than reimplemented because `ListOffsets` routing, version
+/// negotiation and the six sentinels are exactly the phase-1 work PLAN.md says
+/// phase 2 must not rebuild.
+pub async fn partition_bounds(
+    cluster: &Cluster,
+    topic: &str,
+    partition: i32,
+) -> Result<(i64, i64)> {
+    let leader = cluster.leader_for(topic, partition).await?;
+    bounds(cluster, topic, partition, leader).await
+}
+
 /// The `(earliest, latest)` offsets of a partition.
 pub(crate) async fn bounds(
     cluster: &Cluster,

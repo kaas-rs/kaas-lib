@@ -1120,6 +1120,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "kafka-consumer"
+version = "0.2.1"
+dependencies = [
+ "bytes",
+ "futures",
+ "kafka-admin",
+ "kafka-conn",
+ "kafka-meta",
+ "kafka-produce",
+ "kafka-protocol",
+ "kafka-read",
+ "testkit",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "kafka-meta"
 version = "0.2.1"
 dependencies = [
@@ -1230,6 +1249,7 @@ dependencies = [
  "futures",
  "kafka-admin",
  "kafka-conn",
+ "kafka-consumer",
  "kafka-meta",
  "kafka-produce",
  "kafka-read",
