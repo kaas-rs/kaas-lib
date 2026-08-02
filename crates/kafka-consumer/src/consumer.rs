@@ -691,3 +691,147 @@ impl GroupConsumer {
         self.membership.leave(self.inner.cluster()).await
     }
 }
+
+/// A consumer that joins a **classic** group.
+///
+/// Only for brokers older than 4.0, or mixed groups with Java clients pinned
+/// to `group.protocol=classic`. [`GroupConsumer`] is the default on a 4.x
+/// cluster and is strictly less work — see [`crate::classic`] for which
+/// assignors this implements and, deliberately, which it does not.
+#[derive(Debug)]
+pub struct ClassicConsumer {
+    inner: Consumer,
+    membership: crate::classic::ClassicMembership,
+    subscription: Vec<String>,
+    auto_commit: bool,
+    rejoin: bool,
+}
+
+impl ClassicConsumer {
+    /// Join `group_id` under the classic protocol.
+    pub async fn subscribe(
+        cluster: Cluster,
+        mut config: ConsumerConfig,
+        group_id: impl Into<String>,
+        topics: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self> {
+        let group_id = group_id.into();
+        let subscription: Vec<String> = topics.into_iter().map(Into::into).collect();
+        config.group_id = Some(group_id.clone());
+
+        let mut inner = Consumer::new(cluster, config);
+        inner.learn_topics(&subscription).await?;
+
+        Ok(Self {
+            inner,
+            membership: crate::classic::ClassicMembership::new(
+                group_id,
+                subscription.clone(),
+                None,
+            ),
+            subscription,
+            auto_commit: true,
+            rejoin: true,
+        })
+    }
+
+    /// Join as a **static** member (KIP-345), so a restart inside the session
+    /// timeout does not trigger a rebalance.
+    #[must_use]
+    pub fn with_instance_id(mut self, instance_id: impl Into<String>) -> Self {
+        self.membership = crate::classic::ClassicMembership::new(
+            self.membership.group_id().to_owned(),
+            self.subscription.clone(),
+            Some(instance_id.into()),
+        );
+        self
+    }
+
+    /// The partitions this member currently owns.
+    pub fn assignment(&self) -> Vec<(String, i32)> {
+        self.inner.assignment()
+    }
+
+    /// This member's id, as the coordinator issued it.
+    ///
+    /// Empty until the first join — the classic protocol has the *broker*
+    /// assign it, which is the opposite of KIP-848.
+    pub fn member_id(&self) -> &str {
+        self.membership.member_id()
+    }
+
+    /// Whether this member was elected group leader and computed the
+    /// assignment for everyone.
+    pub fn is_leader(&self) -> bool {
+        self.membership.is_leader()
+    }
+
+    /// The underlying cluster handle.
+    pub fn cluster(&self) -> &Cluster {
+        self.inner.cluster()
+    }
+
+    /// Re-join if needed, heartbeat, then read.
+    pub async fn poll(&mut self) -> Result<Vec<Record>> {
+        if self.rejoin {
+            let sizes = self.partition_counts().await?;
+            match self.membership.join(self.inner.cluster(), &sizes).await {
+                Ok(assigned) => {
+                    self.inner.reassign(assigned).await?;
+                    self.rejoin = false;
+                }
+                Err(error) => {
+                    // KIP-394: the coordinator refuses a first join and hands
+                    // back the id to use. That is the handshake, so the next
+                    // poll simply tries again with the id it gave us.
+                    if error.code() != Some(kafka_conn::ErrorCode::MemberIdRequired) {
+                        return Err(error);
+                    }
+                    return Ok(Vec::new());
+                }
+            }
+        }
+
+        if self.membership.heartbeat(self.inner.cluster()).await? {
+            // `REBALANCE_IN_PROGRESS` arriving mid-poll is normal, not an
+            // error: it means re-join, which the next poll does.
+            if self.auto_commit {
+                let _ = self.inner.commit().await;
+            }
+            self.rejoin = true;
+            return Ok(Vec::new());
+        }
+
+        self.inner.poll().await
+    }
+
+    /// Commit the current positions.
+    pub async fn commit(&self) -> Result<Vec<((String, i32), Result<()>)>> {
+        self.inner.commit().await
+    }
+
+    /// Leave the group. A static member deliberately does **not** leave.
+    pub async fn leave(&mut self) -> Result<()> {
+        if self.auto_commit {
+            let _ = self.inner.commit().await;
+        }
+        self.membership.leave(self.inner.cluster()).await
+    }
+
+    /// How many partitions each subscribed topic has, which the leader needs
+    /// to size the assignment.
+    async fn partition_counts(&self) -> Result<std::collections::BTreeMap<String, i32>> {
+        let names: Vec<&str> = self.subscription.iter().map(String::as_str).collect();
+        let snapshot = self.inner.cluster().refresh_topics(&names).await?;
+        let mut out = std::collections::BTreeMap::new();
+        for topic in &self.subscription {
+            if let Some(info) = snapshot.topic(topic) {
+                out.insert(
+                    topic.clone(),
+                    i32::try_from(info.partitions.len()).unwrap_or(0),
+                );
+            }
+        }
+        Ok(out)
+    }
+}

@@ -15,7 +15,7 @@ use anyhow::{Result, bail};
 use bytes::Bytes;
 use futures::StreamExt;
 use kafka_admin::{Admin, NewTopic};
-use kafka_consumer::{Consumer, ConsumerConfig, GroupConsumer, Position};
+use kafka_consumer::{ClassicConsumer, Consumer, ConsumerConfig, GroupConsumer, Position};
 use kafka_meta::Cluster;
 use kafka_produce::{Compression, Producer, ProducerConfig, ProducerRecord, partition_for_key};
 use kafka_read::{ScanEvent, ScanSpec, StartPosition, Visibility};
@@ -386,6 +386,53 @@ async fn group(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<()
     }
     report.set("group.reassigned_on_leave", true);
     second.leave().await?;
+
+    // M18: the same coverage property under the classic protocol, which a 4.x
+    // broker still speaks even though KIP-848 is its default.
+    let classic_id = format!("kaaslib-live-classic-{}", run_token());
+    let mut ca =
+        ClassicConsumer::subscribe(cluster.clone(), config(), &classic_id, [topic]).await?;
+    let mut cb =
+        ClassicConsumer::subscribe(cluster.clone(), config(), &classic_id, [topic]).await?;
+
+    // Concurrently, not in turn. `JoinGroup` blocks on the coordinator until
+    // the group forms, so polling one member to completion before touching the
+    // other deadlocks the rebalance: the first sits waiting for a second
+    // member that cannot join because we are still awaiting the first.
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        let (ra, rb) = tokio::join!(ca.poll(), cb.poll());
+        ra?;
+        rb?;
+        let a = ca.assignment().len();
+        let b = cb.assignment().len();
+        if a + b == usize::try_from(PARTITIONS).unwrap_or(0) && a > 0 && b > 0 {
+            break;
+        }
+    }
+
+    let a: std::collections::BTreeSet<(String, i32)> = ca.assignment().into_iter().collect();
+    let b: std::collections::BTreeSet<(String, i32)> = cb.assignment().into_iter().collect();
+    report.set("classic.settle_ms", started.elapsed().as_millis());
+    report.set("classic.member_a", a.len());
+    report.set("classic.member_b", b.len());
+    report.set("classic.leader_elected", ca.is_leader() || cb.is_leader());
+    report.set("classic.overlap", a.intersection(&b).count());
+    report.set("classic.union", a.union(&b).count());
+
+    if !a.is_disjoint(&b) {
+        bail!("two classic members own the same partitions");
+    }
+    if a.union(&b).count() != usize::try_from(PARTITIONS).unwrap_or(0) {
+        bail!(
+            "the classic group covers {} of {PARTITIONS} partitions",
+            a.union(&b).count()
+        );
+    }
+    report.set("classic.covers_every_partition", true);
+    ca.leave().await?;
+    cb.leave().await?;
 
     Ok(())
 }

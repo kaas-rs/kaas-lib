@@ -38,13 +38,14 @@
     )
 )]
 
+mod classic;
 mod consumer;
 mod fetcher;
 mod group;
 mod offsets;
 mod session;
 
-pub use consumer::{Consumer, ConsumerConfig, GroupConsumer, Position};
+pub use consumer::{ClassicConsumer, Consumer, ConsumerConfig, GroupConsumer, Position};
 pub use offsets::CommittedOffset;
 
 pub use kafka_conn::{Error, Result};
