@@ -709,6 +709,16 @@ pub struct ClassicConsumer {
 
 impl ClassicConsumer {
     /// Join `group_id` under the classic protocol.
+    ///
+    /// # Every member needs its own `Cluster`
+    ///
+    /// Not a style preference — a hard requirement of this protocol. See
+    /// [`crate::classic`] for the full reasoning; in short, `JoinGroup` blocks
+    /// on the coordinator and a Kafka broker will not read a second request
+    /// from a socket until it has answered the first, so two members of one
+    /// group sharing a connection deadlock and present as a plain timeout.
+    ///
+    /// [`GroupConsumer`] has no such constraint.
     pub async fn subscribe(
         cluster: Cluster,
         mut config: ConsumerConfig,

@@ -390,10 +390,23 @@ async fn group(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<()
     // M18: the same coverage property under the classic protocol, which a 4.x
     // broker still speaks even though KIP-848 is its default.
     let classic_id = format!("kaaslib-live-classic-{}", run_token());
-    let mut ca =
-        ClassicConsumer::subscribe(cluster.clone(), config(), &classic_id, [topic]).await?;
-    let mut cb =
-        ClassicConsumer::subscribe(cluster.clone(), config(), &classic_id, [topic]).await?;
+    // A `Cluster` each, deliberately. `JoinGroup` blocks on the coordinator and
+    // the broker mutes a connection while a request is in flight, so two
+    // members sharing one would deadlock: the second member's join is never
+    // read, the group never forms, and the first waits out its rebalance
+    // timeout. See `kafka_consumer::classic`.
+    let cluster_a = kafka_meta::Cluster::connect(
+        cluster.pool().bootstrap().to_vec(),
+        kafka_meta::ClusterConfig::default(),
+    )
+    .await?;
+    let cluster_b = kafka_meta::Cluster::connect(
+        cluster.pool().bootstrap().to_vec(),
+        kafka_meta::ClusterConfig::default(),
+    )
+    .await?;
+    let mut ca = ClassicConsumer::subscribe(cluster_a, config(), &classic_id, [topic]).await?;
+    let mut cb = ClassicConsumer::subscribe(cluster_b, config(), &classic_id, [topic]).await?;
 
     // Concurrently, not in turn. `JoinGroup` blocks on the coordinator until
     // the group forms, so polling one member to completion before touching the

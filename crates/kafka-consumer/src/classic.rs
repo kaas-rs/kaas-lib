@@ -38,6 +38,31 @@
 //! The cost is honest and worth stating: forcing a group onto `range` is a
 //! **group-wide** downgrade, so every Java member in it loses cooperative
 //! rebalancing too.
+//!
+//! # Each member needs its own connection, and that is not a style preference
+//!
+//! `JoinGroup` **blocks** on the coordinator until the group forms — it is the
+//! one RPC here whose normal behaviour is to sit in purgatory. And a Kafka
+//! broker *mutes a connection* while a request on it is in flight: it will not
+//! read the next request from that socket until it has written the previous
+//! response.
+//!
+//! Put those together and two members of one group sharing a connection
+//! deadlock outright. The first member's JoinGroup occupies the socket; the
+//! second member's JoinGroup is never even *read* by the broker; the group
+//! therefore never forms; and the first member waits out its rebalance timeout
+//! for a member that was ready all along. It presents as a plain timeout with
+//! nothing wrong on either side.
+//!
+//! A [`kafka_meta::Cluster`] pools one connection per broker and shares it
+//! across everything using that handle, so **every member of a classic group
+//! must be built from its own `Cluster`**. [`crate::ClassicConsumer::subscribe`]
+//! cannot enforce that — it takes a cluster the caller owns — so it is
+//! documented there and asserted by the acceptance test.
+//!
+//! KIP-848 has no such constraint: `ConsumerGroupHeartbeat` returns
+//! immediately, so members can share a connection freely. That difference is
+//! why the modern path worked first time and this one did not.
 
 use std::collections::BTreeMap;
 
