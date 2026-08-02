@@ -29,7 +29,7 @@
 //! M14 relaxes this to the broker's five in-flight sequence windows once
 //! records carry sequence numbers that let the broker restore order itself.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,6 +44,7 @@ use crate::idempotence::{
     BatchIdentity, ProducerIdentity, Sequences, init_producer_id, invalidates_producer_state,
 };
 use crate::record::{ProducerRecord, RecordMetadata};
+use crate::transactions::Transactions;
 
 /// How many commands may queue before `send` waits.
 ///
@@ -164,7 +165,11 @@ pub(crate) struct Accumulator {
 
 impl Accumulator {
     /// Spawn the accumulator task and return a handle to it.
-    pub(crate) fn spawn(dispatcher: Dispatcher, config: ProducerConfig) -> Self {
+    pub(crate) fn spawn(
+        dispatcher: Dispatcher,
+        config: ProducerConfig,
+        transactions: Option<Arc<Transactions>>,
+    ) -> Self {
         let (commands, command_rx) = mpsc::channel(COMMAND_QUEUE);
         let memory = Arc::new(Semaphore::new(config.buffer_memory_permits()));
 
@@ -175,7 +180,7 @@ impl Accumulator {
         // than as the error it is.
         let record_limit = config.max_request_size.min(config.buffer_memory);
 
-        let actor = Actor::new(dispatcher, config, Arc::clone(&memory));
+        let actor = Actor::new(dispatcher, config, Arc::clone(&memory), transactions);
         tokio::spawn(actor.run(command_rx));
 
         Self {
@@ -252,12 +257,23 @@ struct Actor {
     completions_tx: mpsc::Sender<Completed>,
     completions_rx: mpsc::Receiver<Completed>,
     /// The identity `InitProducerId` issued, once claimed.
+    ///
+    /// For a transactional producer this mirrors what
+    /// [`Transactions`] holds — the caller claims it there, because
+    /// `init_transactions` is a caller-driven step — and the actor only reads
+    /// it.
     identity: Option<ProducerIdentity>,
     sequences: Sequences,
+    transactions: Option<Arc<Transactions>>,
 }
 
 impl Actor {
-    fn new(dispatcher: Dispatcher, config: ProducerConfig, memory: Arc<Semaphore>) -> Self {
+    fn new(
+        dispatcher: Dispatcher,
+        config: ProducerConfig,
+        memory: Arc<Semaphore>,
+        transactions: Option<Arc<Transactions>>,
+    ) -> Self {
         let (completions_tx, completions_rx) = mpsc::channel(COMMAND_QUEUE);
         Self {
             dispatcher,
@@ -269,6 +285,7 @@ impl Actor {
             completions_rx,
             identity: None,
             sequences: Sequences::default(),
+            transactions,
         }
     }
 
@@ -299,6 +316,7 @@ impl Actor {
             }
 
             self.ensure_identity().await;
+            self.ensure_enrolled().await;
             self.dispatch_ready();
             self.settle_flushes();
             self.forget_idle();
@@ -387,6 +405,23 @@ impl Actor {
     /// usually a broker that is not ready yet, and failing every buffered
     /// record for it would turn a transient condition into data loss.
     async fn ensure_identity(&mut self) {
+        // A transactional producer's id is claimed by `init_transactions`,
+        // which the caller drives — claiming one here would race it and fence
+        // the producer against itself.
+        if let Some(transactions) = &self.transactions {
+            let current = transactions.identity();
+            // A changed epoch means the coordinator issued a new identity —
+            // KIP-890 bumps it at every transaction boundary. Sequences are
+            // numbered *per* producer id and epoch, so carrying the old
+            // counters into the new identity makes the first batch of the next
+            // transaction look out of order.
+            if current != self.identity {
+                self.sequences.reset();
+                self.identity = current;
+            }
+            return;
+        }
+
         if !self.config.idempotent || self.identity.is_some() || !self.has_work() {
             return;
         }
@@ -401,6 +436,52 @@ impl Actor {
             }
             Err(error) => {
                 tracing::warn!(%error, "could not claim a producer id; retrying");
+            }
+        }
+    }
+
+    /// Tell the coordinator about every partition this transaction is about
+    /// to write to, before the first batch reaches it.
+    ///
+    /// Order is the whole point: a produce to a partition the coordinator has
+    /// not been told about is rejected with an error that reads like a
+    /// permissions problem. Doing it here, once per partition per transaction,
+    /// keeps that ordering true without a round trip per batch.
+    async fn ensure_enrolled(&mut self) {
+        let Some(transactions) = self.transactions.clone() else {
+            return;
+        };
+        if !transactions.is_open() {
+            return;
+        }
+
+        let waiting: Vec<(String, i32)> = self
+            .partitions
+            .iter()
+            .filter(|(_, state)| !state.in_flight && !state.pending.is_empty())
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        let missing = transactions.unenrolled(&waiting);
+        if missing.is_empty() {
+            return;
+        }
+
+        if let Err(error) = transactions
+            .enrol(self.dispatcher.cluster(), &missing)
+            .await
+        {
+            // Fail the batches rather than sending them unenrolled, which the
+            // broker would reject anyway and less legibly.
+            tracing::warn!(%error, "could not add partitions to the transaction");
+            for key in missing {
+                if let Some(state) = self.partitions.get_mut(&key) {
+                    for batch in std::mem::take(&mut state.pending) {
+                        for queued in batch.records {
+                            queued.resolve(Err(error.clone()));
+                        }
+                    }
+                }
             }
         }
     }
@@ -459,10 +540,32 @@ impl Actor {
         }
 
         let snapshot = self.dispatcher.cluster().snapshot();
+        let transactional = self
+            .transactions
+            .as_ref()
+            .is_some_and(|transactions| transactions.is_open());
+        let enrolled: HashSet<(String, i32)> = if transactional {
+            // Anything still unenrolled has to wait for `ensure_enrolled`;
+            // sending it now is the ordering violation this milestone is about.
+            self.partitions
+                .keys()
+                .filter(|key| {
+                    self.transactions
+                        .as_ref()
+                        .is_some_and(|t| t.unenrolled(std::slice::from_ref(*key)).is_empty())
+                })
+                .cloned()
+                .collect()
+        } else {
+            HashSet::new()
+        };
         let mut groups: HashMap<Option<i32>, Vec<Ready>> = HashMap::new();
 
         for ((topic, partition), state) in self.partitions.iter_mut() {
             if state.in_flight {
+                continue;
+            }
+            if transactional && !enrolled.contains(&(topic.clone(), *partition)) {
                 continue;
             }
             let Some(batch) = state.pending.pop_front() else {
@@ -484,6 +587,7 @@ impl Actor {
                 base_sequence: self
                     .sequences
                     .reserve((topic.clone(), *partition), batch.records.len()),
+                transactional,
             });
 
             groups.entry(leader).or_default().push(Ready {

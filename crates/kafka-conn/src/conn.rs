@@ -593,7 +593,11 @@ fn spawn(
 fn typed_range<R: Rpc>() -> crate::versions::VersionRange {
     let request = R::VERSIONS;
     let response = <R::Response as kafka_protocol::protocol::Message>::VERSIONS;
-    crate::versions::VersionRange::new(request.min.max(response.min), request.max.min(response.max))
+    let max = match R::CLIENT_MAX_VERSION {
+        Some(client_max) => request.max.min(response.max).min(client_max),
+        None => request.max.min(response.max),
+    };
+    crate::versions::VersionRange::new(request.min.max(response.min), max)
 }
 
 /// The version a request will actually be encoded at.
@@ -905,6 +909,34 @@ mod tests {
 
         // ... whereas the untyped path is what produced the bug.
         assert_eq!(table.negotiate(ApiKey::OffsetFetch).ok(), Some(10));
+    }
+
+    /// The third narrowing: some apis have versions a client must not send.
+    ///
+    /// `AddPartitionsToTxn` v4 (KIP-890) is the broker-side verification
+    /// shape, with a `transactions` array instead of the flat fields a
+    /// producer fills in. Negotiating to the schema maximum against a 4.x
+    /// broker would encode v5 and leave every `v3_and_below_*` field unset.
+    #[test]
+    fn a_client_never_negotiates_past_an_apis_client_ceiling() {
+        use kafka_protocol::messages::AddPartitionsToTxnRequest;
+
+        let schema = <AddPartitionsToTxnRequest as kafka_protocol::protocol::Message>::VERSIONS;
+        assert!(
+            schema.max >= 4,
+            "the schema still reaches the broker-side versions, so the clamp \
+             is still doing something"
+        );
+        assert_eq!(typed_range::<AddPartitionsToTxnRequest>().max, 3);
+
+        // A broker offering the full range must still be answered at v3.
+        let table = ApiVersions::from_triples([(ApiKey::AddPartitionsToTxn.code(), 0, 5)]);
+        assert_eq!(
+            version_for::<AddPartitionsToTxnRequest>(&table).ok(),
+            Some(3),
+            "a client that negotiates past v3 sends the broker's shape, not \
+             its own"
+        );
     }
 
     #[test]

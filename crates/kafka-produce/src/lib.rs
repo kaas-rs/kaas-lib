@@ -124,6 +124,7 @@ mod idempotence;
 mod partition;
 mod producer;
 mod record;
+mod transactions;
 
 pub use config::{Acks, Compression, ProducerConfig};
 pub use partition::{Partitioner, murmur2, partition_for_key};

@@ -135,6 +135,17 @@ pub struct ProducerConfig {
     /// Turning it off is for brokers that do not support `InitProducerId` at
     /// all. It does not make the producer faster; it makes it lossier.
     pub idempotent: bool,
+    /// The transactional id, for a producer that writes transactions.
+    ///
+    /// Setting it changes what the producer *is*: it claims a fenced producer
+    /// id from the transaction coordinator, and claiming it **fences any
+    /// earlier producer holding the same id**. That is the point of the id
+    /// rather than a side effect — it is how a restarted application takes
+    /// over from the instance it replaced.
+    ///
+    /// A transactional producer is always idempotent; setting this implies
+    /// [`ProducerConfig::idempotent`].
+    pub transactional_id: Option<String>,
 }
 
 impl ProducerConfig {
@@ -154,6 +165,7 @@ impl ProducerConfig {
             max_request_size: 1024 * 1024,
             buffer_memory: 32 * 1024 * 1024,
             idempotent: true,
+            transactional_id: None,
         }
     }
 
@@ -217,6 +229,17 @@ impl ProducerConfig {
     #[must_use]
     pub fn idempotent(mut self, idempotent: bool) -> Self {
         self.idempotent = idempotent;
+        self
+    }
+
+    /// Write transactions under this id.
+    ///
+    /// Implies idempotence, because a transaction is built on the same
+    /// producer id and sequence numbers.
+    #[must_use]
+    pub fn transactional_id(mut self, id: impl Into<String>) -> Self {
+        self.transactional_id = Some(id.into());
+        self.idempotent = true;
         self
     }
 

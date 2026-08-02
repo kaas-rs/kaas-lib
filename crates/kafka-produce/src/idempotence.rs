@@ -46,6 +46,12 @@ pub(crate) struct BatchIdentity {
     pub producer_epoch: i16,
     /// The sequence of the batch's first record; the rest count up from it.
     pub base_sequence: i32,
+    /// Whether these records belong to a transaction.
+    ///
+    /// Sets the transactional bit in the batch header, which is what makes a
+    /// `read_committed` consumer hold them back until it sees a marker. An
+    /// idempotent-but-not-transactional batch leaves it clear.
+    pub transactional: bool,
 }
 
 /// Claim a producer id for idempotent, non-transactional writes.

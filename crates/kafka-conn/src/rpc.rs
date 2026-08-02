@@ -26,6 +26,19 @@ pub trait Rpc: Encodable + Message + HeaderVersion + Sized {
     const API_KEY: ApiKey;
     /// The response type.
     type Response: Decodable + Message + HeaderVersion;
+    /// The highest version a **client** may send, where that is lower than the
+    /// schema's own maximum.
+    ///
+    /// Usually `None`: the schema range is the range. It is `Some` for the
+    /// apis whose newer versions exist for broker-to-broker traffic rather
+    /// than for clients, where negotiating to the schema maximum would send a
+    /// shape the broker does not expect from us. `AddPartitionsToTxn` is the
+    /// case that motivated it — see its impl.
+    ///
+    /// This is a third narrowing on top of the two `typed_range` already
+    /// applies, and for the same reason: the version a request may be encoded
+    /// at is not always the version the api key advertises.
+    const CLIENT_MAX_VERSION: Option<i16> = None;
 }
 
 impl Rpc for messages::ProduceRequest {
@@ -131,6 +144,17 @@ impl Rpc for messages::OffsetForLeaderEpochRequest {
 impl Rpc for messages::AddPartitionsToTxnRequest {
     const API_KEY: ApiKey = ApiKey::AddPartitionsToTxn;
     type Response = messages::AddPartitionsToTxnResponse;
+    /// v4 (KIP-890) replaced the flat request with a `transactions` array, and
+    /// that shape is the **broker-side** verification path — a broker batching
+    /// several transactions into one call to the coordinator. A client sends
+    /// one transaction and uses the v3-and-below fields.
+    ///
+    /// Negotiating to the schema maximum would encode the v4 shape and leave
+    /// every `v3_and_below_*` field unset, which is not a request the
+    /// coordinator will honour from a producer. Java clamps its client builder
+    /// the same way. This is the one place the clamp is load-bearing rather
+    /// than cautious.
+    const CLIENT_MAX_VERSION: Option<i16> = Some(3);
 }
 
 impl Rpc for messages::AddOffsetsToTxnRequest {

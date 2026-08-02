@@ -17,7 +17,7 @@ use futures::StreamExt;
 use kafka_admin::{Admin, NewTopic};
 use kafka_meta::Cluster;
 use kafka_produce::{Compression, Producer, ProducerConfig, ProducerRecord, partition_for_key};
-use kafka_read::{ScanEvent, ScanSpec, StartPosition};
+use kafka_read::{ScanEvent, ScanSpec, StartPosition, Visibility};
 
 use crate::report::{Outcome, Report};
 use crate::target::{Target, run_token};
@@ -294,6 +294,104 @@ async fn run(cluster: &Cluster, admin: &Admin, topic: &str, report: &mut Report)
     //    which is the shape M12 shipped; this is the assertion that the
     //    batching added on top is real.
     batching(cluster, topic, report).await?;
+
+    // 6. Transactions (M15), against a real transaction coordinator.
+    transactions(cluster, topic, report).await?;
+
+    Ok(())
+}
+
+/// How many records each transaction writes.
+const TXN_RECORDS: usize = 50;
+
+/// M15: a committed transaction and an aborted one on the same partition, and
+/// two readers that must disagree about what is there.
+///
+/// The container test can assert this too, but only here does it run against a
+/// real transaction coordinator on a different machine from the leader, with
+/// `AddPartitionsToTxn` actually crossing a network. It is also the first time
+/// `kafka-read`'s aborted-transaction filter sees data it has to filter.
+async fn transactions(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<()> {
+    let token = run_token();
+    let marker = format!("m15-{token}");
+    let producer = Producer::new(
+        cluster.clone(),
+        ProducerConfig::new().transactional_id(format!("kaaslib-live-txn-{token}")),
+    );
+
+    producer.init_transactions().await?;
+    report.set("txn.initialised", true);
+
+    for (kind, commit) in [("committed", true), ("aborted", false)] {
+        producer.begin_transaction()?;
+        let mut pending = Vec::with_capacity(TXN_RECORDS);
+        for i in 0..TXN_RECORDS {
+            pending.push(
+                producer
+                    .enqueue(
+                        ProducerRecord::new(topic)
+                            .partition(1)
+                            .value(format!("{marker}-{kind}-{i}")),
+                    )
+                    .await?,
+            );
+        }
+        for delivery in pending {
+            delivery.await?;
+        }
+        if commit {
+            producer.commit_transaction().await?;
+        } else {
+            producer.abort_transaction().await?;
+        }
+    }
+
+    // Counted by marker, not by total: partition 1 already holds records from
+    // the keyed-spread section and, with `--topic`, from earlier runs.
+    let ours = |records: &[kafka_read::Record], kind: &str| -> usize {
+        let needle = format!("{marker}-{kind}-");
+        records
+            .iter()
+            .filter_map(|record| record.value.as_deref())
+            .filter(|value| String::from_utf8_lossy(value).starts_with(&needle))
+            .count()
+    };
+
+    let everything = read_partition_with(cluster, topic, 1, Visibility::All).await?;
+    let committed = read_partition_with(cluster, topic, 1, Visibility::CommittedOnly).await?;
+
+    report.set("txn.all.committed_records", ours(&everything, "committed"));
+    report.set("txn.all.aborted_records", ours(&everything, "aborted"));
+    report.set(
+        "txn.committed_only.committed_records",
+        ours(&committed, "committed"),
+    );
+    report.set(
+        "txn.committed_only.aborted_records",
+        ours(&committed, "aborted"),
+    );
+
+    if ours(&everything, "committed") != TXN_RECORDS || ours(&everything, "aborted") != TXN_RECORDS
+    {
+        bail!(
+            "Visibility::All must show both transactions: {} committed, {} aborted",
+            ours(&everything, "committed"),
+            ours(&everything, "aborted")
+        );
+    }
+    if ours(&committed, "committed") != TXN_RECORDS {
+        bail!(
+            "Visibility::CommittedOnly lost committed records: {}",
+            ours(&committed, "committed")
+        );
+    }
+    if ours(&committed, "aborted") != 0 {
+        bail!(
+            "an aborted transaction leaked into the committed view: {} records",
+            ours(&committed, "aborted")
+        );
+    }
+    report.set("txn.filter_holds", true);
 
     Ok(())
 }
@@ -572,9 +670,19 @@ async fn read_partition(
     topic: &str,
     partition: i32,
 ) -> Result<Vec<kafka_read::Record>> {
+    read_partition_with(cluster, topic, partition, Visibility::All).await
+}
+
+async fn read_partition_with(
+    cluster: &Cluster,
+    topic: &str,
+    partition: i32,
+    visibility: Visibility,
+) -> Result<Vec<kafka_read::Record>> {
     let spec = ScanSpec::new(topic)
         .with_partitions([partition])
-        .from(StartPosition::Earliest);
+        .from(StartPosition::Earliest)
+        .with_visibility(visibility);
     let mut stream = Box::pin(kafka_read::scan(cluster, spec).await?);
 
     let mut records = Vec::new();

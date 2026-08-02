@@ -51,7 +51,7 @@ pub(crate) fn encode_batch(
         .iter()
         .enumerate()
         .map(|(index, record)| WireRecord {
-            transactional: false,
+            transactional: identity.is_some_and(|id| id.transactional),
             control: false,
             partition_leader_epoch: NO_PARTITION_LEADER_EPOCH,
             producer_id: identity.map_or(NO_PRODUCER_ID, |id| id.producer_id),

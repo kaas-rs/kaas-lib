@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use kafka_conn::protocol::StrBytes;
 use kafka_conn::protocol::messages::produce_request::{PartitionProduceData, TopicProduceData};
-use kafka_conn::protocol::messages::{ProduceRequest, ProduceResponse, TopicName};
+use kafka_conn::protocol::messages::{ProduceRequest, ProduceResponse, TopicName, TransactionalId};
 use kafka_conn::{Error, ErrorCode, Result};
 use kafka_meta::{Cluster, RetryPolicy, TopicId};
 
@@ -330,10 +330,20 @@ impl Dispatcher {
             topic_data.push(data);
         }
 
-        Ok(ProduceRequest::default()
+        let mut request = ProduceRequest::default()
             .with_acks(self.config.acks.wire())
             .with_timeout_ms(self.config.delivery_timeout_ms())
-            .with_topic_data(topic_data))
+            .with_topic_data(topic_data);
+
+        // A transactional produce must name its transaction. Without this the
+        // broker sees an ordinary idempotent batch carrying the transactional
+        // bit, which is not a combination it will accept.
+        if let Some(id) = &self.config.transactional_id {
+            request = request
+                .with_transactional_id(Some(TransactionalId(StrBytes::from_string(id.clone()))));
+        }
+
+        Ok(request)
     }
 
     /// The topic's uuid, as the metadata cache knows it.

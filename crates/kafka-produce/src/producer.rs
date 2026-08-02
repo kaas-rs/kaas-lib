@@ -14,6 +14,7 @@ use crate::config::ProducerConfig;
 use crate::dispatch::Dispatcher;
 use crate::partition::Partitioner;
 use crate::record::{ProducerRecord, RecordMetadata};
+use crate::transactions::Transactions;
 
 /// A record's outcome, once the broker has answered for its batch.
 ///
@@ -51,16 +52,23 @@ pub struct Producer {
     /// Spawned on first use rather than in [`Producer::new`], which is not
     /// async and therefore cannot assume a runtime exists to spawn onto.
     accumulator: Arc<OnceCell<Accumulator>>,
+    /// `Some` when the config named a transactional id.
+    transactions: Option<Arc<Transactions>>,
 }
 
 impl Producer {
     /// Wrap an existing cluster handle.
     pub fn new(cluster: kafka_meta::Cluster, config: ProducerConfig) -> Self {
+        let transactions = config
+            .transactional_id
+            .clone()
+            .map(|id| Arc::new(Transactions::new(id)));
         Self {
             cluster,
             config,
             partitioner: Arc::new(Partitioner::new()),
             accumulator: Arc::new(OnceCell::new()),
+            transactions,
         }
     }
 
@@ -175,6 +183,67 @@ impl Producer {
         Ok(Delivery(receiver))
     }
 
+    /// Claim this producer's transactional id, fencing any earlier holder.
+    ///
+    /// Must be called once before any transaction. Claiming the id **fences a
+    /// previous producer using the same one** — that is what a transactional
+    /// id is for, and how a restarted application takes over cleanly from the
+    /// instance it replaced.
+    ///
+    /// Fails with `InvalidRequest` if the config named no transactional id.
+    pub async fn init_transactions(&self) -> Result<()> {
+        self.transactional()?.init(&self.cluster).await
+    }
+
+    /// Open a transaction.
+    ///
+    /// Local: the protocol has no "begin" request, and the coordinator first
+    /// learns of the transaction when the producer enrols a partition in it.
+    pub fn begin_transaction(&self) -> Result<()> {
+        self.transactional()?.begin()
+    }
+
+    /// Make every record written since [`Producer::begin_transaction`] visible
+    /// to `read_committed` readers, atomically.
+    ///
+    /// Flushes first: a record still sitting in the accumulator when the
+    /// commit marker is written is not in the transaction, and would appear
+    /// afterwards as an ordinary uncommitted write.
+    pub async fn commit_transaction(&self) -> Result<()> {
+        self.flush().await?;
+        self.transactional()?.end(&self.cluster, true).await
+    }
+
+    /// Discard the transaction.
+    ///
+    /// The records may already be in the log — aborting writes a marker rather
+    /// than deleting anything — so a `read_committed` reader never sees them
+    /// and a `read_uncommitted` one does. That asymmetry is the protocol's,
+    /// not this library's.
+    ///
+    /// Flushes first for the same reason as commit: a record that reaches the
+    /// log *after* the abort marker is not covered by it.
+    pub async fn abort_transaction(&self) -> Result<()> {
+        self.flush().await?;
+        self.transactional()?.end(&self.cluster, false).await
+    }
+
+    /// Whether a transaction is currently open.
+    pub fn in_transaction(&self) -> bool {
+        self.transactions
+            .as_ref()
+            .is_some_and(|transactions| transactions.is_open())
+    }
+
+    fn transactional(&self) -> Result<&Arc<Transactions>> {
+        self.transactions.as_ref().ok_or_else(|| {
+            Error::InvalidRequest(
+                "this producer has no transactional id; set one with                  ProducerConfig::transactional_id"
+                    .to_owned(),
+            )
+        })
+    }
+
     /// Send every buffered record and wait for all of them to be acknowledged.
     ///
     /// Returns once the accumulator is empty and nothing is on the wire. Errors
@@ -192,6 +261,7 @@ impl Producer {
                 Accumulator::spawn(
                     Dispatcher::new(self.cluster.clone(), self.config.clone()),
                     self.config.clone(),
+                    self.transactions.clone(),
                 )
             })
             .await
