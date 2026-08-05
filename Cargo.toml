@@ -17,7 +17,7 @@ members = [
 # along a layering boundary, not six independently useful things, and a
 # caller pulling kafka-admin 0.2 against kafka-conn 0.1 is not a
 # combination anyone tests. Bump here, not per crate.
-version      = "0.2.1"
+version      = "0.3.0"
 edition      = "2024"
 license      = "Apache-2.0"
 repository   = "https://github.com/kaas-rs/kaas-lib"
@@ -33,10 +33,16 @@ rust-version = "1.97"
 # crates are already live and irreversibly so, with a resolver error about a
 # version that does not exist yet.
 #
-# So: two adjacent lines in one file, not a scattering across six manifests.
-# Bump the `version` below together with `[workspace.package] version` above.
-kafka-conn = { path = "crates/kafka-conn", version = "0.2.1" }
-kafka-meta = { path = "crates/kafka-meta", version = "0.2.1" }
+# So: three adjacent lines in one file, not a scattering across six manifests.
+# Bump these together with `[workspace.package] version` above.
+#
+# `kafka-read` is here because `kafka-consume` takes the tolerant decoder from
+# it rather than building a second one. It was pinned inline at 0.2.1 instead,
+# which is precisely the failure this block exists to prevent: it survived
+# `cargo xtask ci` untouched and surfaced at the 0.3.0 bump.
+kafka-conn = { path = "crates/kafka-conn", version = "0.3.0" }
+kafka-meta = { path = "crates/kafka-meta", version = "0.3.0" }
+kafka-read = { path = "crates/kafka-read", version = "0.3.0" }
 
 # The codec, and the only place protocol types are allowed to appear.
 # See CLAUDE.md: `client` drops the broker half of the codegen, and

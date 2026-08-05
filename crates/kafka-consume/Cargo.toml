@@ -19,7 +19,7 @@ kafka-protocol = { workspace = true }
 # The tolerant record decoder and bounded decompression, which are
 # general-purpose already and must not be built a second time. See PLAN.md's
 # list of what phase 2 does not rebuild.
-kafka-read     = { path = "../kafka-read", version = "0.2.1" }
+kafka-read     = { workspace = true }
 tokio          = { workspace = true }
 bytes          = { workspace = true }
 futures        = { workspace = true }

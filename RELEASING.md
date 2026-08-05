@@ -14,7 +14,8 @@ in `[workspace.package]`. `testkit`, `livetest`, `xtask` and `interop` are
 
 ## Before the first release
 
-Three things that are only true once.
+Three things that were only true once — except **2**, which recurs for every
+crate added to the workspace. See [Registering a new crate](#registering-a-new-crate).
 
 **0. The crates.io account needs a verified email address.** Not the token —
 the *account* the token belongs to. Without one, every upload is rejected
@@ -55,6 +56,37 @@ no "pending publisher". So:
    absence and switches to OIDC automatically; no stored credential from
    then on.
 
+## Registering a new crate
+
+crates.io cannot attach a Trusted Publisher to a crate that does not exist
+yet, and the token the OIDC exchange returns is scoped to crates that already
+have a publisher configured. So the credential-free path cannot make the
+*first* upload of a new crate. RFC 3691 lists lifting this as a future
+possibility; it is not shipped.
+
+That makes the token dance above recur every time a crate joins the
+workspace, not just at the first release:
+
+1. Create a token at <https://crates.io/settings/tokens> scoped to
+   `publish-new` and `publish-update`.
+2. Add it as the repository secret `CARGO_REGISTRY_TOKEN`, or on the
+   `crates-io` environment — the publish job sees both. No workflow edit is
+   needed: it resolves
+   `secrets.CARGO_REGISTRY_TOKEN || steps.auth.outputs.token` and skips the
+   auth action entirely when the secret is set.
+3. Tag and release as usual. The new crate uploads alongside the rest.
+4. **Then** configure Trusted Publishing for the new crate at
+   `https://crates.io/crates/<name>/settings` — repository
+   `kaas-rs/kaas-lib`, workflow `release.yml`, environment `crates-io`.
+5. **Delete the secret again**, so the steady state stays credential-free.
+
+Skipping step 1 does not fail early. The gates are all green — they never
+contact the registry — and the run dies at the upload with the credential
+error, after the reviewer has already approved.
+
+> **0.3.0 is one of these releases.** `kafka-consume` is new, so the token
+> has to go back before the tag and come out after.
+
 ## Recommended: protect the environment
 
 The `publish` job targets the `crates-io` environment. Add a required
@@ -73,11 +105,12 @@ suite are green.
 ## Cutting a release
 
 ```sh
-# 1. Bump BOTH version lines in the root Cargo.toml. They are adjacent.
-#      [workspace.package]  version = "0.2.1"
+# 1. Bump EVERY version line in the root Cargo.toml. They are adjacent.
+#      [workspace.package]  version = "0.3.0"
 #      [workspace.dependencies]
-#        kafka-conn = { path = "...", version = "0.2.1" }
-#        kafka-meta = { path = "...", version = "0.2.1" }
+#        kafka-conn = { path = "...", version = "0.3.0" }
+#        kafka-meta = { path = "...", version = "0.3.0" }
+#        kafka-read = { path = "...", version = "0.3.0" }
 $EDITOR Cargo.toml
 cargo check                 # refresh Cargo.lock
 
@@ -87,19 +120,19 @@ cargo xtask integration
 cargo publish --dry-run --workspace
 
 # 3. Land it.
-git commit -am "chore(release): 0.2.1"
+git commit -am "chore(release): 0.3.0"
 git push origin main
 
 # 4. Tag. The tag push is what publishes.
-git tag v0.2.1
-git push origin v0.2.1
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The tag must be `v` + the workspace version exactly. The workflow reads the
 version cargo actually resolved, asserts all six crates agree on it, and
 refuses to run if the tag disagrees.
 
-### Why two version lines and not one
+### Why the dependency versions are separate lines
 
 A crate's own version inherits from `[workspace.package]`, but the *dependency
 requirement* one published crate states for another does not — that is a
@@ -109,9 +142,12 @@ Leaving it stale is uniquely nasty: everything builds locally, because the
 path dependency wins; `cargo xtask ci` is green; and the failure lands
 partway through a six-crate publish, after some crates are already live and
 irreversibly so, as a resolver error about a version nobody has uploaded.
-Keeping both lines in the root manifest means one file and two adjacent
-edits — `cargo publish --dry-run --workspace` in step 2 is what catches it if
-you miss one.
+Keeping them in the root manifest means one file and three adjacent edits —
+`cargo publish --dry-run --workspace` in step 2 is what catches it if you
+miss one. A crate that pins a sibling inline instead is invisible to every
+local gate until the bump: `kafka-consume` carried `kafka-read = { path =
+"...", version = "0.2.1" }` through a green CI run and only failed when
+0.3.0 made the requirement unsatisfiable.
 
 ### Dry run first
 
