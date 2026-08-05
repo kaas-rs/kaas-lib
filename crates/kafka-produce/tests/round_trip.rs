@@ -25,18 +25,45 @@ use kafka_produce::{
 use kafka_read::{Cluster, ScanEvent, ScanSpec, StartPosition};
 use testkit::{Cluster as _, KafkaCluster};
 
-async fn setup(topic: &str, partitions: i32) -> (KafkaCluster, Cluster, Admin) {
-    let fixture = testkit::cluster(3).await.expect("cluster");
-    let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
+/// The one cluster this binary's tests share.
+///
+/// Each test already names its own topic, so nothing here needed splitting —
+/// only the clusters, which were one 3-node fixture per test to assert things
+/// that do not care whose broker they run on.
+///
+/// Never dropped, because a `static` is not: the containers go with the
+/// ephemeral runner pod on CI, and may want `docker container prune` locally.
+static SHARED: tokio::sync::OnceCell<Shared> = tokio::sync::OnceCell::const_new();
+
+struct Shared {
+    _fixture: KafkaCluster,
+    admin: Admin,
+}
+
+async fn shared() -> &'static Shared {
+    SHARED
+        .get_or_init(|| async {
+            let fixture = testkit::cluster(3).await.expect("cluster");
+            let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
+                .await
+                .expect("admin");
+            Shared {
+                _fixture: fixture,
+                admin,
+            }
+        })
         .await
-        .expect("admin");
-    admin
+}
+
+async fn setup(topic: &str, partitions: i32) -> (Cluster, Admin) {
+    let shared = shared().await;
+    shared
+        .admin
         .create_topics([NewTopic::new(topic, partitions, 3)])
         .await
         .expect("topic");
-    await_topic(&admin, topic).await;
-    let cluster = admin.cluster().clone();
-    (fixture, cluster, admin)
+    await_topic(&shared.admin, topic).await;
+    (shared.admin.cluster().clone(), shared.admin.clone())
 }
 
 /// Creation is asynchronous on the broker; produce before the leader is
@@ -78,7 +105,7 @@ async fn read_partition(cluster: &Cluster, topic: &str, partition: i32) -> Vec<k
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn a_record_survives_the_round_trip_exactly() {
-    let (_fixture, cluster, _admin) = setup("produced", 6).await;
+    let (cluster, _admin) = setup("produced", 6).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
 
     let stamped = 1_765_000_000_000;
@@ -132,7 +159,7 @@ async fn a_record_survives_the_round_trip_exactly() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn a_tombstone_round_trips_as_null_and_not_as_empty() {
-    let (_fixture, cluster, _admin) = setup("tombstones", 1).await;
+    let (cluster, _admin) = setup("tombstones", 1).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
 
     producer
@@ -165,7 +192,7 @@ async fn a_tombstone_round_trips_as_null_and_not_as_empty() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn every_codec_round_trips() {
-    let (_fixture, cluster, _admin) = setup("codecs", 1).await;
+    let (cluster, _admin) = setup("codecs", 1).await;
 
     for (index, compression) in [
         Compression::None,
@@ -209,7 +236,7 @@ async fn every_codec_round_trips() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn a_keyed_record_lands_where_murmur2_says_it_should() {
-    let (_fixture, cluster, _admin) = setup("keyed", 6).await;
+    let (cluster, _admin) = setup("keyed", 6).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
 
     // Produce without naming a partition and assert the broker put each record
@@ -245,7 +272,7 @@ async fn a_keyed_record_lands_where_murmur2_says_it_should() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn an_unkeyed_record_sticks_to_one_partition() {
-    let (_fixture, cluster, _admin) = setup("sticky", 6).await;
+    let (cluster, _admin) = setup("sticky", 6).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
 
     let mut partitions = HashSet::new();
@@ -276,7 +303,7 @@ async fn an_unkeyed_record_sticks_to_one_partition() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn acks_leader_is_acknowledged_before_the_record_is_readable() {
-    let (_fixture, cluster, _admin) = setup("acked", 1).await;
+    let (cluster, _admin) = setup("acked", 1).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new().acks(Acks::Leader));
 
     let metadata = producer
@@ -321,7 +348,7 @@ async fn await_visible(
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn producing_to_a_partition_that_does_not_exist_is_refused_before_the_socket() {
-    let (_fixture, cluster, _admin) = setup("narrow", 2).await;
+    let (cluster, _admin) = setup("narrow", 2).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
 
     let error = producer
