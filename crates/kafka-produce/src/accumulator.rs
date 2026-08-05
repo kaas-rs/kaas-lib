@@ -31,7 +31,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use kafka_conn::{Error, ErrorCode, Result};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
@@ -64,6 +64,15 @@ const RECORD_OVERHEAD: usize = 32;
 
 /// Per-header accounting overhead: two length varints.
 const HEADER_OVERHEAD: usize = 8;
+
+/// How long to wait before re-attempting a failed producer-id claim.
+///
+/// Flat rather than exponential, like the coordinator re-ask in
+/// `kafka-consume`: the claim fails because the cluster is not ready to
+/// answer yet — a freshly elected controller still allocating producer-id
+/// blocks, say — and readiness arrives on the cluster's schedule, not on a
+/// backoff curve.
+const IDENTITY_RETRY: Duration = Duration::from_millis(500);
 
 /// A record waiting for the wire, with the caller's delivery channel.
 #[derive(Debug)]
@@ -493,14 +502,32 @@ impl Actor {
             .any(|state| !state.pending.is_empty())
     }
 
-    /// The earliest moment an open batch's linger expires.
+    /// The earliest moment the actor must wake on its own.
+    ///
+    /// Usually the nearest open batch's linger expiry. The second case is
+    /// load-bearing: an idempotent producer whose id claim *failed* holds
+    /// every closed batch back — `dispatch_ready` refuses to send without an
+    /// identity — and if the only caller is parked in `send` awaiting its
+    /// delivery, nothing else ever wakes the actor. No command arrives (the
+    /// caller is waiting on us), no completion arrives (nothing was
+    /// dispatched), and no open batch remains to give the linger a deadline.
+    /// Without a wake-up here the retry `ensure_identity` promises never
+    /// runs, and one failed `InitProducerId` against a still-settling
+    /// cluster becomes a permanent hang. A caller feeding `enqueue` in a
+    /// loop never sees this — each append is a tick — which is exactly why
+    /// it survived every test that batched.
     fn next_deadline(&self) -> Option<Instant> {
         let linger = self.config.linger;
-        self.partitions
+        let open = self
+            .partitions
             .values()
             .filter_map(|state| state.open.as_ref())
             .map(|open| open.opened_at + linger)
-            .min()
+            .min();
+
+        let blocked_on_identity =
+            self.config.idempotent && self.identity.is_none() && self.has_work();
+        earliest_wake(open, blocked_on_identity, Instant::now())
     }
 
     fn close_expired(&mut self) {
@@ -748,6 +775,21 @@ async fn send_group(
     completed
 }
 
+/// Combine the linger deadline with the identity-retry one.
+///
+/// Pure, so the case that deadlocked can be asserted without a broker: work
+/// blocked on a missing identity must yield a deadline even when no batch is
+/// open, because that deadline is the only thing that ever polls the actor
+/// again.
+fn earliest_wake(
+    open: Option<Instant>,
+    blocked_on_identity: bool,
+    now: Instant,
+) -> Option<Instant> {
+    let retry = blocked_on_identity.then(|| now + IDENTITY_RETRY);
+    [open, retry].into_iter().flatten().min()
+}
+
 /// Wait until `deadline`, or forever when there is nothing to wait for.
 async fn sleep_until(deadline: Option<Instant>) {
     match deadline {
@@ -858,6 +900,41 @@ mod tests {
         state.open = Some(batch);
         assert!(state.pending.is_empty());
         assert!(!state.idle(), "an open batch is outstanding work");
+    }
+
+    /// The deadlock that hung every `Producer::send` whose first
+    /// `InitProducerId` failed: closed batches, no open batch, no caller
+    /// commands coming — and the actor slept forever. Work blocked on a
+    /// missing identity must produce a wake-up on its own.
+    #[test]
+    fn work_blocked_on_a_missing_identity_still_wakes_the_actor() {
+        let now = Instant::now();
+        assert_eq!(
+            earliest_wake(None, true, now),
+            Some(now + IDENTITY_RETRY),
+            "no open batch and no incoming command: this deadline is the only \
+             thing that ever polls the actor again"
+        );
+        assert_eq!(
+            earliest_wake(None, false, now),
+            None,
+            "with nothing blocked there is genuinely nothing to wait for"
+        );
+    }
+
+    /// The retry deadline must not push out a nearer linger, and a nearer
+    /// retry must not wait out a distant linger.
+    #[test]
+    fn the_nearest_deadline_wins() {
+        let now = Instant::now();
+        let soon = now + Duration::from_millis(1);
+        assert_eq!(earliest_wake(Some(soon), true, now), Some(soon));
+
+        let late = now + Duration::from_secs(60);
+        assert_eq!(
+            earliest_wake(Some(late), true, now),
+            Some(now + IDENTITY_RETRY)
+        );
     }
 
     #[test]
