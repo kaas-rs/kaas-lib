@@ -505,7 +505,21 @@ impl Consumer {
     }
 
     /// Commit the current positions under the configured group id.
+    ///
+    /// Anonymously — this is the standalone consumer's commit, and the broker
+    /// honours the anonymous form only while the group has no members. A
+    /// group member's commit goes through [`Consumer::commit_as`] with its
+    /// membership, because a live group refuses the anonymous form with
+    /// `UNKNOWN_MEMBER_ID` on every partition.
     pub async fn commit(&self) -> Result<Vec<((String, i32), Result<()>)>> {
+        self.commit_as(None).await
+    }
+
+    /// Commit the current positions, under a membership when there is one.
+    pub(crate) async fn commit_as(
+        &self,
+        member: Option<offsets::CommitAs<'_>>,
+    ) -> Result<Vec<((String, i32), Result<()>)>> {
         let group = self.group()?;
         let offsets: HashMap<(String, i32), CommittedOffset> = self
             .assignment
@@ -520,7 +534,7 @@ impl Consumer {
                 )
             })
             .collect();
-        offsets::commit(&self.cluster, group, &offsets).await
+        offsets::commit(&self.cluster, group, member, &offsets).await
     }
 
     /// Read the group's committed positions for the current assignment.
@@ -767,7 +781,7 @@ impl GroupConsumer {
             // than acknowledging an assignment nobody was told about.
             rebalance::revoke(&mut self.listener, revoked).await;
             if self.auto_commit {
-                let _ = self.inner.commit().await;
+                let _ = self.inner.commit_as(Some(self.commit_identity())).await;
             }
         }
 
@@ -782,8 +796,13 @@ impl GroupConsumer {
     }
 
     /// Commit the current positions.
+    ///
+    /// As this member: the commit carries the member id and epoch the
+    /// coordinator knows us by. The anonymous form the standalone consumer
+    /// uses is refused with `UNKNOWN_MEMBER_ID` the moment a group has
+    /// members — this group visibly has at least one.
     pub async fn commit(&self) -> Result<Vec<((String, i32), Result<()>)>> {
-        self.inner.commit().await
+        self.inner.commit_as(Some(self.commit_identity())).await
     }
 
     /// How far behind the log end a partition is.
@@ -805,9 +824,19 @@ impl GroupConsumer {
             rebalance::revoke(&mut self.listener, revoked).await;
         }
         if self.auto_commit {
-            let _ = self.inner.commit().await;
+            let _ = self.inner.commit_as(Some(self.commit_identity())).await;
         }
         self.membership.leave(self.inner.cluster()).await
+    }
+
+    /// What this member commits as: the id and epoch from the live
+    /// membership, plus the instance id if it is static.
+    fn commit_identity(&self) -> offsets::CommitAs<'_> {
+        offsets::CommitAs {
+            member_id: self.membership.member_id(),
+            epoch: self.membership.member_epoch(),
+            instance_id: self.membership.instance_id(),
+        }
     }
 }
 
@@ -1091,15 +1120,19 @@ impl ClassicConsumer {
         if !revoked.is_empty() {
             rebalance::revoke(&mut self.listener, revoked).await;
             if self.auto_commit {
-                let _ = self.inner.commit().await;
+                let _ = self.inner.commit_as(Some(self.commit_identity())).await;
             }
         }
         self.pending_revoke = None;
     }
 
     /// Commit the current positions.
+    ///
+    /// As this member: the coordinator-issued member id and the current
+    /// generation. The anonymous form is refused with `UNKNOWN_MEMBER_ID`
+    /// while the group has members — see [`GroupConsumer::commit`].
     pub async fn commit(&self) -> Result<Vec<((String, i32), Result<()>)>> {
-        self.inner.commit().await
+        self.inner.commit_as(Some(self.commit_identity())).await
     }
 
     /// Leave the group. A static member deliberately does **not** leave.
@@ -1114,9 +1147,20 @@ impl ClassicConsumer {
             rebalance::revoke(&mut self.listener, revoked).await;
         }
         if self.auto_commit {
-            let _ = self.inner.commit().await;
+            let _ = self.inner.commit_as(Some(self.commit_identity())).await;
         }
         self.membership.leave(self.inner.cluster()).await
+    }
+
+    /// What this member commits as. The classic protocol spells the epoch
+    /// `generation_id`; the wire field is the same one KIP-848 uses for the
+    /// member epoch.
+    fn commit_identity(&self) -> offsets::CommitAs<'_> {
+        offsets::CommitAs {
+            member_id: self.membership.member_id(),
+            epoch: self.membership.generation_id(),
+            instance_id: self.membership.instance_id(),
+        }
     }
 
     /// How many partitions each subscribed topic has, which the leader needs

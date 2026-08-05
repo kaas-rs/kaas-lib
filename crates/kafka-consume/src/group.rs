@@ -165,6 +165,20 @@ impl Membership {
         &self.member_id
     }
 
+    /// The epoch the coordinator last confirmed for this member.
+    ///
+    /// This is what an `OffsetCommit` must carry: the coordinator refuses a
+    /// commit whose epoch is not the member's current one, and refuses the
+    /// anonymous `-1` outright while the group has members.
+    pub(crate) fn member_epoch(&self) -> i32 {
+        self.member_epoch
+    }
+
+    /// `group.instance.id`, when this member is static.
+    pub(crate) fn instance_id(&self) -> Option<&str> {
+        self.instance_id.as_deref()
+    }
+
     /// Whether a heartbeat is due.
     ///
     /// An owed acknowledgement is always due: the broker is waiting for it

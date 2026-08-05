@@ -1,4 +1,4 @@
-//! Committing and reading offsets **without joining a group**.
+//! Committing and reading offsets, as a member or as nobody.
 //!
 //! A manually-assigned consumer still wants its position remembered — that is
 //! what makes it resumable across restarts — but it is not a member of
@@ -12,9 +12,21 @@
 //! both spellings are `-1`, so a non-member commit is the one case where the
 //! two protocols agree. Where they disagree is M17 and M18's problem.
 //!
-//! The member id must be **empty**. A made-up one is rejected with
-//! `UNKNOWN_MEMBER_ID`, which reads like a membership bug in a client that
-//! deliberately has no membership.
+//! In the anonymous form the member id must be **empty**. A made-up one is
+//! rejected with `UNKNOWN_MEMBER_ID`, which reads like a membership bug in a
+//! client that deliberately has no membership.
+//!
+//! # A member must commit as itself
+//!
+//! The anonymous form is honoured **only while the group has no members** —
+//! the coordinator rejects it with `UNKNOWN_MEMBER_ID` the moment anyone has
+//! joined, precisely so a detached client cannot scribble over a live group's
+//! positions. So a group member commits under its own identity
+//! ([`CommitAs`]): its member id, its current epoch (KIP-848) or generation
+//! (classic), and its instance id if it is static. Getting this wrong is
+//! quiet in both directions — a member committing anonymously is refused
+//! per partition with an error that reads like a membership bug, and an
+//! auto-commit whose result nobody checks is refused silently.
 
 use std::collections::HashMap;
 
@@ -47,43 +59,35 @@ pub struct CommittedOffset {
     pub metadata: Option<String>,
 }
 
-/// Commit positions for a group without being a member of it.
+/// The membership a commit is made under.
+///
+/// `None` at the call site is the standalone consumer: empty member id,
+/// epoch `-1`, honoured only while the group has no members. A member passes
+/// what the coordinator knows it by — anything else is refused per partition
+/// with `UNKNOWN_MEMBER_ID` or `STALE_MEMBER_EPOCH`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CommitAs<'a> {
+    /// The member id as the coordinator currently knows it.
+    pub member_id: &'a str,
+    /// `member_epoch` under KIP-848, `generation_id` under classic — one
+    /// wire field either way, exactly like the `-1` sentinel they share.
+    pub epoch: i32,
+    /// `group.instance.id`, for a static member.
+    pub instance_id: Option<&'a str>,
+}
+
+/// Commit positions for a group, as a member or anonymously.
 pub(crate) async fn commit(
     cluster: &Cluster,
     group_id: &str,
+    member: Option<CommitAs<'_>>,
     offsets: &HashMap<(String, i32), CommittedOffset>,
 ) -> Result<Vec<((String, i32), Result<()>)>> {
     if offsets.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut by_topic: HashMap<String, Vec<OffsetCommitRequestPartition>> = HashMap::new();
-    for ((topic, partition), committed) in offsets {
-        by_topic.entry(topic.clone()).or_default().push(
-            OffsetCommitRequestPartition::default()
-                .with_partition_index(*partition)
-                .with_committed_offset(committed.offset)
-                .with_committed_leader_epoch(-1)
-                .with_committed_metadata(committed.metadata.clone().map(StrBytes::from_string)),
-        );
-    }
-
-    let request = OffsetCommitRequest::default()
-        .with_group_id(GroupId(StrBytes::from_string(group_id.to_owned())))
-        .with_generation_id_or_member_epoch(NOT_A_MEMBER)
-        // Empty, not absent and not invented: a made-up member id is rejected
-        // with UNKNOWN_MEMBER_ID.
-        .with_member_id(StrBytes::from_static_str(""))
-        .with_topics(
-            by_topic
-                .into_iter()
-                .map(|(topic, partitions)| {
-                    OffsetCommitRequestTopic::default()
-                        .with_name(TopicName(StrBytes::from_string(topic)))
-                        .with_partitions(partitions)
-                })
-                .collect(),
-        );
+    let request = commit_request(group_id, member, offsets);
 
     // `NOT_COORDINATOR` arrives per partition here rather than as a failed
     // round trip, so the routing layer's retry never sees it. It is a
@@ -113,6 +117,49 @@ pub(crate) async fn commit(
         }
     }
     Ok(out)
+}
+
+/// Build the commit request. Pure, so the identity handling stays testable:
+/// the broker refuses a wrong identity per partition, which an ignored
+/// auto-commit result turns into silence.
+fn commit_request(
+    group_id: &str,
+    member: Option<CommitAs<'_>>,
+    offsets: &HashMap<(String, i32), CommittedOffset>,
+) -> OffsetCommitRequest {
+    let mut by_topic: HashMap<String, Vec<OffsetCommitRequestPartition>> = HashMap::new();
+    for ((topic, partition), committed) in offsets {
+        by_topic.entry(topic.clone()).or_default().push(
+            OffsetCommitRequestPartition::default()
+                .with_partition_index(*partition)
+                .with_committed_offset(committed.offset)
+                .with_committed_leader_epoch(-1)
+                .with_committed_metadata(committed.metadata.clone().map(StrBytes::from_string)),
+        );
+    }
+
+    // Anonymous: empty member id — not absent and not invented, both of
+    // which are rejected with UNKNOWN_MEMBER_ID.
+    let (member_id, epoch, instance_id) = match member {
+        Some(member) => (member.member_id, member.epoch, member.instance_id),
+        None => ("", NOT_A_MEMBER, None),
+    };
+
+    OffsetCommitRequest::default()
+        .with_group_id(GroupId(StrBytes::from_string(group_id.to_owned())))
+        .with_generation_id_or_member_epoch(epoch)
+        .with_member_id(StrBytes::from_string(member_id.to_owned()))
+        .with_group_instance_id(instance_id.map(|id| StrBytes::from_string(id.to_owned())))
+        .with_topics(
+            by_topic
+                .into_iter()
+                .map(|(topic, partitions)| {
+                    OffsetCommitRequestTopic::default()
+                        .with_name(TopicName(StrBytes::from_string(topic)))
+                        .with_partitions(partitions)
+                })
+                .collect(),
+        )
 }
 
 /// Read a group's committed positions.
@@ -243,6 +290,83 @@ mod tests {
         // and they share one wire field. This is the one case where the two
         // agree, and M17/M18 are where they stop agreeing.
         assert_eq!(NOT_A_MEMBER, -1);
+    }
+
+    /// The regression that reached CI as `UNKNOWN_MEMBER_ID` on every
+    /// partition of a live group: a member's commit went out anonymously, and
+    /// the coordinator only honours the anonymous form while the group is
+    /// empty.
+    #[test]
+    fn a_member_commits_under_its_own_identity() {
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            ("t".to_owned(), 0),
+            CommittedOffset {
+                offset: 7,
+                metadata: None,
+            },
+        );
+
+        let request = commit_request(
+            "g",
+            Some(CommitAs {
+                member_id: "member-uuid",
+                epoch: 4,
+                instance_id: None,
+            }),
+            &offsets,
+        );
+        assert_eq!(request.member_id.as_str(), "member-uuid");
+        assert_eq!(request.generation_id_or_member_epoch, 4);
+        assert_eq!(request.group_instance_id, None);
+    }
+
+    /// A static member also names its instance id, which is how the
+    /// coordinator ties the commit to the parked membership.
+    #[test]
+    fn a_static_member_names_its_instance() {
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            ("t".to_owned(), 0),
+            CommittedOffset {
+                offset: 7,
+                metadata: None,
+            },
+        );
+
+        let request = commit_request(
+            "g",
+            Some(CommitAs {
+                member_id: "member-uuid",
+                epoch: 9,
+                instance_id: Some("static-1"),
+            }),
+            &offsets,
+        );
+        assert_eq!(
+            request.group_instance_id.as_ref().map(StrBytes::as_str),
+            Some("static-1")
+        );
+    }
+
+    /// The standalone consumer stays anonymous: empty id, epoch -1, no
+    /// instance. This is the form the broker honours only for a group with
+    /// no members, which is exactly what a standalone consumer's group is.
+    #[test]
+    fn a_non_member_commits_anonymously() {
+        let mut offsets = HashMap::new();
+        offsets.insert(
+            ("t".to_owned(), 3),
+            CommittedOffset {
+                offset: 42,
+                metadata: None,
+            },
+        );
+
+        let request = commit_request("g", None, &offsets);
+        assert_eq!(request.member_id.as_str(), "");
+        assert_eq!(request.generation_id_or_member_epoch, NOT_A_MEMBER);
+        assert_eq!(request.group_instance_id, None);
     }
 
     #[test]

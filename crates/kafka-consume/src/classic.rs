@@ -1090,6 +1090,20 @@ impl ClassicMembership {
         &self.member_id
     }
 
+    /// The generation the coordinator last confirmed for this member.
+    ///
+    /// An `OffsetCommit` must carry it: a commit at the wrong generation is
+    /// refused with `ILLEGAL_GENERATION`, and the anonymous `-1` is refused
+    /// with `UNKNOWN_MEMBER_ID` while the group has members.
+    pub(crate) fn generation_id(&self) -> i32 {
+        self.generation_id
+    }
+
+    /// `group.instance.id`, when this member is static.
+    pub(crate) fn instance_id(&self) -> Option<&str> {
+        self.instance_id.as_deref()
+    }
+
     pub(crate) fn is_leader(&self) -> bool {
         self.leader
     }
