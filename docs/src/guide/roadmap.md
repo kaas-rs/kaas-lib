@@ -1,130 +1,93 @@
 # Roadmap
 
-The library today is admin-first with a browse-shaped read path. **Phase 2
-drops that qualifier**: a real producer and real consumer-group membership,
-which together turn kaas-lib into a general-purpose Kafka client.
+Phase 2 has landed. The library was admin-first with a browse-shaped read
+path; it now has a real producer and both consumer-group protocols, which is
+what "general-purpose Kafka client" was shorthand for.
 
-The full milestone breakdown with acceptance criteria lives in `PLAN.md`
-(M12–M19). This page is the shape of it and the reasoning behind the
-ordering.
+The milestone breakdown with acceptance criteria lives in `PLAN.md` (M0–M19).
+This page is what shipped, what is deliberately still missing, and what
+nothing in this repository can move.
 
-## What is already general-purpose
+## What phase 2 delivered (M12–M19)
 
-Roughly 80% of the codebase has nothing UI-shaped about it and would not be
-rebuilt:
+**The producer** — [`kafka-produce`](../code-tour/kafka-produce.md).
 
-| Layer | Reusable as-is? |
+| | |
 |---|---|
-| [`kafka-conn`](../code-tour/kafka-conn.md) — framing, correlation, versions, TLS, SASL, error taxonomy | yes, entirely |
-| [`kafka-meta`](../code-tour/kafka-meta.md) — metadata, routing, pool, retry | yes, entirely |
-| [`kafka-admin`](../code-tour/kafka-admin.md) — 31 admin RPCs | yes — this *is* an AdminClient |
-| record decoding + bounded decompression | yes |
+| M12 | one record round trip, `Produce` v13's `topic_id: Uuid` |
+| M13 | the accumulator: batching, linger, bounded buffer memory, per-record delivery futures |
+| M14 | idempotence: `InitProducerId`, per-partition sequences, recovery from `OUT_OF_ORDER_SEQUENCE_NUMBER` and `UNKNOWN_PRODUCER_ID` |
+| M15 | transactions, including the epoch bump KIP-890 hides inside `EndTxn` |
 
-The unglamorous parts — negotiated versions, the routing table, SASLprep,
-KIP-368, the error table — are the ones pure-Rust client attempts usually
-skimp on, and they are done.
+Both traps this page flagged before M12 was written got resolved rather than
+discovered:
 
-## The producer half (M12–M15)
+- **`acks=0` is not offered.** A request with no response would leave a
+  pending `oneshot` in [the connection actor](../architecture/connection.md)
+  forever, so every successful write would report a timeout. It is refused at
+  the config boundary rather than given a fire-and-forget path.
+- **The `max_in_flight` warning turned out to be the wrong worry.** At most
+  one batch per partition is on the wire regardless, so ordering does not
+  depend on the setting at all. The clamp — one without idempotence, five
+  with — is defence for the connection layer, not the mechanism keeping the
+  log in order.
 
-**M12 — one record round trip.** Validates record batch *encoding* the way
-M1 validated framing. The codec side is free: `RecordBatchEncoder` is
-available under the current feature selection, along with all four
-compression codecs, so no manifest change is needed.
+**The consumer** — `kafka-consume`.
 
-Two traps are called out up front because both are cheap to design for and
-expensive to debug:
+| | |
+|---|---|
+| M16 | KIP-227 incremental fetch sessions, a streaming fetcher batching partitions per *broker*, and `OffsetCommit` for a non-member |
+| M17 | KIP-848 groups: client-generated member id, broker-computed assignment |
+| M18 | the classic protocol: `JoinGroup`/`SyncGroup`/`Heartbeat`, with assignor payloads byte-identical to Java's |
+| M19 | interop against `rdkafka` in both directions, plus leak tests for the new crates |
 
-- **`Produce` v13 replaces the topic name with `topic_id: Uuid`**, the same
-  transition `Fetch` made at v13.
-- **`acks=0` is a request with no response.** The broker sends nothing back,
-  and [the connection actor](../architecture/connection.md) correlates on a
-  map of pending `oneshot` senders — so an `acks=0` produce would leave an
-  entry that never resolves and *every successful write would report a
-  timeout*. Either refuse `acks=0` at the config boundary or add an explicit
-  fire-and-forget path. This has to be decided before the encoder is
-  written.
+M18 was conditional on the classic protocol being needed, and it was: the
+acceptance suite runs a mixed group with one Rust member and one
+`kafka-console-consumer.sh`, which is the case that makes byte-compatible
+assignor payloads non-optional.
 
-**M13 — the accumulator.** Batching, linger, compression on write, per-record
-delivery futures, bounded buffer memory. A batch exceeding
-`max.message.bytes` fails its own records only — [rule 4](../introduction.md)
-in the write direction.
+Two gaps found after the fact and since closed: a caller had no way to flush
+per-partition state before revocation, so `on_rebalance` now runs `on_revoke`
+while the member still owns the partitions and before the auto-commit; and
+the classic path advertised only eager assignors, so `cooperative-sticky`
+joined them.
 
-**M14 — idempotence.** `InitProducerId`, per-partition sequence numbers,
-recovery from `OUT_OF_ORDER_SEQUENCE_NUMBER` and `UNKNOWN_PRODUCER_ID`.
+**Publishing.** The crates are on crates.io, releasing in lockstep at a single
+version — see [RELEASING.md](https://github.com/kaas-rs/kaas-lib/blob/main/RELEASING.md).
+`kafka-consume` joins the published set at 0.3.0.
 
-> ⚠️ **`max_in_flight` defaults to 5 and that is only safe once this lands.**
-> It matches Kafka's own default and is harmless today because nothing
-> retries a write. The moment M13 retries a batch, five requests in flight
-> reorders records silently — no error, no log line, just a topic whose order
-> is wrong. A non-idempotent producer must clamp to 1; an idempotent one may
-> use 5 and no more, because the broker tracks exactly five in-flight
-> sequence windows per partition.
+## Next
 
-**M15 — transactions.** And the point where
-`Visibility::CommittedOnly` finally gets exercised end to end: the aborted-
-transaction filter exists, but nothing in the workspace has ever *produced*
-an aborted transaction to test it against.
+Nothing here is structural. These are ordinary gaps with no blocker beyond
+someone doing them.
 
-## The consumer half (M16–M19)
-
-**M16 — fetch sessions and the streaming fetcher.** The read-path reshape,
-and a prerequisite for both group milestones.
-
-`crates/kafka-read/src/fetch.rs` pins `session_id = 0, session_epoch = -1` —
-Java's `FetchMetadata.LEGACY` sentinel. Correct for a one-shot UI scan,
-wrong for a consumer, which wants KIP-227 incremental sessions. The current
-`fetch()` also takes one topic per call; a consumer holding partitions across
-several topics on one broker needs one request per *broker*.
-
-This milestone also adds `OffsetCommit` for a non-member, which
-[`kafka-admin`](../code-tour/kafka-admin.md) has as an admin operation but
-the read path does not have at all.
-
-**M17 — KIP-848 first.** Deliberately before the classic protocol. The
-broker computes the assignment, so **there is no assignor payload to make
-byte-compatible with Java's** — which is the single largest source of subtle
-incompatibility in M18. On a 4.x cluster it is also the default.
-
-**M18 — the classic protocol, only if needed.** `JoinGroup`/`SyncGroup`/
-`Heartbeat`, and assignor payloads that must be byte-identical to Java's
-because the group leader may be a Java client. Good news: `kafka-protocol`
-ships `ConsumerProtocolSubscription` and `ConsumerProtocolAssignment` as real
-schemas, so that encoding does not need hand-rolling.
-
-Strictly more work than M17 for strictly older clusters. If you do not need
-brokers older than 4.0, skip it and say so rather than half-building it.
-
-**M19 — interop and hardening.** Produce with kafka-produce, consume with
-`rdkafka`, and the reverse. Plus: the read-only gate now has four more
-reachable mutating keys to hold the line on, and the `ApiKey::iter`-driven
-test covers them automatically.
-
-## Honest cost
-
-This roughly doubles the codebase — the producer around 3–5k lines, the
-consumer 4–6k, plus integration tests. The correctness bar is also higher
-than anything in phase 1: these are the paths where a bug **loses or
-duplicates data** rather than rendering a wrong number in a UI.
-
-## Smaller things
-
-Not milestones, but real:
-
-- **KIP-699 batched `FindCoordinator`** — one round trip instead of one per
-  group, which matters for a UI rendering hundreds of groups.
+- **Java's `StickyAssignor`.** The classic path ships three of the four
+  assignors `PLAN.md` lists — `range`, `round-robin` and `cooperative-sticky`.
+  Plain `sticky` is the eager one that keeps assignments stable across a
+  rebalance without the two-round handover, and it is the remaining name a
+  mixed group might vote for.
+- **KIP-699 batched `FindCoordinator`.** The v4+ `coordinator_keys` shape is
+  already used, but with one key per request. Batching is one round trip
+  instead of one per group, which matters for a UI rendering hundreds.
 - **`DescribeQuorum`** — the one KRaft-adjacent API a cluster UI plausibly
-  wants.
-- **Delegation tokens**, `OffsetForLeaderEpoch`, `UpdateFeatures`,
-  `ListConfigResources` — ordinary gaps, nothing structural blocking them.
-- **Publishing to crates.io** — the crates are unpublished; internal path
-  dependencies would need versions and every crate needs a `description`.
+  wants. Present in the `ApiKey` enum and reachable through generic dispatch;
+  there is no typed method.
+- **Delegation token management.** Only the ACL *resource type* exists today;
+  `Create`/`Renew`/`Expire`/`DescribeDelegationToken` do not.
+- **`OffsetForLeaderEpoch`, `UpdateFeatures`, `ListConfigResources`** — routing
+  entries only, no user-facing surface.
+- **A code-tour page for `kafka-consume`**, which is the one published crate
+  the book does not walk through.
 
 ## Blocked upstream
 
 Not roadmap items, because nothing in this repository can move them. See
 [The upstream schema gap](../compat/upstream-gap.md):
 
-- **Streams groups (KIP-1071)** — no schema in `kafka-protocol` 0.17.
-- **`ListOffsets` `-6`** — needs v11; the codec caps at v10.
+- **Streams groups (KIP-1071)** — no schema in `kafka-protocol` 0.17, so a
+  4.1+ cluster running Kafka Streams reports `groupType=streams` in
+  `ListGroups` and we surface it as `Unrecognized` rather than describing it.
+- **`ListOffsets` `-6`** (`EARLIEST_PENDING_UPLOAD_TIMESTAMP`) — needs v11;
+  the codec caps at v10. The other five sentinels are surfaced.
 - **Error codes past Kafka 4.1** — surfaced as `Unknown(i16)` until upstream
   names them.
