@@ -389,10 +389,28 @@ async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
         "positions were all zero, so the hook fired after the state was reset"
     );
 
+    // Let the handover finish before committing. The loop above stopped the
+    // moment `a` *lost* partitions, which is the start of the rebalance and
+    // not the end of it: `b` has been assigned nothing yet. Committing into a
+    // group that is still moving is refused by the coordinator — correctly,
+    // and with an error about the rebalance rather than anything to do with
+    // callback ordering, which is what this assertion is actually for.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline
+        && (b.assignment().is_empty()
+            || a.assignment().len() + b.assignment().len() != usize::try_from(PARTITIONS).unwrap())
+    {
+        a.poll().await.expect("a");
+        b.poll().await.expect("b");
+    }
+
     // And the offsets the group committed are consistent with what the hook was
     // told: auto-commit runs *after* the callback, never before it.
     let committed = b.commit().await.expect("commit");
-    assert!(committed.iter().all(|(_, result)| result.is_ok()));
+    assert!(
+        committed.iter().all(|(_, result)| result.is_ok()),
+        "commit rejected after the group settled: {committed:?}"
+    );
 }
 
 /// A single member owns everything, and leaving is idempotent.
