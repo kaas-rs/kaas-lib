@@ -151,7 +151,16 @@ async fn a_departing_member_is_replaced_without_a_gap_or_a_duplicate() {
     for i in 0..RECORDS {
         pending.push(
             producer
-                .enqueue(ProducerRecord::new(TOPIC).value(format!("v{i}")))
+                .enqueue(
+                    // Explicitly round-robin. Keyless records go through the
+                    // sticky partitioner, which fills one partition at a time
+                    // by design — so the assertions below about *which*
+                    // partitions carry a position were testing the
+                    // partitioner's batching luck, not the rebalance.
+                    ProducerRecord::new(TOPIC)
+                        .partition(i32::try_from(i).expect("fits") % PARTITIONS)
+                        .value(format!("v{i}")),
+                )
                 .await
                 .expect("enqueued"),
         );
@@ -202,6 +211,18 @@ async fn a_departing_member_is_replaced_without_a_gap_or_a_duplicate() {
         "records went missing across the rebalance"
     );
 
+    // Converge before asserting. The loop above stops when the last *record*
+    // arrives, which says nothing about whether `b` has finished reconciling
+    // the partitions `a` gave up — the takeover is a rebalance, and it
+    // completes on the coordinator's schedule rather than the log's. The
+    // assertion is unchanged and still fails if the takeover never happens;
+    // it is only evaluated at a moment when it means something.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline && b.assignment().len() != usize::try_from(PARTITIONS).unwrap()
+    {
+        b.poll().await.expect("b");
+    }
+
     assert_eq!(
         b.assignment().len(),
         usize::try_from(PARTITIONS).unwrap(),
@@ -228,7 +249,16 @@ async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
     for i in 0..RECORDS {
         pending.push(
             producer
-                .enqueue(ProducerRecord::new(TOPIC).value(format!("v{i}")))
+                .enqueue(
+                    // Explicitly round-robin. Keyless records go through the
+                    // sticky partitioner, which fills one partition at a time
+                    // by design — so the assertions below about *which*
+                    // partitions carry a position were testing the
+                    // partitioner's batching luck, not the rebalance.
+                    ProducerRecord::new(TOPIC)
+                        .partition(i32::try_from(i).expect("fits") % PARTITIONS)
+                        .value(format!("v{i}")),
+                )
                 .await
                 .expect("enqueued"),
         );
@@ -275,17 +305,24 @@ async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
             seen: Arc::clone(&seen),
         });
 
-    // Read something, so the revoked partitions carry a position past zero.
+    // Read from *every* partition, so that whichever half `b` takes carries a
+    // position. "Read something" was the old guard, and one record is one
+    // partition out of twelve: the final assertion then depended on the
+    // revoked half happening to include the partition that record came from.
     let deadline = Instant::now() + Duration::from_secs(90);
-    let mut read = 0;
+    let mut read_from: BTreeSet<i32> = BTreeSet::new();
     while Instant::now() < deadline
-        && (a.assignment().len() != usize::try_from(PARTITIONS).unwrap() || read == 0)
+        && (a.assignment().len() != usize::try_from(PARTITIONS).unwrap()
+            || read_from.len() != usize::try_from(PARTITIONS).unwrap())
     {
-        read += a.poll().await.expect("a").len();
+        for record in a.poll().await.expect("a") {
+            read_from.insert(record.partition);
+        }
     }
-    assert!(
-        read > 0,
-        "the member never read anything to have a position"
+    assert_eq!(
+        read_from.len(),
+        usize::try_from(PARTITIONS).unwrap(),
+        "the member never read every partition, so a revoked one may carry no position"
     );
 
     let gained: Vec<(String, i32)> = seen
