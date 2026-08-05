@@ -1316,3 +1316,25 @@ pub const KNOWN_ERROR_CODES: [ErrorCode; 134] = [
     ErrorCode::StreamsTopologyFenced,
     ErrorCode::ShareSessionLimitReached,
 ];
+
+#[cfg(test)]
+mod coordinator_retry_tests {
+    use super::*;
+
+    /// The premise `RetryPolicy::coordinator_timeout` rests on.
+    ///
+    /// A longer budget buys nothing if `dispatch` short-circuits on
+    /// `!error.retriable()` first, and the answer is delegated to
+    /// `kafka-protocol` — so an upstream bump could silently take it away.
+    #[test]
+    fn the_coordinator_codes_are_retriable() {
+        for code in [
+            ErrorCode::NotCoordinator,
+            ErrorCode::CoordinatorNotAvailable,
+            ErrorCode::CoordinatorLoadInProgress,
+        ] {
+            assert!(code.retriable(), "{code} must be retriable");
+            assert!(code.needs_coordinator_refresh(), "{code}");
+        }
+    }
+}

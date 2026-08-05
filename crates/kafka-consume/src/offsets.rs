@@ -85,8 +85,19 @@ pub(crate) async fn commit(
                 .collect(),
         );
 
+    // `NOT_COORDINATOR` arrives per partition here rather than as a failed
+    // round trip, so the routing layer's retry never sees it. It is a
+    // whole-request condition even so — the coordinator is wrong for the
+    // group, so every partition carries it — which is why re-asking is right
+    // and why the first partition's code is enough to decide.
     let response = cluster
-        .send_to_coordinator(CoordinatorKind::Group, group_id, request)
+        .send_to_coordinator_retrying(CoordinatorKind::Group, group_id, request, |response| {
+            response
+                .topics
+                .iter()
+                .flat_map(|topic| topic.partitions.iter())
+                .find_map(|partition| ErrorCode::from_code(partition.error_code))
+        })
         .await?;
 
     // Per-partition results, per rule 4: one partition rejected must not hide
@@ -153,7 +164,15 @@ pub(crate) async fn fetch(
     };
 
     let response = cluster
-        .send_to_coordinator(CoordinatorKind::Group, group_id, request)
+        .send_to_coordinator_retrying(CoordinatorKind::Group, group_id, request, |response| {
+            // v8+ answers inside `groups`, older versions at the top level —
+            // the same two shapes the decoding below has to straddle.
+            response
+                .groups
+                .first()
+                .and_then(|group| ErrorCode::from_code(group.error_code))
+                .or_else(|| ErrorCode::from_code(response.error_code))
+        })
         .await?;
 
     let mut out = HashMap::new();

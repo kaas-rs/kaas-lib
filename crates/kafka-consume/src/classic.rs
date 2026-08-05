@@ -1172,8 +1172,16 @@ impl ClassicMembership {
             .with_protocol_type(StrBytes::from_static_str("consumer"))
             .with_protocols(protocols);
 
+        // `MEMBER_ID_REQUIRED` below is *not* a coordinator-class code, so the
+        // KIP-394 handshake still returns on the first round trip rather than
+        // being re-asked.
         let response = cluster
-            .send_to_coordinator(CoordinatorKind::Group, &self.group_id, request)
+            .send_to_coordinator_retrying(
+                CoordinatorKind::Group,
+                &self.group_id,
+                request,
+                |response| ErrorCode::from_code(response.error_code),
+            )
             .await?;
 
         if let Some(code) = ErrorCode::from_code(response.error_code) {
@@ -1247,7 +1255,12 @@ impl ClassicMembership {
             .with_assignments(assignments);
 
         let response = cluster
-            .send_to_coordinator(CoordinatorKind::Group, &self.group_id, request)
+            .send_to_coordinator_retrying(
+                CoordinatorKind::Group,
+                &self.group_id,
+                request,
+                |response| ErrorCode::from_code(response.error_code),
+            )
             .await?;
 
         if let Some(code) = ErrorCode::from_code(response.error_code) {
@@ -1268,7 +1281,12 @@ impl ClassicMembership {
             .with_group_instance_id(self.instance_id.clone().map(StrBytes::from_string));
 
         let response = cluster
-            .send_to_coordinator(CoordinatorKind::Group, &self.group_id, request)
+            .send_to_coordinator_retrying(
+                CoordinatorKind::Group,
+                &self.group_id,
+                request,
+                |response| ErrorCode::from_code(response.error_code),
+            )
             .await?;
 
         match ErrorCode::from_code(response.error_code) {

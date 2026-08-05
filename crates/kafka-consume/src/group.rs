@@ -188,7 +188,12 @@ impl Membership {
     ) -> Result<Reconciliation> {
         let request = self.build(topic_ids)?;
         let response = cluster
-            .send_to_coordinator(CoordinatorKind::Group, &self.group_id, request)
+            .send_to_coordinator_retrying(
+                CoordinatorKind::Group,
+                &self.group_id,
+                request,
+                |response| ErrorCode::from_code(response.error_code),
+            )
             .await?;
         self.last_beat = Some(Instant::now());
 
@@ -274,7 +279,12 @@ impl Membership {
             .with_instance_id(self.instance_id.clone().map(StrBytes::from_string));
 
         let response = cluster
-            .send_to_coordinator(CoordinatorKind::Group, &self.group_id, request)
+            .send_to_coordinator_retrying(
+                CoordinatorKind::Group,
+                &self.group_id,
+                request,
+                |response| ErrorCode::from_code(response.error_code),
+            )
             .await?;
 
         self.reset();
