@@ -18,6 +18,7 @@ println!("landed at {}:{}", meta.partition, meta.offset);
 and for what replaces it.
 
 Part of a workspace whose crates release in lockstep; pull it at the same
-version as `kafka-conn`, `kafka-meta`, `kafka-admin` and `kafka-read`.
+version as `kafka-conn`, `kafka-meta`, `kafka-admin`, `kafka-read` and
+`kafka-consume`.
 
 Apache-2.0.

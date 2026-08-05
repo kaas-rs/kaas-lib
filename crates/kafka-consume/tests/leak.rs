@@ -1,6 +1,6 @@
 //! M19 acceptance: producer and consumer lifecycles, cancelled at random.
 //!
-//! `cargo test -p kafka-consumer --test leak -- --ignored`
+//! `cargo test -p kafka-consume --test leak -- --ignored`
 //!
 //! Rule 5 across the two crates phase 2 added. `kafka-read`'s leak test covers
 //! the scan path; this covers the paths that did not exist then — an
@@ -27,7 +27,7 @@
 use std::time::Duration;
 
 use kafka_admin::{Admin, ClusterConfig, NewTopic};
-use kafka_consumer::{Consumer, ConsumerConfig, GroupConsumer, Position};
+use kafka_consume::{Consumer, ConsumerConfig, GroupConsumer, Position};
 use kafka_produce::{Producer, ProducerConfig, ProducerRecord};
 use kafka_read::{Cluster, Visibility};
 use testkit::{Cluster as _, KafkaCluster};

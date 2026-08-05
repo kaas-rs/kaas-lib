@@ -101,7 +101,7 @@ pub(crate) fn membership_lost(code: ErrorCode) -> bool {
 /// machine.
 ///
 /// A v4-shaped UUID, because that is what Java sends and what the broker's
-/// logs and `kafka-consumer-groups.sh` expect to render.
+/// logs and `kafka-consume-groups.sh` expect to render.
 fn new_member_id() -> String {
     let mut bytes = [0u8; 16];
     rand::Rng::fill(&mut rand::rng(), &mut bytes[..]);

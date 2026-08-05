@@ -75,7 +75,7 @@ pub struct RevokedPartition {
 ///
 /// ```no_run
 /// use futures::future::BoxFuture;
-/// use kafka_consumer::{RebalanceListener, Result, RevokedPartition};
+/// use kafka_consume::{RebalanceListener, Result, RevokedPartition};
 ///
 /// struct FlushOnRevoke;
 ///

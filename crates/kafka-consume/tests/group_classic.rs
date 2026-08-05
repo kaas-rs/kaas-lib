@@ -1,6 +1,6 @@
 //! M18 acceptance: the classic group protocol.
 //!
-//! `cargo test -p kafka-consumer --test group_classic -- --ignored`
+//! `cargo test -p kafka-consume --test group_classic -- --ignored`
 //!
 //! The mixed-group case is the only one that proves assignor byte
 //! compatibility. A Rust-only group passes happily against a
@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use kafka_admin::{Admin, ClusterConfig, NewTopic};
-use kafka_consumer::{Assignor, ClassicConsumer, ConsumerConfig};
+use kafka_consume::{Assignor, ClassicConsumer, ConsumerConfig};
 use kafka_produce::{Producer, ProducerConfig, ProducerRecord};
 use kafka_read::Visibility;
 use testkit::{Cluster as _, KafkaCluster};
@@ -63,7 +63,7 @@ fn config() -> ConsumerConfig {
 
 /// Each member needs its own cluster handle — `JoinGroup` blocks and the broker
 /// mutes a connection while a request is in flight, so members sharing one
-/// deadlock. See `kafka_consumer::classic`.
+/// deadlock. See `kafka_consume::classic`.
 async fn member(fixture: &KafkaCluster, group: &str) -> ClassicConsumer {
     let cluster = kafka_meta::Cluster::connect(
         fixture.bootstrap().to_vec(),
@@ -123,7 +123,7 @@ async fn two_members_cover_every_partition_exactly_once() {
 
 /// **The case that proves byte compatibility**, and the only one that can.
 ///
-/// One `kafka-consumer` and one `kafka-console-consumer.sh` in the same classic
+/// One `kafka-consume` and one `kafka-console-consumer.sh` in the same classic
 /// group. The Java client decodes the subscription we encode, and — if it is
 /// elected leader — we decode the assignment it computes. A Rust-only group
 /// exercises neither direction.

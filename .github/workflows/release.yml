@@ -1,6 +1,6 @@
 name: Release
 
-# Publishes the four library crates to crates.io.
+# Publishes the six library crates to crates.io.
 #
 # Publishing is IRREVERSIBLE. crates.io yanks but never deletes, and a
 # version number can never be reused. So this workflow is deliberately
@@ -76,7 +76,7 @@ jobs:
           set -euo pipefail
           versions=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[]
-                     | select(.name | test("^kafka-(conn|meta|admin|read|produce)$"))
+                     | select(.name | test("^kafka-(conn|meta|admin|read|produce|consume)$"))
                      | .version' | sort -u)
           if [ "$(echo "$versions" | wc -l)" -ne 1 ]; then
             echo "::error::published crates disagree on version:"; echo "$versions"

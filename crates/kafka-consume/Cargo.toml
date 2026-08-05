@@ -1,5 +1,5 @@
 [package]
-name        = "kafka-consumer"
+name        = "kafka-consume"
 description = "Kafka 4.x consume path: incremental fetch sessions, a streaming fetcher, and manual-assignment offsets"
 readme      = "README.md"
 keywords    = ["kafka", "consumer", "fetch", "streaming", "async"]

@@ -15,7 +15,7 @@ use anyhow::{Result, bail};
 use bytes::Bytes;
 use futures::StreamExt;
 use kafka_admin::{Admin, NewTopic};
-use kafka_consumer::{ClassicConsumer, Consumer, ConsumerConfig, GroupConsumer, Position};
+use kafka_consume::{ClassicConsumer, Consumer, ConsumerConfig, GroupConsumer, Position};
 use kafka_meta::Cluster;
 use kafka_produce::{Compression, Producer, ProducerConfig, ProducerRecord, partition_for_key};
 use kafka_read::{ScanEvent, ScanSpec, StartPosition, Visibility};
@@ -394,7 +394,7 @@ async fn group(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<()
     // the broker mutes a connection while a request is in flight, so two
     // members sharing one would deadlock: the second member's join is never
     // read, the group never forms, and the first waits out its rebalance
-    // timeout. See `kafka_consumer::classic`.
+    // timeout. See `kafka_consume::classic`.
     let cluster_a = kafka_meta::Cluster::connect(
         cluster.pool().bootstrap().to_vec(),
         kafka_meta::ClusterConfig::default(),

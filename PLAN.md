@@ -265,7 +265,7 @@ cargo test --test interop -- --ignored
 
 # Phase 2 — general-purpose client
 
-Supersedes the old "minimal producer" stretch goal. The premise of phase 1 was *admin-first, browse-shaped read path*; phase 2 drops the qualifier. Two crates get added — `kafka-produce` and `kafka-consumer` — and one existing file gets reshaped.
+Supersedes the old "minimal producer" stretch goal. The premise of phase 1 was *admin-first, browse-shaped read path*; phase 2 drops the qualifier. Two crates get added — `kafka-produce` and `kafka-consume` — and one existing file gets reshaped.
 
 What phase 1 already gives us, and what should therefore not be rebuilt: version negotiation, the routing table, the error taxonomy, the connection pool, SASL/SASLprep/KIP-368, the tolerant record decoder and bounded decompression. All of it is general-purpose already; none of it is UI-shaped. The read-only gate is a `ConnectionConfig` flag, not a constant, so it needs no unpicking — but see M19, because it now has four more mutating keys to hold the line on.
 
@@ -368,7 +368,7 @@ The read-path reshape. **Prerequisite for both M17 and M18** — do it before ei
 
 **Acceptance**
 ```sh
-cargo test -p kafka-consumer --test fetcher -- --ignored
+cargo test -p kafka-consume --test fetcher -- --ignored
 # manually assign 12 partitions across 2 topics on a 3-broker cluster, stream 100k
 # records, assert exact count and per-partition order.
 # Plus: assert steady-state fetch requests carry an empty topics array — that is what
@@ -390,7 +390,7 @@ Do this before the classic protocol. The broker computes the assignment, so **th
 
 **Acceptance**
 ```sh
-cargo test -p kafka-consumer --test group_848 -- --ignored
+cargo test -p kafka-consume --test group_848 -- --ignored
 # 3 consumers join one group on a 12-partition topic. Assert the union of assignments
 # is all 12 partitions and the intersection is empty — full coverage, no overlap.
 # Kill one consumer, assert reassignment completes within the session timeout and that
@@ -411,8 +411,8 @@ Only if you need brokers older than 4.0, or mixed groups with Java clients pinne
 
 **Acceptance**
 ```sh
-cargo test -p kafka-consumer --test group_classic -- --ignored
-# mixed group: one kafka-consumer and one kafka-console-consumer.sh (via testkit's exec
+cargo test -p kafka-consume --test group_classic -- --ignored
+# mixed group: one kafka-consume and one kafka-console-consumer.sh (via testkit's exec
 # helper) in the same classic group on a 12-partition topic. Assert both hold disjoint
 # partitions and that together they cover all 12.
 # That is the only test that actually proves assignor byte-compatibility; a Rust-only
@@ -431,7 +431,7 @@ cargo test -p kafka-consumer --test group_classic -- --ignored
 **Acceptance**
 ```sh
 cargo fuzz run record_batch_roundtrip -- -max_total_time=300
-cargo test -p kafka-consumer --test leak -- --ignored
+cargo test -p kafka-consume --test leak -- --ignored
 cargo xtask interop
 ```
 

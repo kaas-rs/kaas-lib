@@ -1,6 +1,6 @@
 //! M17 acceptance: KIP-848 consumer groups.
 //!
-//! `cargo test -p kafka-consumer --test group_848 -- --ignored`
+//! `cargo test -p kafka-consume --test group_848 -- --ignored`
 //!
 //! The assertions are **union and intersection**, not record counts. A
 //! reconciliation that acknowledges a new assignment before revoking the old
@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use kafka_admin::{Admin, ClusterConfig, NewTopic};
-use kafka_consumer::{ConsumerConfig, GroupConsumer, RevokedPartition};
+use kafka_consume::{ConsumerConfig, GroupConsumer, RevokedPartition};
 use kafka_produce::{Producer, ProducerConfig, ProducerRecord};
 use kafka_read::{Cluster, Visibility};
 use testkit::{Cluster as _, KafkaCluster};
@@ -240,11 +240,11 @@ async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
         seen: Events,
     }
 
-    impl kafka_consumer::RebalanceListener for Watcher {
+    impl kafka_consume::RebalanceListener for Watcher {
         fn on_revoke(
             &mut self,
             revoked: Vec<RevokedPartition>,
-        ) -> futures::future::BoxFuture<'_, kafka_consumer::Result<()>> {
+        ) -> futures::future::BoxFuture<'_, kafka_consume::Result<()>> {
             let seen = Arc::clone(&self.seen);
             Box::pin(async move {
                 seen.lock().unwrap().push(Event::Revoke(revoked));
@@ -255,7 +255,7 @@ async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
         fn on_assign(
             &mut self,
             assigned: Vec<(String, i32)>,
-        ) -> futures::future::BoxFuture<'_, kafka_consumer::Result<()>> {
+        ) -> futures::future::BoxFuture<'_, kafka_consume::Result<()>> {
             let seen = Arc::clone(&self.seen);
             Box::pin(async move {
                 seen.lock().unwrap().push(Event::Assign(assigned));

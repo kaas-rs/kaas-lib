@@ -1,6 +1,6 @@
 //! M16 acceptance: fetch sessions and the streaming fetcher.
 //!
-//! `cargo test -p kafka-consumer --test fetcher -- --ignored`
+//! `cargo test -p kafka-consume --test fetcher -- --ignored`
 //!
 //! The record count is the easy half. The assertion that actually decides
 //! whether this milestone happened is that a **steady-state fetch carries an
@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use kafka_admin::{Admin, ClusterConfig, NewTopic};
 use kafka_conn::StatsSnapshot;
-use kafka_consumer::{Consumer, ConsumerConfig, Position};
+use kafka_consume::{Consumer, ConsumerConfig, Position};
 use kafka_produce::{Producer, ProducerConfig, ProducerRecord};
 use kafka_read::{Cluster, Visibility};
 use testkit::{Cluster as _, KafkaCluster};

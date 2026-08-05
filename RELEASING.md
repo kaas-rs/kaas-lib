@@ -1,8 +1,8 @@
 # Releasing
 
-The five library crates — `kafka-conn`, `kafka-meta`, `kafka-admin`,
-`kafka-read`, `kafka-produce` — publish to crates.io **in lockstep** at a
-single version held
+The six library crates — `kafka-conn`, `kafka-meta`, `kafka-admin`,
+`kafka-read`, `kafka-produce`, `kafka-consume` — publish to crates.io
+**in lockstep** at a single version held
 in `[workspace.package]`. `testkit`, `livetest`, `xtask` and `interop` are
 `publish = false`.
 
@@ -32,12 +32,13 @@ lands after the gates have spent minutes booting brokers — at the first
 upload of the run. Harmless when it happens (the first crate never uploads,
 so nothing is claimed and the version is still free), just slow to discover.
 
-**1. The crate names must be available.** As of the last check
-`kafka-conn`, `kafka-meta`, `kafka-admin`, `kafka-read` and
-`kafka-produce` were all
-unclaimed on crates.io. Confirm before releasing — publishing claims them
-permanently, and they are generic names in a flat namespace. If that gives
-you pause, rename first; it is far cheaper now than after.
+**1. The crate names must be available.** `kafka-conn`, `kafka-meta`,
+`kafka-admin`, `kafka-read` and `kafka-produce` are claimed and live as of
+0.2.1. `kafka-consume` is not yet published — it was still unclaimed when
+checked on 2026-08-05, and the next release claims it. Confirm before
+releasing — publishing takes a name permanently, and these are generic
+names in a flat namespace. If that gives you pause, rename first; it is far
+cheaper now than after.
 
 **2. The first publish needs an API token.** crates.io cannot attach a
 Trusted Publisher to a crate that does not exist yet — unlike PyPI, there is
@@ -47,7 +48,7 @@ no "pending publisher". So:
    `publish-new` and `publish-update`.
 2. Add it as the repository secret `CARGO_REGISTRY_TOKEN`.
 3. Run the release (below).
-4. **Then** configure Trusted Publishing for each of the five crates at
+4. **Then** configure Trusted Publishing for each of the six crates at
    `https://crates.io/crates/<name>/settings` — repository
    `kaas-rs/kaas-lib`, workflow `release.yml`, environment `crates-io`.
 5. **Delete the `CARGO_REGISTRY_TOKEN` secret.** The workflow detects its
@@ -95,7 +96,7 @@ git push origin v0.2.1
 ```
 
 The tag must be `v` + the workspace version exactly. The workflow reads the
-version cargo actually resolved, asserts all five crates agree on it, and
+version cargo actually resolved, asserts all six crates agree on it, and
 refuses to run if the tag disagrees.
 
 ### Why two version lines and not one
@@ -106,7 +107,7 @@ separate string, and crates.io needs it to name a version that exists.
 
 Leaving it stale is uniquely nasty: everything builds locally, because the
 path dependency wins; `cargo xtask ci` is green; and the failure lands
-partway through a five-crate publish, after some crates are already live and
+partway through a six-crate publish, after some crates are already live and
 irreversibly so, as a resolver error about a version nobody has uploaded.
 Keeping both lines in the root manifest means one file and two adjacent
 edits — `cargo publish --dry-run --workspace` in step 2 is what catches it if
@@ -126,7 +127,7 @@ uploads nothing. Only a tag push publishes for real.
 
 The `gate` job, in order, all blocking:
 
-1. **Tag matches the workspace version**, and all five crates agree on it.
+1. **Tag matches the workspace version**, and all six crates agree on it.
 2. **`actionlint`** — the release path is itself a workflow, and a workflow
    expression error fails in zero seconds with no jobs and no logs rather
    than loudly. This file carried one for its entire existence, so every
@@ -144,7 +145,7 @@ The `gate` job, in order, all blocking:
 Only then does `publish` start and pause for the environment's reviewer. It
 authenticates and runs `cargo publish --workspace`, which resolves the order
 itself (`kafka-conn` → `kafka-meta` →
-`kafka-admin`/`kafka-read`/`kafka-produce`) and waits
+`kafka-admin`/`kafka-read`/`kafka-produce`/`kafka-consume`) and waits
 for each crate to reach the index before publishing its dependents.
 
 ## If something goes wrong
@@ -156,7 +157,7 @@ version, so a re-run at the same version will not repair it.
 
 **A bad version is live.** `cargo yank --version X.Y.Z <crate>` stops new
 dependents resolving to it. It does **not** delete it, and existing
-`Cargo.lock` files keep working. Yank all five together or you strand
+`Cargo.lock` files keep working. Yank all six together or you strand
 consumers on a broken combination.
 
 **Secrets to check** if authentication fails: either `CARGO_REGISTRY_TOKEN`

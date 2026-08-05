@@ -16,7 +16,7 @@ kafka-read    = { path = "../kafka-read" }
 kafka-admin   = { path = "../kafka-admin" }
 kafka-conn    = { path = "../kafka-conn" }
 kafka-produce = { path = "../kafka-produce" }
-kafka-consumer = { path = "../kafka-consumer" }
+kafka-consume = { path = "../kafka-consume" }
 testkit     = { path = "../testkit" }
 tokio       = { version = "1.53", features = ["full"] }
 futures     = "0.3"

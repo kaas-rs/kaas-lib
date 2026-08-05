@@ -16,7 +16,7 @@ topic rather than for joining a consumer group.
 | [`kafka-admin`](crates/kafka-admin) | 31 admin RPCs, one result per resource |
 | [`kafka-read`](crates/kafka-read) | streaming forward scans, backward tails, tolerant decoding |
 | [`kafka-produce`](crates/kafka-produce) | record batch encoding, murmur2 and sticky partitioning, batching, idempotence, transactions |
-| [`kafka-consumer`](crates/kafka-consumer) | incremental fetch sessions, a streaming fetcher, KIP-848 and classic group membership |
+| [`kafka-consume`](crates/kafka-consume) | incremental fetch sessions, a streaming fetcher, KIP-848 and classic group membership |
 
 ```toml
 [dependencies]
@@ -70,7 +70,7 @@ Most of the design follows from four statements, covered in the
 This is no longer a read-only library. `kafka-produce` writes records with a
 batching accumulator, Java-compatible murmur2 partitioning, KIP-480 sticky
 partitioning for unkeyed records, every compression codec, idempotence and
-transactions. `kafka-consumer` reads them back over incremental fetch
+transactions. `kafka-consume` reads them back over incremental fetch
 sessions (KIP-227), as a manually-assigned consumer or as a member of a
 KIP-848 or classic group.
 
