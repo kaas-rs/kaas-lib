@@ -40,6 +40,7 @@
 
 mod classic;
 mod consumer;
+mod coordinator;
 mod fetcher;
 mod group;
 mod offsets;

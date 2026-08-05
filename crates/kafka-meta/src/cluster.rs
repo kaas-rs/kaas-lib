@@ -181,9 +181,9 @@ impl Cluster {
     ///
     /// This loop is *not* what the KIP-848 acceptance failures were about,
     /// though it was blamed for them first. Those never reached any retry:
-    /// they arrived as a code inside a successful response, which is what
-    /// [`Cluster::send_to_coordinator_retrying`] exists for. This one covers
-    /// the narrower case where `FindCoordinator` itself is refused.
+    /// they arrived as a code inside a successful response, which `kafka-consume`
+    /// re-asks for above the decode. This one covers the narrower case where
+    /// `FindCoordinator` itself is refused.
     pub async fn coordinator(&self, kind: CoordinatorKind, key: &str) -> Result<i32> {
         let policy = self.inner.config.retry;
         let started = std::time::Instant::now();
@@ -325,60 +325,6 @@ impl Cluster {
     ) -> Result<R::Response> {
         self.dispatch(Target::Coordinator(kind, key.to_owned()), request)
             .await
-    }
-
-    /// Send to a coordinator, re-asking while the *decoded response* says we
-    /// asked the wrong broker.
-    ///
-    /// [`Cluster::send_to_coordinator`] cannot do this and neither can
-    /// [`Cluster::dispatch`], which is the trap this exists for. `dispatch`
-    /// retries on `Err`, and a coordinator that has moved does not produce
-    /// one: the round trip *succeeded*, and `NOT_COORDINATOR` arrives as a
-    /// field inside the response — top-level on a heartbeat, per partition on
-    /// an `OffsetCommit`. So `dispatch` returns `Ok`, the caller decodes the
-    /// body, and the error reaches the caller having never once been offered
-    /// to the retry loop or invalidated the cached coordinator. Every KIP-848
-    /// acceptance test failed this way, in under ten seconds, which is itself
-    /// the tell: a budget that was being consulted would have burned it.
-    ///
-    /// `code_of` pulls the code out of the decoded response. On give-up the
-    /// response is handed back **unchanged** rather than converted to an
-    /// error, so per-item results stay per-item (rule 4) and the caller's
-    /// existing decoding is untouched — this only decides whether to ask
-    /// again.
-    pub async fn send_to_coordinator_retrying<R, F>(
-        &self,
-        kind: CoordinatorKind,
-        key: &str,
-        request: R,
-        code_of: F,
-    ) -> Result<R::Response>
-    where
-        R: Rpc + Clone,
-        F: Fn(&R::Response) -> Option<ErrorCode>,
-    {
-        let policy = self.inner.config.retry;
-        let started = std::time::Instant::now();
-        let mut attempt: u32 = 1;
-        loop {
-            let response = self.send_to_coordinator(kind, key, request.clone()).await?;
-
-            let Some(code) = code_of(&response) else {
-                return Ok(response);
-            };
-            if !code.needs_coordinator_refresh() || started.elapsed() >= policy.coordinator_timeout
-            {
-                return Ok(response);
-            }
-
-            self.invalidate_coordinator(kind, key);
-            attempt = attempt.saturating_add(1);
-            tracing::debug!(?kind, key, %code, attempt, "coordinator moved; re-asking");
-            let delay = policy.delay(attempt);
-            if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
-            }
-        }
     }
 
     /// Send a request to a partition's leader.

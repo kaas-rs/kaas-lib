@@ -27,7 +27,7 @@ use kafka_conn::protocol::messages::offset_fetch_request::{
 };
 use kafka_conn::protocol::messages::{GroupId, OffsetCommitRequest, OffsetFetchRequest, TopicName};
 use kafka_conn::{Error, ErrorCode, Result};
-use kafka_meta::{Cluster, CoordinatorKind};
+use kafka_meta::Cluster;
 
 /// The sentinel that says "I am not a member of this group".
 ///
@@ -90,15 +90,14 @@ pub(crate) async fn commit(
     // whole-request condition even so — the coordinator is wrong for the
     // group, so every partition carries it — which is why re-asking is right
     // and why the first partition's code is enough to decide.
-    let response = cluster
-        .send_to_coordinator_retrying(CoordinatorKind::Group, group_id, request, |response| {
-            response
-                .topics
-                .iter()
-                .flat_map(|topic| topic.partitions.iter())
-                .find_map(|partition| ErrorCode::from_code(partition.error_code))
-        })
-        .await?;
+    let response = crate::coordinator::send_retrying(cluster, group_id, request, |response| {
+        response
+            .topics
+            .iter()
+            .flat_map(|topic| topic.partitions.iter())
+            .find_map(|partition| ErrorCode::from_code(partition.error_code))
+    })
+    .await?;
 
     // Per-partition results, per rule 4: one partition rejected must not hide
     // eleven that committed.
@@ -163,17 +162,16 @@ pub(crate) async fn fetch(
             ))
     };
 
-    let response = cluster
-        .send_to_coordinator_retrying(CoordinatorKind::Group, group_id, request, |response| {
-            // v8+ answers inside `groups`, older versions at the top level —
-            // the same two shapes the decoding below has to straddle.
-            response
-                .groups
-                .first()
-                .and_then(|group| ErrorCode::from_code(group.error_code))
-                .or_else(|| ErrorCode::from_code(response.error_code))
-        })
-        .await?;
+    let response = crate::coordinator::send_retrying(cluster, group_id, request, |response| {
+        // v8+ answers inside `groups`, older versions at the top level —
+        // the same two shapes the decoding below has to straddle.
+        response
+            .groups
+            .first()
+            .and_then(|group| ErrorCode::from_code(group.error_code))
+            .or_else(|| ErrorCode::from_code(response.error_code))
+    })
+    .await?;
 
     let mut out = HashMap::new();
 

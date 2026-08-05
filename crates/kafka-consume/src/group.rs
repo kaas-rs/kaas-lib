@@ -35,7 +35,7 @@ use kafka_conn::protocol::StrBytes;
 use kafka_conn::protocol::messages::consumer_group_heartbeat_request::TopicPartitions;
 use kafka_conn::protocol::messages::{ConsumerGroupHeartbeatRequest, GroupId};
 use kafka_conn::{Error, ErrorCode, Result};
-use kafka_meta::{Cluster, CoordinatorKind, TopicId};
+use kafka_meta::{Cluster, TopicId};
 
 /// Join. The member id is already ours — see [`new_member_id`].
 const EPOCH_JOIN: i32 = 0;
@@ -187,13 +187,10 @@ impl Membership {
         topic_ids: &HashMap<String, TopicId>,
     ) -> Result<Reconciliation> {
         let request = self.build(topic_ids)?;
-        let response = cluster
-            .send_to_coordinator_retrying(
-                CoordinatorKind::Group,
-                &self.group_id,
-                request,
-                |response| ErrorCode::from_code(response.error_code),
-            )
+        let response =
+            crate::coordinator::send_retrying(cluster, &self.group_id, request, |response| {
+                ErrorCode::from_code(response.error_code)
+            })
             .await?;
         self.last_beat = Some(Instant::now());
 
@@ -278,13 +275,10 @@ impl Membership {
             .with_member_epoch(epoch)
             .with_instance_id(self.instance_id.clone().map(StrBytes::from_string));
 
-        let response = cluster
-            .send_to_coordinator_retrying(
-                CoordinatorKind::Group,
-                &self.group_id,
-                request,
-                |response| ErrorCode::from_code(response.error_code),
-            )
+        let response =
+            crate::coordinator::send_retrying(cluster, &self.group_id, request, |response| {
+                ErrorCode::from_code(response.error_code)
+            })
             .await?;
 
         self.reset();
