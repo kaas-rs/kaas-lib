@@ -43,10 +43,13 @@ mod consumer;
 mod fetcher;
 mod group;
 mod offsets;
+pub mod rebalance;
 mod session;
 
+pub use classic::Assignor;
 pub use consumer::{ClassicConsumer, Consumer, ConsumerConfig, GroupConsumer, Position};
 pub use offsets::CommittedOffset;
+pub use rebalance::{RebalanceListener, RevokedPartition};
 
 pub use kafka_conn::{Error, Result};
 pub use kafka_meta::{Cluster, ClusterConfig};

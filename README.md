@@ -15,7 +15,8 @@ topic rather than for joining a consumer group.
 | [`kafka-meta`](crates/kafka-meta) | metadata cache, RPC routing, connection pool, error taxonomy |
 | [`kafka-admin`](crates/kafka-admin) | 31 admin RPCs, one result per resource |
 | [`kafka-read`](crates/kafka-read) | streaming forward scans, backward tails, tolerant decoding |
-| [`kafka-produce`](crates/kafka-produce) | record batch encoding, murmur2 and sticky partitioning, acknowledged produce |
+| [`kafka-produce`](crates/kafka-produce) | record batch encoding, murmur2 and sticky partitioning, batching, idempotence, transactions |
+| [`kafka-consumer`](crates/kafka-consumer) | incremental fetch sessions, a streaming fetcher, KIP-848 and classic group membership |
 
 ```toml
 [dependencies]
@@ -66,16 +67,27 @@ Most of the design follows from four statements, covered in the
 37 of the protocol's 87 api keys — see the
 [API support matrix](https://kaas-rs.github.io/kaas-lib/compat/api-matrix.html).
 
-The scope boundary is moving. `kafka-produce` writes records — batch
-encoding, Java-compatible murmur2 partitioning, KIP-480 sticky partitioning
-for unkeyed records, and every compression codec — so this is no longer a
-read-only library. What it does **not** yet have is a batching accumulator,
-idempotence, transactions, or consumer-group membership; a produce is one
-round trip per record and is never retried on an ambiguous failure, because
-retrying without a sequence number is how a producer duplicates data.
+This is no longer a read-only library. `kafka-produce` writes records with a
+batching accumulator, Java-compatible murmur2 partitioning, KIP-480 sticky
+partitioning for unkeyed records, every compression codec, idempotence and
+transactions. `kafka-consumer` reads them back over incremental fetch
+sessions (KIP-227), as a manually-assigned consumer or as a member of a
+KIP-848 or classic group.
 
-`acks=0` is deliberately not offered. See the
-[`kafka-produce` documentation](crates/kafka-produce) for the reasoning.
+Two deliberate omissions, both stated where you would hit them:
+
+* **`acks=0` is not offered.** It is a request the broker never answers, and a
+  correlation-based client reports every successful write as a timeout. See
+  the [`kafka-produce` documentation](crates/kafka-produce).
+* **Classic groups advertise `range`, `roundrobin` and `cooperative-sticky`,
+  not eager `sticky`.** `StickyAssignor` carries its state in the
+  subscription's `user_data` as a struct with no schema in `kafka-protocol`,
+  and hand-rolling a wire format is exactly what this codebase does not do.
+  Cooperative-sticky has no such problem — `owned_partitions` and
+  `generation_id` are real fields of the real schema — so incremental
+  rebalancing is available. A group whose other members are pinned to eager
+  `sticky` alone fails at join time with `INCONSISTENT_GROUP_PROTOCOL`, which
+  is loud rather than subtle.
 
 See [Roadmap](https://kaas-rs.github.io/kaas-lib/guide/roadmap.html).
 **Contributions are very welcome**, particularly on the remaining write and

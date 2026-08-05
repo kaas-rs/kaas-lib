@@ -17,27 +17,56 @@
 //!
 //! `kafka-protocol` ships both as real schemas, so none of it is hand-rolled.
 //!
-//! # Which assignors, and the deliberate omission
+//! # Which assignors, and the one deliberate omission
 //!
-//! **Range and round-robin only.** Sticky and cooperative-sticky are not
-//! implemented, and that is a decision rather than an oversight:
+//! **`range`, `roundrobin` and `cooperative-sticky`.** Eager `sticky` is not
+//! implemented, and that one *is* a decision rather than an oversight — see
+//! below.
 //!
-//! * The coordinator picks a protocol every member advertises. Advertising
-//!   only these two settles any group containing us on one of them, and Java's
-//!   default `partition.assignment.strategy` is `[RangeAssignor,
-//!   CooperativeStickyAssignor]` — so `range` is present and a mixed group
-//!   works.
-//! * Java's `AbstractStickyAssignor` is ~1000 lines with a constrained/general
-//!   split and a fairness balancing loop. Reimplementing it byte-compatibly is
-//!   the single largest piece of work in this milestone and buys nothing until
-//!   somebody actually needs it.
-//! * The failure mode of guessing wrong is loud, not silent: a group whose
-//!   other members are pinned to sticky-only fails `JoinGroup` with
-//!   `INCONSISTENT_GROUP_PROTOCOL` at join time.
+//! The advertised order is `[range, roundrobin, cooperative-sticky]`, matching
+//! Java's default first choice. The coordinator does not simply take the
+//! leader's favourite: it intersects every member's list, then each member
+//! votes for the first of *its* protocols that survived, and the most-voted one
+//! wins. So a group of default Java clients and us settles on `range`
+//! deterministically, while a Java client pinned to `CooperativeStickyAssignor`
+//! alone leaves that as the only candidate and the group forms on it — where
+//! before it could not form at all. [`crate::Assignor`] reorders the list for a
+//! caller who wants cooperative rebalancing without being forced into it.
 //!
-//! The cost is honest and worth stating: forcing a group onto `range` is a
-//! **group-wide** downgrade, so every Java member in it loses cooperative
-//! rebalancing too.
+//! ## Cooperative rebalancing takes two rounds, and that is the protocol
+//!
+//! Under `range`/`roundrobin` a rebalance is **eager**: every member revokes
+//! everything, re-joins, and takes whatever it is given. Under
+//! `cooperative-sticky` (KIP-429) a member keeps what it holds across the
+//! rebalance and gives up only what actually moves:
+//!
+//! 1. Every member sends what it currently owns in its subscription
+//!    (`owned_partitions`, subscription v1+, plus `generation_id` at v2 to
+//!    settle a double claim after a failure).
+//! 2. The leader computes a sticky, balanced target — then **withholds** every
+//!    partition whose owner is changing. Round one assigns it to nobody.
+//! 3. The members that lost partitions revoke them and re-join immediately.
+//! 4. Round two hands the now-unowned partitions to their new owners.
+//!
+//! Withholding is the whole point: a partition is never assigned to its next
+//! owner in the same round its previous owner still holds it, so the two never
+//! overlap. Skipping step 2 and assigning directly is the bug that delivers
+//! every record in the moved partition twice, silently.
+//!
+//! ## Eager `sticky` is omitted, and this is why
+//!
+//! `StickyAssignor` carries the previous assignment in the subscription's
+//! `user_data` as `StickyAssignorUserData` — a struct defined in Java client
+//! code with **no schema in `kafka-protocol`**. Encoding it means hand-rolling
+//! a wire format, which CLAUDE.md forbids for exactly the reason it applies
+//! here: a hand-rolled struct that is subtly wrong produces a group where
+//! somebody's assignment is silently empty.
+//!
+//! `cooperative-sticky` has no such problem — `owned_partitions` and
+//! `generation_id` are real fields of the real schema — which is why it is here
+//! and its eager sibling is not. The failure mode of the omission is loud: a
+//! group whose other members are pinned to `sticky` alone fails `JoinGroup`
+//! with `INCONSISTENT_GROUP_PROTOCOL` at join time rather than misbehaving.
 //!
 //! # Each member needs its own connection, and that is not a style preference
 //!
@@ -64,24 +93,88 @@
 //! immediately, so members can share a connection freely. That difference is
 //! why the modern path worked first time and this one did not.
 
-use std::collections::BTreeMap;
-
-/// The assignors this client can compute, in preference order.
-///
-/// Order matters: the coordinator picks the first protocol supported by every
-/// member, walking the leader's list.
-pub(crate) const SUPPORTED: [&str; 2] = [RANGE, ROUND_ROBIN];
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Java's `RangeAssignor`.
 pub(crate) const RANGE: &str = "range";
 /// Java's `RoundRobinAssignor`.
 pub(crate) const ROUND_ROBIN: &str = "roundrobin";
+/// Java's `CooperativeStickyAssignor`.
+pub(crate) const COOPERATIVE_STICKY: &str = "cooperative-sticky";
+
+/// Which assignors a [`ClassicConsumer`](crate::ClassicConsumer) advertises,
+/// and in what order.
+///
+/// Order is a vote, not a demand: the coordinator intersects every member's
+/// list and each member votes for the first of its own that survived. Putting
+/// [`Assignor::CooperativeSticky`] first asks for cooperative rebalancing;
+/// whether the group gets it depends on the other members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Assignor {
+    /// Java's `RangeAssignor`. Eager, per topic, remainder to the earliest
+    /// members. Java's own first choice, and therefore ours.
+    Range,
+    /// Java's `RoundRobinAssignor`. Eager, deals every partition in rotation.
+    RoundRobin,
+    /// Java's `CooperativeStickyAssignor` (KIP-429). Keeps what it can across a
+    /// rebalance and moves the rest over two rounds.
+    CooperativeSticky,
+}
+
+impl Assignor {
+    /// The protocol name on the wire. These strings are Java's, not ours.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Assignor::Range => RANGE,
+            Assignor::RoundRobin => ROUND_ROBIN,
+            Assignor::CooperativeSticky => COOPERATIVE_STICKY,
+        }
+    }
+
+    /// Whether this assignor revokes everything before re-joining.
+    ///
+    /// The distinction drives the member, not just the leader: an eager member
+    /// gives its partitions up the moment it learns a rebalance is happening, a
+    /// cooperative one holds them until the sync says which ones moved.
+    pub(crate) fn is_eager(self) -> bool {
+        !matches!(self, Assignor::CooperativeSticky)
+    }
+}
+
+/// The default advertised list, matching Java's default first choice.
+pub(crate) const SUPPORTED: [Assignor; 3] = [
+    Assignor::Range,
+    Assignor::RoundRobin,
+    Assignor::CooperativeSticky,
+];
+
+/// Whether a protocol name is one this client can actually compute.
+pub(crate) fn is_cooperative(protocol: &str) -> bool {
+    protocol == COOPERATIVE_STICKY
+}
 
 /// One member's subscription, as the leader sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MemberSubscription {
     pub member_id: String,
     pub topics: Vec<String>,
+    /// What this member says it currently holds (subscription v1+).
+    ///
+    /// Empty under the eager assignors, which revoke before re-joining, and
+    /// load-bearing under `cooperative-sticky`, which does not.
+    pub owned: Vec<(String, i32)>,
+    /// The generation the member owned those partitions in (subscription v2+).
+    ///
+    /// Only used to settle a double claim: after a member misses a rebalance,
+    /// two members can both believe they own a partition, and the one from the
+    /// older generation is the one that is wrong.
+    pub generation: i32,
+}
+
+impl MemberSubscription {
+    fn subscribes_to(&self, topic: &str) -> bool {
+        self.topics.iter().any(|t| t == topic)
+    }
 }
 
 /// Compute an assignment the way Java's `RangeAssignor` does.
@@ -179,16 +272,182 @@ pub(crate) fn assign_round_robin(
     out
 }
 
+/// Compute a sticky, balanced assignment, then withhold whatever has to move.
+///
+/// Java's `CooperativeStickyAssignor`, in the two parts that matter:
+///
+/// * **Sticky.** A partition stays with the member that already holds it
+///   wherever balance allows, because moving one costs a revoke and a
+///   re-consume from the committed offset.
+/// * **Cooperative.** A partition whose owner is changing is assigned to
+///   *nobody* this round. Its old owner sees it missing from its assignment and
+///   revokes it; the re-join that follows gives it to its new owner. Handing it
+///   straight over would mean two members holding it at once, each delivering
+///   its records, with nothing anywhere reporting a problem.
+///
+/// The result is deliberately unbalanced in the round where partitions move.
+/// That is what the second round is for.
+pub(crate) fn assign_cooperative_sticky(
+    members: &[MemberSubscription],
+    partitions_per_topic: &BTreeMap<String, i32>,
+) -> BTreeMap<String, BTreeMap<String, Vec<i32>>> {
+    let mut sorted: Vec<&MemberSubscription> = members.iter().collect();
+    sorted.sort_by(|a, b| a.member_id.cmp(&b.member_id));
+    if sorted.is_empty() {
+        return BTreeMap::new();
+    }
+
+    // Every partition of every subscribed topic.
+    let all: BTreeSet<(String, i32)> = partitions_per_topic
+        .iter()
+        .flat_map(|(topic, count)| (0..*count).map(move |p| (topic.clone(), p)))
+        .filter(|(topic, _)| sorted.iter().any(|m| m.subscribes_to(topic)))
+        .collect();
+
+    // Who holds what now, with a double claim going to the newer generation.
+    // A claim on a partition that no longer exists, or on a topic the claimant
+    // no longer subscribes to, is not a claim.
+    let mut owner: BTreeMap<(String, i32), (String, i32)> = BTreeMap::new();
+    for member in &sorted {
+        for key in &member.owned {
+            if !all.contains(key) || !member.subscribes_to(&key.0) {
+                continue;
+            }
+            match owner.get(key) {
+                Some((_, generation)) if *generation >= member.generation => {}
+                _ => {
+                    owner.insert(key.clone(), (member.member_id.clone(), member.generation));
+                }
+            }
+        }
+    }
+
+    let mut held: BTreeMap<String, BTreeSet<(String, i32)>> = sorted
+        .iter()
+        .map(|member| (member.member_id.clone(), BTreeSet::new()))
+        .collect();
+    for (key, (member_id, _)) in &owner {
+        if let Some(set) = held.get_mut(member_id) {
+            set.insert(key.clone());
+        }
+    }
+
+    // What nobody holds goes to whoever has the least, so a member joining an
+    // established group is filled up rather than starved.
+    for key in all.iter().filter(|key| !owner.contains_key(*key)) {
+        if let Some(member_id) = emptiest(&sorted, &held, &key.0)
+            && let Some(set) = held.get_mut(&member_id)
+        {
+            set.insert(key.clone());
+        }
+    }
+
+    balance(&sorted, &mut held);
+
+    // The cooperative step. Anything still owned by somebody else is withheld
+    // for a round.
+    for (member_id, set) in &mut held {
+        set.retain(|key| match owner.get(key) {
+            Some((holder, _)) => holder == member_id,
+            None => true,
+        });
+    }
+
+    held.into_iter()
+        .map(|(member_id, set)| {
+            let mut topics: BTreeMap<String, Vec<i32>> = BTreeMap::new();
+            for (topic, partition) in set {
+                topics.entry(topic).or_default().push(partition);
+            }
+            (member_id, topics)
+        })
+        .collect()
+}
+
+/// The subscribed member holding the fewest partitions, ties by member id.
+fn emptiest(
+    members: &[&MemberSubscription],
+    held: &BTreeMap<String, BTreeSet<(String, i32)>>,
+    topic: &str,
+) -> Option<String> {
+    members
+        .iter()
+        .filter(|member| member.subscribes_to(topic))
+        .min_by_key(|member| {
+            (
+                held.get(&member.member_id).map_or(0, BTreeSet::len),
+                member.member_id.clone(),
+            )
+        })
+        .map(|member| member.member_id.clone())
+}
+
+/// Move partitions from the fullest member to the emptiest until no pair is
+/// more than one apart.
+///
+/// Bounded rather than looping until balanced: a subscription pattern where the
+/// imbalance *cannot* be fixed — a topic only one member wants — must terminate
+/// rather than spin, and it is the leader of a live group doing the spinning.
+fn balance(members: &[&MemberSubscription], held: &mut BTreeMap<String, BTreeSet<(String, i32)>>) {
+    let total: usize = held.values().map(BTreeSet::len).sum();
+    for _ in 0..(total.saturating_mul(2)) {
+        let Some((from, to, key)) = imbalance(members, held) else {
+            return;
+        };
+        if let Some(set) = held.get_mut(&from) {
+            set.remove(&key);
+        }
+        if let Some(set) = held.get_mut(&to) {
+            set.insert(key);
+        }
+    }
+}
+
+/// One partition worth moving: from the fullest member to one at least two
+/// behind it that is allowed to take it.
+fn imbalance(
+    members: &[&MemberSubscription],
+    held: &BTreeMap<String, BTreeSet<(String, i32)>>,
+) -> Option<(String, String, (String, i32))> {
+    let mut by_size: Vec<(&String, usize)> = held.iter().map(|(id, set)| (id, set.len())).collect();
+    // Sorted so the choice is deterministic: two leaders computing the same
+    // group must reach the same answer, and a tie broken by hash order is a
+    // tie broken differently on every run.
+    by_size.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+    for (fullest, size) in &by_size {
+        for (emptiest, other) in by_size.iter().rev() {
+            if size <= &(other + 1) {
+                continue;
+            }
+            let takes = members
+                .iter()
+                .find(|member| &&member.member_id == emptiest)?;
+            let moved = held
+                .get(*fullest)?
+                .iter()
+                .find(|(topic, _)| takes.subscribes_to(topic))?;
+            return Some(((*fullest).clone(), (*emptiest).clone(), moved.clone()));
+        }
+    }
+    None
+}
+
 /// Compute an assignment with the named protocol.
+///
+/// An unrecognised name falls back to `range`, which is not a guess: the
+/// coordinator only ever names a protocol every member advertised, so a name we
+/// do not know means the codebase advertised something it cannot compute, and
+/// range is the one Java clients always have.
 pub(crate) fn assign(
     protocol: &str,
     members: &[MemberSubscription],
     partitions_per_topic: &BTreeMap<String, i32>,
 ) -> BTreeMap<String, BTreeMap<String, Vec<i32>>> {
-    if protocol == ROUND_ROBIN {
-        assign_round_robin(members, partitions_per_topic)
-    } else {
-        assign_range(members, partitions_per_topic)
+    match protocol {
+        ROUND_ROBIN => assign_round_robin(members, partitions_per_topic),
+        COOPERATIVE_STICKY => assign_cooperative_sticky(members, partitions_per_topic),
+        _ => assign_range(members, partitions_per_topic),
     }
 }
 
@@ -200,7 +459,42 @@ mod tests {
         MemberSubscription {
             member_id: id.to_owned(),
             topics: topics.iter().map(|t| (*t).to_owned()).collect(),
+            owned: Vec::new(),
+            generation: NO_GENERATION,
         }
+    }
+
+    /// A member that arrives at the rebalance already holding partitions,
+    /// which is the only interesting case for the cooperative assignor.
+    fn holder(
+        id: &str,
+        topics: &[&str],
+        owned: &[(&str, i32)],
+        generation: i32,
+    ) -> MemberSubscription {
+        MemberSubscription {
+            owned: owned
+                .iter()
+                .map(|(topic, partition)| ((*topic).to_owned(), *partition))
+                .collect(),
+            generation,
+            ..member(id, topics)
+        }
+    }
+
+    /// Flatten one member's assignment into sorted `(topic, partition)` pairs.
+    fn flat(
+        assignment: &BTreeMap<String, BTreeMap<String, Vec<i32>>>,
+        member_id: &str,
+    ) -> Vec<(String, i32)> {
+        let mut out: Vec<(String, i32)> = assignment
+            .get(member_id)
+            .into_iter()
+            .flatten()
+            .flat_map(|(topic, partitions)| partitions.iter().map(move |p| (topic.clone(), *p)))
+            .collect();
+        out.sort();
+        out
     }
 
     fn topics(entries: &[(&str, i32)]) -> BTreeMap<String, i32> {
@@ -287,7 +581,8 @@ mod tests {
         ];
         let counts = topics(&[("t", 11)]);
 
-        for protocol in SUPPORTED {
+        for assignor in SUPPORTED {
+            let protocol = assignor.name();
             let assignment = assign(protocol, &members, &counts);
             let mut all: Vec<i32> = assignment
                 .values()
@@ -304,16 +599,240 @@ mod tests {
         }
     }
 
-    /// Preference order is what the coordinator walks, so `range` first is a
-    /// deliberate choice: it is the one Java advertises by default.
+    /// Preference order is a vote, and `range` first is a deliberate choice: it
+    /// is the one Java advertises by default, so a mixed group lands on it
+    /// deterministically rather than by tie-break.
     #[test]
     fn range_is_offered_before_round_robin() {
-        assert_eq!(SUPPORTED[0], RANGE);
-        assert_eq!(SUPPORTED[1], ROUND_ROBIN);
+        assert_eq!(SUPPORTED[0], Assignor::Range);
+        assert_eq!(SUPPORTED[1], Assignor::RoundRobin);
+        assert_eq!(SUPPORTED[2], Assignor::CooperativeSticky);
+    }
+
+    /// The names are Java's, not ours. A typo here is a group that never forms.
+    #[test]
+    fn the_protocol_names_are_javas() {
+        assert_eq!(Assignor::Range.name(), "range");
+        assert_eq!(Assignor::RoundRobin.name(), "roundrobin");
+        assert_eq!(Assignor::CooperativeSticky.name(), "cooperative-sticky");
+        assert!(Assignor::Range.is_eager());
+        assert!(Assignor::RoundRobin.is_eager());
+        assert!(!Assignor::CooperativeSticky.is_eager());
+    }
+
+    #[test]
+    fn a_first_cooperative_assignment_is_balanced_and_complete() {
+        let assignment = assign_cooperative_sticky(
+            &[member("a", &["t"]), member("b", &["t"])],
+            &topics(&[("t", 6)]),
+        );
+        assert_eq!(flat(&assignment, "a").len(), 3);
+        assert_eq!(flat(&assignment, "b").len(), 3);
+    }
+
+    /// Sticky means what it says: a member that already holds partitions keeps
+    /// them when nothing forces a move.
+    #[test]
+    fn a_settled_group_moves_nothing() {
+        let held_a = [("t", 0), ("t", 1), ("t", 2)];
+        let held_b = [("t", 3), ("t", 4), ("t", 5)];
+        let assignment = assign_cooperative_sticky(
+            &[
+                holder("a", &["t"], &held_a, 4),
+                holder("b", &["t"], &held_b, 4),
+            ],
+            &topics(&[("t", 6)]),
+        );
+        assert_eq!(
+            flat(&assignment, "a"),
+            vec![
+                ("t".to_owned(), 0),
+                ("t".to_owned(), 1),
+                ("t".to_owned(), 2)
+            ]
+        );
+        assert_eq!(
+            flat(&assignment, "b"),
+            vec![
+                ("t".to_owned(), 3),
+                ("t".to_owned(), 4),
+                ("t".to_owned(), 5)
+            ]
+        );
+    }
+
+    /// The heart of KIP-429: a partition that has to move is assigned to
+    /// **nobody** in the round its old owner still holds it. Handing it over
+    /// directly is the bug that delivers its records twice with no error
+    /// anywhere.
+    #[test]
+    fn a_partition_that_must_move_is_withheld_for_a_round() {
+        let all_of_it = [("t", 0), ("t", 1), ("t", 2), ("t", 3)];
+        let round_one = assign_cooperative_sticky(
+            &[
+                holder("a", &["t"], &all_of_it, 7),
+                // b has just joined and owns nothing.
+                member("b", &["t"]),
+            ],
+            &topics(&[("t", 4)]),
+        );
+
+        let a_holds = flat(&round_one, "a");
+        let b_holds = flat(&round_one, "b");
+        assert_eq!(a_holds.len(), 2, "a keeps the half it is not giving up");
+        assert!(
+            b_holds.is_empty(),
+            "b was handed {b_holds:?} while a still owned it — that is double ownership"
+        );
+
+        // Round two: a has revoked what round one took off it, so the
+        // partitions are free and b gets them.
+        let round_two = assign_cooperative_sticky(
+            &[
+                holder(
+                    "a",
+                    &["t"],
+                    &a_holds
+                        .iter()
+                        .map(|(topic, p)| (topic.as_str(), *p))
+                        .collect::<Vec<_>>(),
+                    8,
+                ),
+                holder("b", &["t"], &[], 8),
+            ],
+            &topics(&[("t", 4)]),
+        );
+        assert_eq!(flat(&round_two, "a").len(), 2);
+        assert_eq!(flat(&round_two, "b").len(), 2);
+
+        // Together they cover everything, and nothing is held twice.
+        let mut union: Vec<(String, i32)> = flat(&round_two, "a");
+        union.extend(flat(&round_two, "b"));
+        union.sort();
+        union.dedup();
+        assert_eq!(union.len(), 4);
+    }
+
+    /// A member that missed a rebalance can come back still believing it owns
+    /// partitions somebody else was given. The older generation is the one that
+    /// is wrong.
+    ///
+    /// Four partitions, not two, so balance has nothing to say: with one
+    /// partition each to spare, the only thing deciding who holds t-0 and t-1
+    /// is which claim is honoured.
+    #[test]
+    fn a_stale_claim_loses_to_a_newer_generation() {
+        let assignment = assign_cooperative_sticky(
+            &[
+                holder("a", &["t"], &[("t", 0), ("t", 1)], 9),
+                holder("b", &["t"], &[("t", 0), ("t", 1)], 3),
+            ],
+            &topics(&[("t", 4)]),
+        );
+        assert_eq!(
+            flat(&assignment, "a"),
+            vec![("t".to_owned(), 0), ("t".to_owned(), 1)],
+            "the newer generation keeps what it claims"
+        );
+        assert_eq!(
+            flat(&assignment, "b"),
+            vec![("t".to_owned(), 2), ("t".to_owned(), 3)],
+            "the stale claim is dropped, and the claimant is filled from what is free"
+        );
+    }
+
+    /// Balance beats stickiness when the two disagree, and the partition that
+    /// has to move is still withheld for the round.
+    #[test]
+    fn balance_wins_over_stickiness_and_the_move_still_waits_a_round() {
+        let assignment = assign_cooperative_sticky(
+            &[
+                holder("a", &["t"], &[("t", 0), ("t", 1)], 4),
+                holder("b", &["t"], &[], 4),
+            ],
+            &topics(&[("t", 2)]),
+        );
+        assert_eq!(
+            flat(&assignment, "a").len(),
+            1,
+            "a must give one up for the group to be balanced"
+        );
+        assert!(
+            flat(&assignment, "b").is_empty(),
+            "and b must not receive it until a has actually let go"
+        );
+    }
+
+    /// A claim on a partition that no longer exists, or on a topic the member
+    /// no longer subscribes to, is not a claim.
+    #[test]
+    fn claims_on_partitions_that_are_gone_are_ignored() {
+        let assignment = assign_cooperative_sticky(
+            &[holder("a", &["t"], &[("t", 0), ("t", 99), ("gone", 0)], 2)],
+            &topics(&[("t", 2)]),
+        );
+        assert_eq!(
+            flat(&assignment, "a"),
+            vec![("t".to_owned(), 0), ("t".to_owned(), 1)]
+        );
+    }
+
+    /// A member that leaves frees its partitions immediately: there is nobody
+    /// left to overlap with, so withholding them would strand them for a round
+    /// for no reason.
+    #[test]
+    fn partitions_from_a_departed_member_are_not_withheld() {
+        let assignment =
+            assign_cooperative_sticky(&[holder("a", &["t"], &[("t", 0)], 5)], &topics(&[("t", 4)]));
+        assert_eq!(
+            flat(&assignment, "a").len(),
+            4,
+            "the survivor takes over everything the leaver held"
+        );
+    }
+
+    /// The balancer must terminate even when the imbalance cannot be fixed,
+    /// because it is the leader of a live group doing the work.
+    #[test]
+    fn an_unfixable_imbalance_terminates() {
+        let assignment = assign_cooperative_sticky(
+            &[member("a", &["busy"]), member("b", &["quiet"])],
+            &topics(&[("busy", 8), ("quiet", 1)]),
+        );
+        assert_eq!(flat(&assignment, "a").len(), 8);
+        assert_eq!(flat(&assignment, "b").len(), 1);
+    }
+
+    /// Two leaders computing the same group must reach the same answer.
+    #[test]
+    fn the_assignment_does_not_depend_on_member_order() {
+        let counts = topics(&[("t", 7)]);
+        let forwards = assign_cooperative_sticky(
+            &[
+                member("a", &["t"]),
+                member("b", &["t"]),
+                member("c", &["t"]),
+            ],
+            &counts,
+        );
+        let backwards = assign_cooperative_sticky(
+            &[
+                member("c", &["t"]),
+                member("b", &["t"]),
+                member("a", &["t"]),
+            ],
+            &counts,
+        );
+        assert_eq!(forwards, backwards);
     }
 }
 
+// Two distinct generated types with the same name: the assignment's and the
+// subscription's. Aliased rather than glob-imported, because letting one shadow
+// the other compiles right up until the field you set lands in the wrong
+// message.
 use kafka_conn::protocol::messages::consumer_protocol_assignment::TopicPartition;
+use kafka_conn::protocol::messages::consumer_protocol_subscription::TopicPartition as OwnedPartition;
 use kafka_conn::protocol::messages::join_group_request::JoinGroupRequestProtocol;
 use kafka_conn::protocol::messages::leave_group_request::MemberIdentity;
 use kafka_conn::protocol::messages::sync_group_request::SyncGroupRequestAssignment;
@@ -321,20 +840,28 @@ use kafka_conn::protocol::messages::{
     ConsumerProtocolAssignment, ConsumerProtocolSubscription, GroupId, HeartbeatRequest,
     JoinGroupRequest, LeaveGroupRequest, SyncGroupRequest, TopicName,
 };
-use kafka_conn::protocol::{Decodable, Encodable, StrBytes};
+use kafka_conn::protocol::{Decodable, Encodable, Message, StrBytes};
 use kafka_conn::{Error, ErrorCode, Result};
 use kafka_meta::{Cluster, CoordinatorKind};
 
 /// The generation a member that has not joined holds.
 const NO_GENERATION: i32 = -1;
 
-/// The version of the consumer protocol payload we encode.
+/// The version of the consumer protocol payload the eager assignors encode.
 ///
-/// v0 deliberately: every field above it is for sticky's `user_data` and the
-/// owned-partitions handshake that cooperative rebalancing needs, and this
-/// client implements neither. Writing a higher version would advertise
-/// capabilities the assignors here do not have.
+/// v0 deliberately: the fields above it exist for sticky's `user_data` and the
+/// owned-partitions handshake, and an eager member owns nothing at the moment
+/// it joins — it revoked everything first. Writing a higher version here would
+/// claim a capability the payload does not carry.
 const PROTOCOL_VERSION: i16 = 0;
+
+/// The version `cooperative-sticky` encodes.
+///
+/// v1 added `owned_partitions`, which is what makes a rebalance incremental,
+/// and v2 added `generation_id`, which is how a stale claim from a member that
+/// missed a rebalance is told from a live one. Both are real fields of the
+/// codec's own `ConsumerProtocolSubscription`; neither is hand-rolled.
+const COOPERATIVE_PROTOCOL_VERSION: i16 = 2;
 
 /// Strip the two-byte version prefix and return the version it named.
 fn take_version(bytes: &mut bytes::Bytes) -> Result<i16> {
@@ -373,32 +900,94 @@ fn take_version(bytes: &mut bytes::Bytes) -> Result<i16> {
 /// the caller.
 ///
 /// Omit it and every field lands two bytes early.
-fn encode_subscription(topics: &[String]) -> Result<bytes::Bytes> {
-    let subscription = ConsumerProtocolSubscription::default().with_topics(
+///
+/// # What `owned` is for
+///
+/// Under an eager assignor it is empty, because an eager member has already
+/// revoked everything by the time it joins. Under `cooperative-sticky` it is
+/// the member's current assignment, and it is the input the leader's
+/// stickiness is computed from — a member that under-reports what it owns has
+/// its partitions handed to somebody else, which is a rebalance storm rather
+/// than a rebalance.
+fn encode_subscription(
+    topics: &[String],
+    owned: &[(String, i32)],
+    generation: i32,
+    version: i16,
+) -> Result<bytes::Bytes> {
+    let mut subscription = ConsumerProtocolSubscription::default().with_topics(
         topics
             .iter()
             .map(|topic| StrBytes::from_string(topic.clone()))
             .collect(),
     );
+
+    // Only above v0, and only through the schema's own fields. Setting a field
+    // the version does not have is an encode error, not a silent drop.
+    if version >= 1 {
+        let mut by_topic: BTreeMap<String, Vec<i32>> = BTreeMap::new();
+        for (topic, partition) in owned {
+            by_topic.entry(topic.clone()).or_default().push(*partition);
+        }
+        subscription = subscription.with_owned_partitions(
+            by_topic
+                .into_iter()
+                .map(|(topic, partitions)| {
+                    OwnedPartition::default()
+                        .with_topic(TopicName(StrBytes::from_string(topic)))
+                        .with_partitions(partitions)
+                })
+                .collect(),
+        );
+    }
+    if version >= 2 {
+        subscription = subscription.with_generation_id(generation);
+    }
+
     let mut buf = bytes::BytesMut::new();
-    buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
-    subscription
-        .encode(&mut buf, PROTOCOL_VERSION)
-        .map_err(|error| {
-            Error::InvalidRequest(format!("could not encode a subscription: {error}"))
-        })?;
+    buf.extend_from_slice(&version.to_be_bytes());
+    subscription.encode(&mut buf, version).map_err(|error| {
+        Error::InvalidRequest(format!("could not encode a subscription: {error}"))
+    })?;
     Ok(buf.freeze())
 }
 
-fn decode_subscription(mut bytes: bytes::Bytes) -> Result<Vec<String>> {
+/// What a member told the leader about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DecodedSubscription {
+    topics: Vec<String>,
+    owned: Vec<(String, i32)>,
+    generation: i32,
+}
+
+fn decode_subscription(mut bytes: bytes::Bytes) -> Result<DecodedSubscription> {
     let version = take_version(&mut bytes)?;
-    let subscription = ConsumerProtocolSubscription::decode(&mut bytes, version.max(0))
+    // Clamp rather than reject: a member from a newer client may name a version
+    // above what the codec knows, and the fields we read are all at the bottom
+    // of the schema. Refusing would fail the whole group over a field we do not
+    // even look at.
+    let version = version.clamp(0, <ConsumerProtocolSubscription as Message>::VERSIONS.max);
+    let subscription = ConsumerProtocolSubscription::decode(&mut bytes, version)
         .map_err(|error| Error::decode("consumer protocol subscription", error.to_string()))?;
-    Ok(subscription
-        .topics
-        .into_iter()
-        .map(|topic| topic.to_string())
-        .collect())
+    Ok(DecodedSubscription {
+        topics: subscription
+            .topics
+            .into_iter()
+            .map(|topic| topic.to_string())
+            .collect(),
+        owned: subscription
+            .owned_partitions
+            .into_iter()
+            .flat_map(|topic| {
+                let name = topic.topic.0.to_string();
+                topic
+                    .partitions
+                    .into_iter()
+                    .map(move |partition| (name.clone(), partition))
+            })
+            .collect(),
+        generation: subscription.generation_id,
+    })
 }
 
 fn encode_assignment(assigned: &BTreeMap<String, Vec<i32>>) -> Result<bytes::Bytes> {
@@ -455,6 +1044,8 @@ pub(crate) struct ClassicMembership {
     /// Whether this member was elected leader and must compute the assignment.
     leader: bool,
     protocol: String,
+    /// What this member advertises, in preference order.
+    assignors: Vec<Assignor>,
     session_timeout_ms: i32,
     rebalance_timeout_ms: i32,
 }
@@ -473,6 +1064,7 @@ impl ClassicMembership {
             generation_id: NO_GENERATION,
             leader: false,
             protocol: RANGE.to_owned(),
+            assignors: SUPPORTED.to_vec(),
             // Both deliberately small, and in this order.
             //
             // `JoinGroup` *blocks* on the coordinator until every member has
@@ -502,28 +1094,72 @@ impl ClassicMembership {
         self.leader
     }
 
+    /// Advertise a different set of assignors, in a different order.
+    pub(crate) fn set_assignors(&mut self, assignors: Vec<Assignor>) {
+        self.assignors = assignors;
+    }
+
+    /// What this member advertises.
+    pub(crate) fn assignors(&self) -> &[Assignor] {
+        &self.assignors
+    }
+
+    /// Whether the protocol the coordinator settled on rebalances
+    /// incrementally.
+    ///
+    /// Meaningful only after a join: before one, nobody has voted yet.
+    pub(crate) fn is_cooperative(&self) -> bool {
+        is_cooperative(&self.protocol)
+    }
+
     /// Join the group, then sync to get an assignment.
     ///
     /// Both halves in one call because they are one operation: a JoinGroup
     /// without the SyncGroup that follows leaves the whole group blocked on a
     /// member that never finished joining.
+    ///
+    /// `owned` is what this member currently holds. It is what makes a
+    /// cooperative rebalance sticky, and it is ignored by the eager assignors —
+    /// which is correct, because an eager member has already given everything
+    /// up before it gets here.
     pub(crate) async fn join(
         &mut self,
         cluster: &Cluster,
         partitions_per_topic: &BTreeMap<String, i32>,
+        owned: &[(String, i32)],
     ) -> Result<Vec<(String, i32)>> {
-        let members = self.join_group(cluster).await?;
+        let members = self.join_group(cluster, owned).await?;
         self.sync_group(cluster, members, partitions_per_topic)
             .await
     }
 
-    async fn join_group(&mut self, cluster: &Cluster) -> Result<Vec<MemberSubscription>> {
-        let protocols: Vec<JoinGroupRequestProtocol> = SUPPORTED
+    async fn join_group(
+        &mut self,
+        cluster: &Cluster,
+        owned: &[(String, i32)],
+    ) -> Result<Vec<MemberSubscription>> {
+        let generation = self.generation_id;
+        let protocols: Vec<JoinGroupRequestProtocol> = self
+            .assignors
             .iter()
-            .map(|name| {
+            .map(|assignor| {
+                // Per-protocol metadata, which is what lets one JoinGroup offer
+                // an eager v0 payload and a cooperative v2 one in the same
+                // request. Whichever the coordinator picks, the payload that
+                // came with it is the one the leader reads.
+                let (version, owned) = if assignor.is_eager() {
+                    (PROTOCOL_VERSION, &[][..])
+                } else {
+                    (COOPERATIVE_PROTOCOL_VERSION, owned)
+                };
                 Ok(JoinGroupRequestProtocol::default()
-                    .with_name(StrBytes::from_static_str(name))
-                    .with_metadata(encode_subscription(&self.subscription)?))
+                    .with_name(StrBytes::from_static_str(assignor.name()))
+                    .with_metadata(encode_subscription(
+                        &self.subscription,
+                        owned,
+                        generation,
+                        version,
+                    )?))
             })
             .collect::<Result<_>>()?;
 
@@ -570,9 +1206,12 @@ impl ClassicMembership {
             .members
             .into_iter()
             .map(|member| {
+                let decoded = decode_subscription(member.metadata)?;
                 Ok(MemberSubscription {
                     member_id: member.member_id.to_string(),
-                    topics: decode_subscription(member.metadata)?,
+                    topics: decoded.topics,
+                    owned: decoded.owned,
+                    generation: decoded.generation,
                 })
             })
             .collect()
@@ -679,8 +1318,76 @@ mod wire_tests {
     /// them not.
     #[test]
     fn a_subscription_round_trips_through_the_real_schema() {
-        let encoded = encode_subscription(&["a".to_owned(), "b".to_owned()]).unwrap();
-        assert_eq!(decode_subscription(encoded).unwrap(), vec!["a", "b"]);
+        let encoded =
+            encode_subscription(&["a".to_owned(), "b".to_owned()], &[], -1, PROTOCOL_VERSION)
+                .unwrap();
+        let decoded = decode_subscription(encoded).unwrap();
+        assert_eq!(decoded.topics, vec!["a", "b"]);
+        assert!(decoded.owned.is_empty(), "v0 carries no owned partitions");
+    }
+
+    /// The cooperative payload, which is the one carrying the state a sticky
+    /// assignment is computed from. A v2 subscription that loses its
+    /// `owned_partitions` on the way out reads to the leader as a member that
+    /// owns nothing, and every partition moves on every rebalance.
+    #[test]
+    fn a_cooperative_subscription_carries_what_it_owns_and_when() {
+        let owned = [
+            ("t".to_owned(), 3),
+            ("t".to_owned(), 7),
+            ("u".to_owned(), 0),
+        ];
+        let encoded = encode_subscription(
+            &["t".to_owned(), "u".to_owned()],
+            &owned,
+            11,
+            COOPERATIVE_PROTOCOL_VERSION,
+        )
+        .unwrap();
+
+        assert_eq!(
+            &encoded[..2],
+            &COOPERATIVE_PROTOCOL_VERSION.to_be_bytes(),
+            "the prefix names the version the struct was encoded at"
+        );
+
+        let decoded = decode_subscription(encoded).unwrap();
+        assert_eq!(decoded.topics, vec!["t", "u"]);
+        assert_eq!(decoded.owned, owned.to_vec());
+        assert_eq!(decoded.generation, 11);
+    }
+
+    /// A payload from a client newer than the codec must not fail the group
+    /// over a field we never read.
+    ///
+    /// The schema is additive, so a future version is a v3 payload with more on
+    /// the end: decoding at the highest version we know reads every field we
+    /// care about and ignores the rest. This is what Java does with the same
+    /// problem, and the alternative — refusing — is one member of a newer
+    /// client version taking the whole group down.
+    #[test]
+    fn a_version_above_what_the_codec_knows_is_clamped_rather_than_refused() {
+        // A genuine v3 payload: topics, owned partitions, generation, rack.
+        let highest = <ConsumerProtocolSubscription as Message>::VERSIONS.max;
+        let subscription = ConsumerProtocolSubscription::default()
+            .with_topics(vec![StrBytes::from_static_str("t")])
+            .with_owned_partitions(vec![
+                OwnedPartition::default()
+                    .with_topic(TopicName(StrBytes::from_static_str("t")))
+                    .with_partitions(vec![2]),
+            ])
+            .with_generation_id(6)
+            .with_rack_id(Some(StrBytes::from_static_str("rack-1")));
+
+        let mut buf = bytes::BytesMut::new();
+        // Labelled as a version from a client we have never met.
+        buf.extend_from_slice(&(highest + 2).to_be_bytes());
+        subscription.encode(&mut buf, highest).unwrap();
+
+        let decoded = decode_subscription(buf.freeze()).unwrap();
+        assert_eq!(decoded.topics, vec!["t"]);
+        assert_eq!(decoded.owned, vec![("t".to_owned(), 2)]);
+        assert_eq!(decoded.generation, 6);
     }
 
     #[test]
@@ -712,7 +1419,7 @@ mod wire_tests {
     /// prefix — which is how this shipped broken.
     #[test]
     fn the_payload_carries_javas_two_byte_version_prefix() {
-        let encoded = encode_subscription(&["t".to_owned()]).unwrap();
+        let encoded = encode_subscription(&["t".to_owned()], &[], -1, PROTOCOL_VERSION).unwrap();
         assert_eq!(
             &encoded[..2],
             &PROTOCOL_VERSION.to_be_bytes(),

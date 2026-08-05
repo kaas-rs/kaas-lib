@@ -15,16 +15,27 @@
 )]
 
 use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use kafka_admin::{Admin, ClusterConfig, NewTopic};
-use kafka_consumer::{ConsumerConfig, GroupConsumer};
+use kafka_consumer::{ConsumerConfig, GroupConsumer, RevokedPartition};
 use kafka_produce::{Producer, ProducerConfig, ProducerRecord};
 use kafka_read::{Cluster, Visibility};
 use testkit::{Cluster as _, KafkaCluster};
 
 const TOPIC: &str = "group-848";
 const PARTITIONS: i32 = 12;
+
+/// One rebalance callback, as the listener saw it.
+#[derive(Debug, Clone)]
+enum Event {
+    Revoke(Vec<RevokedPartition>),
+    Assign(Vec<(String, i32)>),
+}
+
+/// The listener's log, shared with the test that asserts on it.
+type Events = Arc<Mutex<Vec<Event>>>;
 
 async fn setup() -> (KafkaCluster, Cluster) {
     let fixture = testkit::cluster(3).await.expect("cluster");
@@ -192,6 +203,155 @@ async fn a_departing_member_is_replaced_without_a_gap_or_a_duplicate() {
         usize::try_from(PARTITIONS).unwrap(),
         "the survivor must take over every partition the leaver held"
     );
+}
+
+/// The rebalance hook fires **before** the partitions go, with the positions
+/// they held, and the caller's flush lands ahead of the offset commit.
+///
+/// The ordering is the assertion. A hook that fires after the revocation is
+/// worth nothing: by then another member owns the partition and may already be
+/// writing, so a caller flushing its own state is racing somebody else.
+#[tokio::test]
+#[ignore = "needs Docker"]
+async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
+    const RECORDS: usize = 500;
+
+    let (_fixture, cluster) = setup().await;
+    let group = "group-848-listener";
+
+    let producer = Producer::new(cluster.clone(), ProducerConfig::new());
+    let mut pending = Vec::with_capacity(RECORDS);
+    for i in 0..RECORDS {
+        pending.push(
+            producer
+                .enqueue(ProducerRecord::new(TOPIC).value(format!("v{i}")))
+                .await
+                .expect("enqueued"),
+        );
+    }
+    for delivery in pending {
+        delivery.await.expect("delivered");
+    }
+
+    // What the listener saw, in the order it saw it.
+    let seen: Events = Arc::new(Mutex::new(Vec::new()));
+
+    struct Watcher {
+        seen: Events,
+    }
+
+    impl kafka_consumer::RebalanceListener for Watcher {
+        fn on_revoke(
+            &mut self,
+            revoked: Vec<RevokedPartition>,
+        ) -> futures::future::BoxFuture<'_, kafka_consumer::Result<()>> {
+            let seen = Arc::clone(&self.seen);
+            Box::pin(async move {
+                seen.lock().unwrap().push(Event::Revoke(revoked));
+                Ok(())
+            })
+        }
+
+        fn on_assign(
+            &mut self,
+            assigned: Vec<(String, i32)>,
+        ) -> futures::future::BoxFuture<'_, kafka_consumer::Result<()>> {
+            let seen = Arc::clone(&self.seen);
+            Box::pin(async move {
+                seen.lock().unwrap().push(Event::Assign(assigned));
+                Ok(())
+            })
+        }
+    }
+
+    let mut a = GroupConsumer::subscribe(cluster.clone(), config(), group, [TOPIC])
+        .await
+        .expect("a")
+        .on_rebalance(Watcher {
+            seen: Arc::clone(&seen),
+        });
+
+    // Read something, so the revoked partitions carry a position past zero.
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let mut read = 0;
+    while Instant::now() < deadline
+        && (a.assignment().len() != usize::try_from(PARTITIONS).unwrap() || read == 0)
+    {
+        read += a.poll().await.expect("a").len();
+    }
+    assert!(
+        read > 0,
+        "the member never read anything to have a position"
+    );
+
+    let gained: Vec<(String, i32)> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::Assign(assigned) => Some(assigned.clone()),
+            Event::Revoke(_) => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(
+        gained.len(),
+        usize::try_from(PARTITIONS).unwrap(),
+        "on_assign must report every partition the member gained"
+    );
+
+    // A second member forces a rebalance, which takes partitions away from the
+    // first. That is the revocation the hook exists for.
+    let mut b = GroupConsumer::subscribe(cluster.clone(), config(), group, [TOPIC])
+        .await
+        .expect("b");
+
+    let deadline = Instant::now() + Duration::from_secs(90);
+    while Instant::now() < deadline && a.assignment().len() == usize::try_from(PARTITIONS).unwrap()
+    {
+        a.poll().await.expect("a");
+        b.poll().await.expect("b");
+    }
+
+    let revoked: Vec<RevokedPartition> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::Revoke(revoked) => Some(revoked.clone()),
+            Event::Assign(_) => None,
+        })
+        .flatten()
+        .collect();
+    assert!(
+        !revoked.is_empty(),
+        "the hook never fired for a rebalance that plainly happened"
+    );
+
+    // The partitions it named are gone, and it was told while they were still
+    // ours — this is the ordering assertion.
+    let still_held: BTreeSet<(String, i32)> = a.assignment().into_iter().collect();
+    for partition in &revoked {
+        assert!(
+            !still_held.contains(&(partition.topic.clone(), partition.partition)),
+            "{}-{} was named as revoked but is still assigned",
+            partition.topic,
+            partition.partition
+        );
+        assert!(
+            partition.position >= 0,
+            "a revoked partition must carry the position it had reached"
+        );
+    }
+    assert!(
+        revoked.iter().any(|p| p.position > 0),
+        "positions were all zero, so the hook fired after the state was reset"
+    );
+
+    // And the offsets the group committed are consistent with what the hook was
+    // told: auto-commit runs *after* the callback, never before it.
+    let committed = b.commit().await.expect("commit");
+    assert!(committed.iter().all(|(_, result)| result.is_ok()));
 }
 
 /// A single member owns everything, and leaving is idempotent.
