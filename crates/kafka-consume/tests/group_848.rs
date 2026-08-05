@@ -37,66 +37,25 @@ enum Event {
 /// The listener's log, shared with the test that asserts on it.
 type Events = Arc<Mutex<Vec<Event>>>;
 
-/// The one cluster this binary's tests share.
-///
-/// Four tests booting four 3-node clusters is twelve KRaft brokers competing
-/// for one runner, each formatting storage and electing a quorum, to assert
-/// things that do not care whose broker they run on. One cluster serves all
-/// four — and the contention it removes is not incidental: starving twelve
-/// brokers is what made coordinator election slow enough to expose the bug
-/// this suite spent four CI runs chasing.
-///
-/// Never dropped, because a `static` is not. The containers are reaped by
-/// testcontainers' own sidecar, and on CI by the ephemeral runner pod; a
-/// local run may leave them until `docker container prune`.
-static SHARED: tokio::sync::OnceCell<Shared> = tokio::sync::OnceCell::const_new();
-
-struct Shared {
-    _fixture: KafkaCluster,
-    admin: Admin,
-    cluster: Cluster,
-}
-
-async fn shared() -> &'static Shared {
-    SHARED
-        .get_or_init(|| async {
-            let fixture = testkit::cluster(3).await.expect("cluster");
-            let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
-                .await
-                .expect("admin");
-            let cluster = admin.cluster().clone();
-            Shared {
-                _fixture: fixture,
-                admin,
-                cluster,
-            }
-        })
+async fn setup() -> (KafkaCluster, Cluster) {
+    let fixture = testkit::cluster(3).await.expect("cluster");
+    let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
         .await
-}
-
-/// A topic of this test's own on the shared cluster.
-///
-/// Required, not tidiness: these tests previously shared one topic because
-/// they had a cluster each. Two of them *produce* into it, and assertions
-/// here count records — sharing the cluster without splitting the topic
-/// would have every test reading its neighbours' writes.
-async fn setup(name: &str) -> (Cluster, String) {
-    let shared = shared().await;
-    let topic = format!("{TOPIC}-{name}");
-    shared
-        .admin
-        .create_topics([NewTopic::new(topic.clone(), PARTITIONS, 3)])
+        .expect("admin");
+    admin
+        .create_topics([NewTopic::new(TOPIC, PARTITIONS, 3)])
         .await
         .expect("topic");
     for _ in 0..50 {
-        if let Ok(results) = shared.admin.describe_topics([topic.clone()]).await
+        if let Ok(results) = admin.describe_topics([TOPIC.to_owned()]).await
             && results.iter().any(|(_, result)| result.is_ok())
         {
             break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    (shared.cluster.clone(), topic)
+    let cluster = admin.cluster().clone();
+    (fixture, cluster)
 }
 
 fn config() -> ConsumerConfig {
@@ -116,16 +75,16 @@ fn owned(members: &[&GroupConsumer]) -> Vec<BTreeSet<(String, i32)>> {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn three_consumers_cover_every_partition_exactly_once() {
-    let (cluster, topic) = setup("coverage").await;
+    let (_fixture, cluster) = setup().await;
     let group = "group-848-coverage";
 
-    let mut a = GroupConsumer::subscribe(cluster.clone(), config(), group, [topic.as_str()])
+    let mut a = GroupConsumer::subscribe(cluster.clone(), config(), group, [TOPIC])
         .await
         .expect("a");
-    let mut b = GroupConsumer::subscribe(cluster.clone(), config(), group, [topic.as_str()])
+    let mut b = GroupConsumer::subscribe(cluster.clone(), config(), group, [TOPIC])
         .await
         .expect("b");
-    let mut c = GroupConsumer::subscribe(cluster.clone(), config(), group, [topic.as_str()])
+    let mut c = GroupConsumer::subscribe(cluster.clone(), config(), group, [TOPIC])
         .await
         .expect("c");
 
@@ -180,7 +139,7 @@ async fn three_consumers_cover_every_partition_exactly_once() {
 async fn a_departing_member_is_replaced_without_a_gap_or_a_duplicate() {
     const RECORDS: usize = 3_000;
 
-    let (cluster, topic) = setup("rebalance").await;
+    let (_fixture, cluster) = setup().await;
     let group = "group-848-rebalance";
 
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
@@ -194,7 +153,7 @@ async fn a_departing_member_is_replaced_without_a_gap_or_a_duplicate() {
                     // by design — so the assertions below about *which*
                     // partitions carry a position were testing the
                     // partitioner's batching luck, not the rebalance.
-                    ProducerRecord::new(&topic)
+                    ProducerRecord::new(TOPIC)
                         .partition(i32::try_from(i).expect("fits") % PARTITIONS)
                         .value(format!("v{i}")),
                 )
@@ -206,10 +165,10 @@ async fn a_departing_member_is_replaced_without_a_gap_or_a_duplicate() {
         delivery.await.expect("delivered");
     }
 
-    let mut a = GroupConsumer::subscribe(cluster.clone(), config(), group, [topic.as_str()])
+    let mut a = GroupConsumer::subscribe(cluster.clone(), config(), group, [TOPIC])
         .await
         .expect("a");
-    let mut b = GroupConsumer::subscribe(cluster.clone(), config(), group, [topic.as_str()])
+    let mut b = GroupConsumer::subscribe(cluster.clone(), config(), group, [TOPIC])
         .await
         .expect("b");
 
@@ -278,7 +237,7 @@ async fn a_departing_member_is_replaced_without_a_gap_or_a_duplicate() {
 async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
     const RECORDS: usize = 500;
 
-    let (cluster, topic) = setup("listener").await;
+    let (_fixture, cluster) = setup().await;
     let group = "group-848-listener";
 
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
@@ -292,7 +251,7 @@ async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
                     // by design — so the assertions below about *which*
                     // partitions carry a position were testing the
                     // partitioner's batching luck, not the rebalance.
-                    ProducerRecord::new(&topic)
+                    ProducerRecord::new(TOPIC)
                         .partition(i32::try_from(i).expect("fits") % PARTITIONS)
                         .value(format!("v{i}")),
                 )
@@ -335,7 +294,7 @@ async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
         }
     }
 
-    let mut a = GroupConsumer::subscribe(cluster.clone(), config(), group, [topic.as_str()])
+    let mut a = GroupConsumer::subscribe(cluster.clone(), config(), group, [TOPIC])
         .await
         .expect("a")
         .on_rebalance(Watcher {
@@ -380,7 +339,7 @@ async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
 
     // A second member forces a rebalance, which takes partitions away from the
     // first. That is the revocation the hook exists for.
-    let mut b = GroupConsumer::subscribe(cluster.clone(), config(), group, [topic.as_str()])
+    let mut b = GroupConsumer::subscribe(cluster.clone(), config(), group, [TOPIC])
         .await
         .expect("b");
 
@@ -454,10 +413,10 @@ async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn one_member_owns_the_whole_topic_and_can_leave_twice() {
-    let (cluster, topic) = setup("single").await;
+    let (_fixture, cluster) = setup().await;
     let group = "group-848-single";
 
-    let mut only = GroupConsumer::subscribe(cluster.clone(), config(), group, [topic.as_str()])
+    let mut only = GroupConsumer::subscribe(cluster.clone(), config(), group, [TOPIC])
         .await
         .expect("subscribe");
 

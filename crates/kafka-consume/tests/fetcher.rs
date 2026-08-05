@@ -24,65 +24,27 @@ use kafka_produce::{Producer, ProducerConfig, ProducerRecord};
 use kafka_read::{Cluster, Visibility};
 use testkit::{Cluster as _, KafkaCluster};
 
-/// The one cluster this binary's tests share.
-///
-/// Four tests booting four 3-node clusters is twelve KRaft brokers competing
-/// for one runner to assert things that do not care whose broker they run on.
-///
-/// Never dropped, because a `static` is not: the containers go with the
-/// ephemeral runner pod on CI, and may want `docker container prune` locally.
-static SHARED: tokio::sync::OnceCell<Shared> = tokio::sync::OnceCell::const_new();
+const TOPIC_A: &str = "fetcher-a";
+const TOPIC_B: &str = "fetcher-b";
 
-struct Shared {
-    _fixture: KafkaCluster,
-    admin: Admin,
-    cluster: Cluster,
-}
-
-async fn shared() -> &'static Shared {
-    SHARED
-        .get_or_init(|| async {
-            let fixture = testkit::cluster(3).await.expect("cluster");
-            let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
-                .await
-                .expect("admin");
-            let cluster = admin.cluster().clone();
-            Shared {
-                _fixture: fixture,
-                admin,
-                cluster,
-            }
-        })
+async fn setup(topics: &[(&str, i32)]) -> (KafkaCluster, Cluster, Admin) {
+    let fixture = testkit::cluster(3).await.expect("cluster");
+    let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
         .await
-}
-
-/// Topics of this test's own, one per entry in `partitions`.
-///
-/// The naming is load-bearing beyond avoiding crosstalk. These tests all
-/// created `fetcher-a`, with **different partition counts** — six in two of
-/// them, two in the others — which was harmless while each had its own
-/// cluster. Sharing one, the first creation wins and every later test
-/// silently gets someone else's shape, so `pause`-ing partition 1 of a
-/// six-partition topic asserts nothing it means to.
-async fn setup(name: &str, partitions: &[i32]) -> (Cluster, Vec<String>) {
-    let shared = shared().await;
-    let topics: Vec<String> = (0..partitions.len())
-        .map(|i| format!("fetcher-{name}-{i}"))
-        .collect();
-    shared
-        .admin
+        .expect("admin");
+    admin
         .create_topics(
             topics
                 .iter()
-                .zip(partitions)
-                .map(|(topic, count)| NewTopic::new(topic.clone(), *count, 3)),
+                .map(|(name, partitions)| NewTopic::new(*name, *partitions, 3)),
         )
         .await
         .expect("topics");
-    for topic in &topics {
-        await_topic(&shared.admin, topic).await;
+    for (name, _) in topics {
+        await_topic(&admin, name).await;
     }
-    (shared.cluster.clone(), topics)
+    let cluster = admin.cluster().clone();
+    (fixture, cluster, admin)
 }
 
 async fn await_topic(admin: &Admin, topic: &str) {
@@ -155,16 +117,15 @@ async fn broker_ids(cluster: &Cluster) -> Vec<i32> {
 async fn twelve_partitions_across_two_topics_stream_in_order() {
     const PER_TOPIC: usize = 50_000;
 
-    let (cluster, topics) = setup("twelve", &[6, 6]).await;
-    let (topic_a, topic_b) = (topics[0].as_str(), topics[1].as_str());
-    produce(&cluster, topic_a, 6, PER_TOPIC).await;
-    produce(&cluster, topic_b, 6, PER_TOPIC).await;
+    let (_fixture, cluster, _admin) = setup(&[(TOPIC_A, 6), (TOPIC_B, 6)]).await;
+    produce(&cluster, TOPIC_A, 6, PER_TOPIC).await;
+    produce(&cluster, TOPIC_B, 6, PER_TOPIC).await;
 
     let mut consumer = Consumer::new(
         cluster.clone(),
         ConsumerConfig::new().visibility(Visibility::All),
     );
-    let assignment: Vec<(String, i32)> = [topic_a, topic_b]
+    let assignment: Vec<(String, i32)> = [TOPIC_A, TOPIC_B]
         .iter()
         .flat_map(|topic| (0..6).map(move |p| ((*topic).to_owned(), p)))
         .collect();
@@ -209,9 +170,8 @@ async fn twelve_partitions_across_two_topics_stream_in_order() {
 async fn a_steady_state_fetch_stops_re_sending_the_assignment() {
     const RECORDS: usize = 2_000;
 
-    let (cluster, topics) = setup("steady", &[6]).await;
-    let topic_a = topics[0].as_str();
-    produce(&cluster, topic_a, 6, RECORDS).await;
+    let (_fixture, cluster, _admin) = setup(&[(TOPIC_A, 6)]).await;
+    produce(&cluster, TOPIC_A, 6, RECORDS).await;
 
     let mut consumer = Consumer::new(
         cluster.clone(),
@@ -221,7 +181,7 @@ async fn a_steady_state_fetch_stops_re_sending_the_assignment() {
     );
     consumer
         .assign(
-            (0..6).map(|p| (topic_a.to_owned(), p)).collect::<Vec<_>>(),
+            (0..6).map(|p| (TOPIC_A.to_owned(), p)).collect::<Vec<_>>(),
             Position::Earliest,
         )
         .await
@@ -271,9 +231,8 @@ async fn a_steady_state_fetch_stops_re_sending_the_assignment() {
 async fn seek_pause_and_resume_change_the_stream_mid_flight() {
     const RECORDS: usize = 500;
 
-    let (cluster, topics) = setup("seek", &[2]).await;
-    let topic_a = topics[0].as_str();
-    produce(&cluster, topic_a, 2, RECORDS).await;
+    let (_fixture, cluster, _admin) = setup(&[(TOPIC_A, 2)]).await;
+    produce(&cluster, TOPIC_A, 2, RECORDS).await;
 
     let mut consumer = Consumer::new(
         cluster.clone(),
@@ -283,24 +242,21 @@ async fn seek_pause_and_resume_change_the_stream_mid_flight() {
     );
     consumer
         .assign(
-            vec![(topic_a.to_owned(), 0), (topic_a.to_owned(), 1)],
+            vec![(TOPIC_A.to_owned(), 0), (TOPIC_A.to_owned(), 1)],
             Position::Earliest,
         )
         .await
         .expect("assigned");
 
     // Pause partition 1: everything that arrives must be partition 0.
-    consumer.pause(topic_a, 1);
-    assert!(consumer.is_paused(topic_a, 1));
+    consumer.pause(TOPIC_A, 1);
+    assert!(consumer.is_paused(TOPIC_A, 1));
 
     // Stop once the unpaused partition has delivered *and* two further polls
-    // have added nothing: that is the evidence the assertion below needs, and
-    // it usually arrives in three or four polls.
-    //
-    // The fixed `0..10` this replaces could not exit early, and every poll
-    // past the point partition 0 drains costs a full `max_wait_ms` long-poll
-    // for a broker with nothing to say. The ceiling stays, so a partition
-    // that never delivers still fails rather than looping.
+    // have added nothing: the evidence the assertion needs, usually in three
+    // or four polls. The fixed ten could not exit early, and every poll past
+    // the drain cost a full `max_wait_ms` long-poll. The ceiling stays, so a
+    // partition that never delivers still fails.
     let mut seen: HashSet<i32> = HashSet::new();
     let mut quiet = 0;
     for _ in 0..10 {
@@ -328,8 +284,8 @@ async fn seek_pause_and_resume_change_the_stream_mid_flight() {
 
     // Resume it and it starts from where it was, not from the beginning of
     // whatever the other partition has reached.
-    consumer.resume(topic_a, 1);
-    assert!(!consumer.is_paused(topic_a, 1));
+    consumer.resume(TOPIC_A, 1);
+    assert!(!consumer.is_paused(TOPIC_A, 1));
     let mut resumed = false;
     for _ in 0..20 {
         if consumer
@@ -347,8 +303,8 @@ async fn seek_pause_and_resume_change_the_stream_mid_flight() {
 
     // Seek back to the start of partition 0 and the next records are its
     // earliest ones, not a continuation.
-    consumer.seek(topic_a, 0, 0).expect("seek");
-    assert_eq!(consumer.position(topic_a, 0), Some(0));
+    consumer.seek(TOPIC_A, 0, 0).expect("seek");
+    assert_eq!(consumer.position(TOPIC_A, 0), Some(0));
 
     let mut first_after_seek = None;
     for _ in 0..20 {
@@ -371,7 +327,7 @@ async fn seek_pause_and_resume_change_the_stream_mid_flight() {
 
     // Seeking a partition that is not assigned is a caller error, not a
     // silent no-op.
-    assert!(consumer.seek(topic_a, 99, 0).is_err());
+    assert!(consumer.seek(TOPIC_A, 99, 0).is_err());
 }
 
 /// Offsets for a consumer that is not a group member.
@@ -381,11 +337,10 @@ async fn a_non_member_can_commit_and_resume_from_its_commit() {
     const RECORDS: usize = 300;
     const GROUP: &str = "fetcher-non-member";
 
-    let (cluster, topics) = setup("commit", &[2]).await;
-    let topic_a = topics[0].as_str();
-    produce(&cluster, topic_a, 2, RECORDS).await;
+    let (_fixture, cluster, _admin) = setup(&[(TOPIC_A, 2)]).await;
+    produce(&cluster, TOPIC_A, 2, RECORDS).await;
 
-    let assignment = vec![(topic_a.to_owned(), 0), (topic_a.to_owned(), 1)];
+    let assignment = vec![(TOPIC_A.to_owned(), 0), (TOPIC_A.to_owned(), 1)];
     let config = ConsumerConfig::new()
         .visibility(Visibility::All)
         .max_wait_ms(100)

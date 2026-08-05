@@ -46,55 +46,36 @@ async fn produce(fixture: &KafkaCluster, topic: &str, from: u32, count: u32, cod
         .expect("produced");
 }
 
-/// The one cluster this binary's tests share.
-///
-/// Never dropped, because a `static` is not: the containers go with the
-/// ephemeral runner pod on CI, and may want `docker container prune` locally.
-static SHARED: tokio::sync::OnceCell<KafkaCluster> = tokio::sync::OnceCell::const_new();
-
-async fn shared_fixture() -> &'static KafkaCluster {
-    SHARED
-        .get_or_init(|| async { testkit::cluster(3).await.expect("cluster") })
-        .await
-}
-
-/// A topic of this test's own, with the partition count it asked for.
-///
-/// The name is load-bearing. Every test here created a topic called
-/// `scanned`, sized 6, 3 or 1 — harmless while each had its own cluster, and
-/// on a shared one the first creation wins and the rest scan a shape they
-/// never asked for.
-async fn setup(name: &str, partitions: i32) -> (&'static KafkaCluster, Cluster, String) {
-    let fixture = shared_fixture().await;
+async fn setup(partitions: i32) -> (KafkaCluster, Cluster, Admin) {
+    let fixture = testkit::cluster(3).await.expect("cluster");
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
         .await
         .expect("admin");
-    let topic = format!("scanned-{name}");
     admin
-        .create_topics([NewTopic::new(topic.clone(), partitions, 1)])
+        .create_topics([NewTopic::new("scanned", partitions, 1)])
         .await
         .expect("topic");
     let cluster = admin.cluster().clone();
-    (fixture, cluster, topic)
+    (fixture, cluster, admin)
 }
 
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn ten_thousand_records_across_six_partitions_with_mixed_codecs() {
-    let (fixture, cluster, topic) = setup("ten-thousand-recor", 6).await;
+    let (fixture, cluster, _admin) = setup(6).await;
 
     // 2000 records per codec, five codecs: 10k records, every compression the
     // protocol supports, all in one topic.
     let mut produced = 0u32;
     for codec in ["none", "gzip", "snappy", "lz4", "zstd"] {
-        produce(fixture, topic.as_str(), produced + 1, 2000, codec).await;
+        produce(&fixture, "scanned", produced + 1, 2000, codec).await;
         produced += 2000;
     }
 
     let mut stream = Box::pin(
         kafka_read::scan(
             &cluster,
-            ScanSpec::new(topic.as_str()).from(StartPosition::Earliest),
+            ScanSpec::new("scanned").from(StartPosition::Earliest),
         )
         .await
         .expect("scan starts"),
@@ -273,11 +254,11 @@ async fn truncating_a_fetch_mid_batch_produces_no_malformed_events() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn a_limited_scan_stops_early_and_a_filter_narrows_it() {
-    let (fixture, cluster, topic) = setup("a-limited-scan-sto", 1).await;
-    produce(fixture, topic.as_str(), 1, 1000, "none").await;
+    let (fixture, cluster, _admin) = setup(1).await;
+    produce(&fixture, "scanned", 1, 1000, "none").await;
 
     let mut stream = Box::pin(
-        kafka_read::scan(&cluster, ScanSpec::new(topic.as_str()).limit(10))
+        kafka_read::scan(&cluster, ScanSpec::new("scanned").limit(10))
             .await
             .unwrap(),
     );
@@ -291,7 +272,7 @@ async fn a_limited_scan_stops_early_and_a_filter_narrows_it() {
 
     let filtered = kafka_read::scan(
         &cluster,
-        ScanSpec::new(topic.as_str()).filter(kafka_read::RecordFilter::ValueContains(
+        ScanSpec::new("scanned").filter(kafka_read::RecordFilter::ValueContains(
             bytes::Bytes::from_static(b"999"),
         )),
     )
@@ -310,20 +291,20 @@ async fn a_limited_scan_stops_early_and_a_filter_narrows_it() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn a_scan_from_a_timestamp_skips_what_came_before() {
-    let (fixture, cluster, topic) = setup("a-scan-from-a-time", 1).await;
-    produce(fixture, topic.as_str(), 1, 500, "none").await;
+    let (fixture, cluster, _admin) = setup(1).await;
+    produce(&fixture, "scanned", 1, 500, "none").await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let cutoff = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0);
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    produce(fixture, topic.as_str(), 501, 500, "none").await;
+    produce(&fixture, "scanned", 501, 500, "none").await;
 
     let mut stream = Box::pin(
         kafka_read::scan(
             &cluster,
-            ScanSpec::new(topic.as_str()).from(StartPosition::Timestamp(cutoff)),
+            ScanSpec::new("scanned").from(StartPosition::Timestamp(cutoff)),
         )
         .await
         .unwrap(),
@@ -345,8 +326,8 @@ async fn a_scan_from_an_offset_never_emits_records_before_it() {
     // always filtered them; this asserts the forward path agrees. Without it,
     // "browse from offset 1000037" answers with 1000005 and the reader has no
     // way to tell that from an off-by-N in their own bookkeeping.
-    let (fixture, cluster, topic) = setup("a-scan-from-an-off", 1).await;
-    produce(fixture, topic.as_str(), 1, 5000, "none").await;
+    let (fixture, cluster, _admin) = setup(1).await;
+    produce(&fixture, "scanned", 1, 5000, "none").await;
 
     // Several starts, because whether one lands mid-batch depends on the
     // producer's batching — a single offset can pass by luck.
@@ -354,7 +335,7 @@ async fn a_scan_from_an_offset_never_emits_records_before_it() {
         let mut stream = Box::pin(
             kafka_read::scan(
                 &cluster,
-                ScanSpec::new(topic.as_str())
+                ScanSpec::new("scanned")
                     .partitions([0])
                     .from(StartPosition::Offset(start))
                     .limit(20),
@@ -389,13 +370,13 @@ async fn a_following_scan_waits_at_the_log_end_and_sees_what_arrives_next() {
     // already standing on and finishes immediately having emitted nothing —
     // which looks exactly like a working live view of an idle topic, and is
     // not one.
-    let (fixture, cluster, topic) = setup("a-following-scan-w", 3).await;
-    produce(fixture, topic.as_str(), 1, 100, "none").await;
+    let (fixture, cluster, _admin) = setup(3).await;
+    produce(&fixture, "scanned", 1, 100, "none").await;
 
     let mut stream = Box::pin(
         kafka_read::scan(
             &cluster,
-            ScanSpec::new(topic.as_str())
+            ScanSpec::new("scanned")
                 .from(StartPosition::Latest)
                 .following(),
         )
@@ -412,7 +393,7 @@ async fn a_following_scan_waits_at_the_log_end_and_sees_what_arrives_next() {
         idle.map(|event| event.map(|e| e.map(|_| ())))
     );
 
-    produce(fixture, topic.as_str(), 101, 20, "none").await;
+    produce(&fixture, "scanned", 101, 20, "none").await;
 
     let mut seen = 0;
     while seen < 20 {
@@ -436,13 +417,13 @@ async fn following_does_not_stall_behind_an_idle_partition() {
     // before emitting anything pays one `max_wait_ms` per record. On a topic
     // where one partition is busy and the rest are silent — the normal case —
     // that is a couple of records a second, which reads as a hung UI.
-    let (fixture, cluster, topic) = setup("following-does-not", 6).await;
-    produce(fixture, topic.as_str(), 1, 60, "none").await;
+    let (fixture, cluster, _admin) = setup(6).await;
+    produce(&fixture, "scanned", 1, 60, "none").await;
 
     let mut stream = Box::pin(
         kafka_read::scan(
             &cluster,
-            ScanSpec::new(topic.as_str())
+            ScanSpec::new("scanned")
                 .from(StartPosition::Earliest)
                 .following(),
         )
@@ -473,12 +454,12 @@ async fn following_does_not_stall_behind_an_idle_partition() {
 async fn dropping_a_following_scan_stops_it() {
     // The same cancel-safety property as a bounded scan, on the stream that
     // actually stays open long enough for a leak to matter.
-    let (fixture, cluster, topic) = setup("dropping-a-followi", 3).await;
-    produce(fixture, topic.as_str(), 1, 500, "none").await;
+    let (fixture, cluster, _admin) = setup(3).await;
+    produce(&fixture, "scanned", 1, 500, "none").await;
 
     for _ in 0..2 {
         let mut stream = Box::pin(
-            kafka_read::scan(&cluster, ScanSpec::new(topic.as_str()).following())
+            kafka_read::scan(&cluster, ScanSpec::new("scanned").following())
                 .await
                 .unwrap(),
         );
@@ -490,7 +471,7 @@ async fn dropping_a_following_scan_stops_it() {
     let before = cluster.pool().live_connections().await;
     {
         let mut stream = Box::pin(
-            kafka_read::scan(&cluster, ScanSpec::new(topic.as_str()).following())
+            kafka_read::scan(&cluster, ScanSpec::new("scanned").following())
                 .await
                 .unwrap(),
         );
@@ -507,8 +488,8 @@ async fn dropping_a_scan_stops_it() {
     // Cancel safety, at the scan level. The stream does its own work as it is
     // polled, so dropping it must free everything immediately rather than
     // leaving a task filling a channel nobody reads.
-    let (fixture, cluster, topic) = setup("dropping-a-scan-st", 3).await;
-    produce(fixture, topic.as_str(), 1, 5000, "none").await;
+    let (fixture, cluster, _admin) = setup(3).await;
+    produce(&fixture, "scanned", 1, 5000, "none").await;
 
     // Warm the pool first. A scan legitimately opens a connection to each
     // partition leader, and the pool keeps them — that is reuse working, not a
@@ -517,7 +498,7 @@ async fn dropping_a_scan_stops_it() {
     // scan does not add any more.
     for _ in 0..2 {
         let mut stream = Box::pin(
-            kafka_read::scan(&cluster, ScanSpec::new(topic.as_str()))
+            kafka_read::scan(&cluster, ScanSpec::new("scanned"))
                 .await
                 .unwrap(),
         );
@@ -529,7 +510,7 @@ async fn dropping_a_scan_stops_it() {
     let before = cluster.pool().live_connections().await;
     {
         let mut stream = Box::pin(
-            kafka_read::scan(&cluster, ScanSpec::new(topic.as_str()))
+            kafka_read::scan(&cluster, ScanSpec::new("scanned"))
                 .await
                 .unwrap(),
         );

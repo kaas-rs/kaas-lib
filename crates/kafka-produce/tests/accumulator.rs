@@ -26,45 +26,18 @@ use kafka_produce::{Compression, Producer, ProducerConfig, ProducerRecord};
 use kafka_read::{Cluster, ScanEvent, ScanSpec, StartPosition};
 use testkit::{Cluster as _, KafkaCluster};
 
-/// The one cluster this binary's tests share.
-///
-/// Each test already names its own topic, so nothing here needed splitting —
-/// only the clusters, which were one 3-node fixture per test to assert things
-/// that do not care whose broker they run on.
-///
-/// Never dropped, because a `static` is not: the containers go with the
-/// ephemeral runner pod on CI, and may want `docker container prune` locally.
-static SHARED: tokio::sync::OnceCell<Shared> = tokio::sync::OnceCell::const_new();
-
-struct Shared {
-    _fixture: KafkaCluster,
-    admin: Admin,
-}
-
-async fn shared() -> &'static Shared {
-    SHARED
-        .get_or_init(|| async {
-            let fixture = testkit::cluster(3).await.expect("cluster");
-            let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
-                .await
-                .expect("admin");
-            Shared {
-                _fixture: fixture,
-                admin,
-            }
-        })
+async fn setup(topic: &str, partitions: i32) -> (KafkaCluster, Cluster, Admin) {
+    let fixture = testkit::cluster(3).await.expect("cluster");
+    let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
         .await
-}
-
-async fn setup(topic: &str, partitions: i32) -> (Cluster, Admin) {
-    let shared = shared().await;
-    shared
-        .admin
+        .expect("admin");
+    admin
         .create_topics([NewTopic::new(topic, partitions, 3)])
         .await
         .expect("topic");
-    await_topic(&shared.admin, topic).await;
-    (shared.admin.cluster().clone(), shared.admin.clone())
+    await_topic(&admin, topic).await;
+    let cluster = admin.cluster().clone();
+    (fixture, cluster, admin)
 }
 
 /// Creation is asynchronous on the broker; produce before the leader is
@@ -182,7 +155,7 @@ async fn fifty_thousand_records_arrive_in_under_five_hundred_requests() {
     const PARTITIONS: i32 = 6;
     const RECORDS: usize = 50_000;
 
-    let (cluster, _admin) = setup(TOPIC, PARTITIONS).await;
+    let (_fixture, cluster, _admin) = setup(TOPIC, PARTITIONS).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
 
     // Captured once and reused for both ends of the measurement — see
@@ -261,7 +234,7 @@ async fn one_oversized_record_among_a_thousand_fails_alone() {
     const RECORDS: usize = 1_000;
     const LIMIT: usize = 4 * 1024;
 
-    let (cluster, _admin) = setup(TOPIC, 3).await;
+    let (_fixture, cluster, _admin) = setup(TOPIC, 3).await;
     let producer = Producer::new(
         cluster.clone(),
         ProducerConfig::new().max_request_size(LIMIT),
@@ -323,7 +296,7 @@ async fn every_codec_round_trips_a_whole_batch() {
         (Compression::Lz4, "accumulator-lz4"),
         (Compression::Zstd, "accumulator-zstd"),
     ] {
-        let (cluster, _admin) = setup(topic, PARTITIONS).await;
+        let (_fixture, cluster, _admin) = setup(topic, PARTITIONS).await;
         let producer = Producer::new(cluster.clone(), ProducerConfig::new().compression(codec));
 
         let mut pending = Vec::with_capacity(RECORDS);
@@ -356,7 +329,7 @@ async fn flush_waits_for_records_nobody_awaited() {
     const TOPIC: &str = "accumulator-flush";
     const RECORDS: usize = 5_000;
 
-    let (cluster, _admin) = setup(TOPIC, 3).await;
+    let (_fixture, cluster, _admin) = setup(TOPIC, 3).await;
     // A linger long enough that nothing would be sent on its own within the
     // test: if flush did not force the open batches out, the read-back is
     // empty rather than merely late.
@@ -394,7 +367,7 @@ async fn a_tiny_buffer_applies_backpressure_rather_than_dropping_records() {
     const TOPIC: &str = "accumulator-backpressure";
     const RECORDS: usize = 10_000;
 
-    let (cluster, _admin) = setup(TOPIC, 3).await;
+    let (_fixture, cluster, _admin) = setup(TOPIC, 3).await;
     let producer = Producer::new(
         cluster.clone(),
         // 64 KiB of buffer for roughly 400 KiB of records: every enqueue past
@@ -428,7 +401,7 @@ async fn records_keep_their_order_within_a_partition() {
     const TOPIC: &str = "accumulator-order";
     const RECORDS: usize = 20_000;
 
-    let (cluster, _admin) = setup(TOPIC, 1).await;
+    let (_fixture, cluster, _admin) = setup(TOPIC, 1).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
 
     let mut pending = Vec::with_capacity(RECORDS);

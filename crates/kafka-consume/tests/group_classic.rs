@@ -27,38 +27,17 @@ use testkit::{Cluster as _, KafkaCluster};
 const TOPIC: &str = "group-classic";
 const PARTITIONS: i32 = 12;
 
-/// The one cluster this binary's tests share.
-///
-/// Five tests booting five 3-node clusters is fifteen KRaft brokers, plus the
-/// Java console consumers two of them start, on one runner.
-///
-/// Never dropped, because a `static` is not: the containers go with the
-/// ephemeral runner pod on CI, and may want `docker container prune` locally.
-static SHARED: tokio::sync::OnceCell<KafkaCluster> = tokio::sync::OnceCell::const_new();
-
-async fn shared_fixture() -> &'static KafkaCluster {
-    SHARED
-        .get_or_init(|| async { testkit::cluster(3).await.expect("cluster") })
-        .await
-}
-
-/// A seeded topic of this test's own on the shared cluster.
-///
-/// Per-test, because these tests all used one `group-classic` and each had a
-/// cluster to itself. Sharing one, the 600 seeded records would be read by
-/// whoever got there first.
-async fn setup(name: &str) -> (&'static KafkaCluster, String) {
-    let fixture = shared_fixture().await;
-    let topic = format!("{TOPIC}-{name}");
+async fn setup() -> KafkaCluster {
+    let fixture = testkit::cluster(3).await.expect("cluster");
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
         .await
         .expect("admin");
     admin
-        .create_topics([NewTopic::new(topic.clone(), PARTITIONS, 3)])
+        .create_topics([NewTopic::new(TOPIC, PARTITIONS, 3)])
         .await
         .expect("topic");
     for _ in 0..50 {
-        if let Ok(results) = admin.describe_topics([topic.clone()]).await
+        if let Ok(results) = admin.describe_topics([TOPIC.to_owned()]).await
             && results.iter().any(|(_, r)| r.is_ok())
         {
             break;
@@ -69,11 +48,11 @@ async fn setup(name: &str) -> (&'static KafkaCluster, String) {
     let producer = Producer::new(admin.cluster().clone(), ProducerConfig::new());
     for i in 0..600 {
         producer
-            .send(ProducerRecord::new(&topic).value(format!("v{i}")))
+            .send(ProducerRecord::new(TOPIC).value(format!("v{i}")))
             .await
             .expect("seed");
     }
-    (fixture, topic)
+    fixture
 }
 
 fn config() -> ConsumerConfig {
@@ -85,14 +64,14 @@ fn config() -> ConsumerConfig {
 /// Each member needs its own cluster handle — `JoinGroup` blocks and the broker
 /// mutes a connection while a request is in flight, so members sharing one
 /// deadlock. See `kafka_consume::classic`.
-async fn member(fixture: &KafkaCluster, topic: &str, group: &str) -> ClassicConsumer {
+async fn member(fixture: &KafkaCluster, group: &str) -> ClassicConsumer {
     let cluster = kafka_meta::Cluster::connect(
         fixture.bootstrap().to_vec(),
         kafka_meta::ClusterConfig::default(),
     )
     .await
     .expect("cluster");
-    ClassicConsumer::subscribe(cluster, config(), group, [topic])
+    ClassicConsumer::subscribe(cluster, config(), group, [TOPIC])
         .await
         .expect("subscribe")
 }
@@ -101,11 +80,11 @@ async fn member(fixture: &KafkaCluster, topic: &str, group: &str) -> ClassicCons
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn two_members_cover_every_partition_exactly_once() {
-    let (fixture, topic) = setup("coverage").await;
+    let fixture = setup().await;
     let group = "classic-coverage";
 
-    let mut a = member(fixture, &topic, group).await;
-    let mut b = member(fixture, &topic, group).await;
+    let mut a = member(&fixture, group).await;
+    let mut b = member(&fixture, group).await;
 
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
@@ -151,7 +130,7 @@ async fn two_members_cover_every_partition_exactly_once() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn a_mixed_rust_and_java_group_shares_the_topic() {
-    let (fixture, topic) = setup("mixed").await;
+    let fixture = setup().await;
     let group = "classic-mixed";
 
     // The Java side, in the container, pinned to the classic protocol and to
@@ -164,7 +143,7 @@ async fn a_mixed_rust_and_java_group_shares_the_topic() {
                 "-c".to_owned(),
                 format!(
                     "nohup /opt/kafka/bin/kafka-console-consumer.sh \
-                       --bootstrap-server {bootstrap} --topic {topic} --group {group} \
+                       --bootstrap-server {bootstrap} --topic {TOPIC} --group {group} \
                        --consumer-property group.protocol=classic \
                        --consumer-property partition.assignment.strategy=\
 org.apache.kafka.clients.consumer.RangeAssignor \
@@ -181,7 +160,7 @@ org.apache.kafka.clients.consumer.RangeAssignor \
     // exists and our subscription is decoded by somebody else.
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    let mut ours = member(fixture, &topic, group).await;
+    let mut ours = member(&fixture, group).await;
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline && ours.assignment().is_empty() {
         ours.poll().await.expect("poll");
@@ -231,7 +210,7 @@ org.apache.kafka.clients.consumer.RangeAssignor \
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn a_cooperative_group_forms_with_a_java_member() {
-    let (fixture, topic) = setup("cooperative").await;
+    let fixture = setup().await;
     let group = "classic-cooperative";
 
     let java = fixture
@@ -242,7 +221,7 @@ async fn a_cooperative_group_forms_with_a_java_member() {
                 "-c".to_owned(),
                 format!(
                     "nohup /opt/kafka/bin/kafka-console-consumer.sh \
-                       --bootstrap-server {bootstrap} --topic {topic} --group {group} \
+                       --bootstrap-server {bootstrap} --topic {TOPIC} --group {group} \
                        --consumer-property group.protocol=classic \
                        --consumer-property partition.assignment.strategy=\
 org.apache.kafka.clients.consumer.CooperativeStickyAssignor \
@@ -263,7 +242,7 @@ org.apache.kafka.clients.consumer.CooperativeStickyAssignor \
     )
     .await
     .expect("cluster");
-    let mut ours = ClassicConsumer::subscribe(cluster, config(), group, [topic.as_str()])
+    let mut ours = ClassicConsumer::subscribe(cluster, config(), group, [TOPIC])
         .await
         .expect("subscribe")
         // Advertising only this one makes the intersection a single protocol:
@@ -300,23 +279,23 @@ org.apache.kafka.clients.consumer.CooperativeStickyAssignor \
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn a_cooperative_rebalance_keeps_what_it_can() {
-    let (fixture, topic) = setup("pair").await;
+    let fixture = setup().await;
     let group = "classic-cooperative-pair";
 
-    async fn cooperative(fixture: &KafkaCluster, topic: &str, group: &str) -> ClassicConsumer {
+    async fn cooperative(fixture: &KafkaCluster, group: &str) -> ClassicConsumer {
         let cluster = kafka_meta::Cluster::connect(
             fixture.bootstrap().to_vec(),
             kafka_meta::ClusterConfig::default(),
         )
         .await
         .expect("cluster");
-        ClassicConsumer::subscribe(cluster, config(), group, [topic])
+        ClassicConsumer::subscribe(cluster, config(), group, [TOPIC])
             .await
             .expect("subscribe")
             .assignors([Assignor::CooperativeSticky])
     }
 
-    let mut a = cooperative(fixture, &topic, group).await;
+    let mut a = cooperative(&fixture, group).await;
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && a.assignment().len() != usize::try_from(PARTITIONS).unwrap()
     {
@@ -327,7 +306,7 @@ async fn a_cooperative_rebalance_keeps_what_it_can() {
 
     // A second member arrives. Half the partitions must move; the other half
     // must not.
-    let mut b = cooperative(fixture, &topic, group).await;
+    let mut b = cooperative(&fixture, group).await;
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline {
         let (ra, rb) = tokio::join!(a.poll(), b.poll());
@@ -373,7 +352,7 @@ async fn a_cooperative_rebalance_keeps_what_it_can() {
 #[tokio::test]
 #[ignore = "needs Docker"]
 async fn a_static_member_does_not_trigger_a_rebalance_on_restart() {
-    let (fixture, topic) = setup("static").await;
+    let fixture = setup().await;
     let group = "classic-static";
 
     let cluster = kafka_meta::Cluster::connect(
@@ -382,7 +361,7 @@ async fn a_static_member_does_not_trigger_a_rebalance_on_restart() {
     )
     .await
     .expect("cluster");
-    let mut first = ClassicConsumer::subscribe(cluster, config(), group, [topic.as_str()])
+    let mut first = ClassicConsumer::subscribe(cluster, config(), group, [TOPIC])
         .await
         .expect("subscribe")
         .instance_id("static-1");
@@ -408,7 +387,7 @@ async fn a_static_member_does_not_trigger_a_rebalance_on_restart() {
     )
     .await
     .expect("cluster");
-    let mut restarted = ClassicConsumer::subscribe(cluster, config(), group, [topic.as_str()])
+    let mut restarted = ClassicConsumer::subscribe(cluster, config(), group, [TOPIC])
         .await
         .expect("subscribe")
         .instance_id("static-1");

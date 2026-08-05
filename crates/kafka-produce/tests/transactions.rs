@@ -22,45 +22,18 @@ use kafka_produce::{Producer, ProducerConfig, ProducerRecord};
 use kafka_read::{Cluster, ScanEvent, ScanSpec, StartPosition, Visibility};
 use testkit::{Cluster as _, KafkaCluster};
 
-/// The one cluster this binary's tests share.
-///
-/// Each test already names its own topic, so nothing here needed splitting —
-/// only the clusters, which were one 3-node fixture per test to assert things
-/// that do not care whose broker they run on.
-///
-/// Never dropped, because a `static` is not: the containers go with the
-/// ephemeral runner pod on CI, and may want `docker container prune` locally.
-static SHARED: tokio::sync::OnceCell<Shared> = tokio::sync::OnceCell::const_new();
-
-struct Shared {
-    _fixture: KafkaCluster,
-    admin: Admin,
-}
-
-async fn shared() -> &'static Shared {
-    SHARED
-        .get_or_init(|| async {
-            let fixture = testkit::cluster(3).await.expect("cluster");
-            let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
-                .await
-                .expect("admin");
-            Shared {
-                _fixture: fixture,
-                admin,
-            }
-        })
+async fn setup(topic: &str) -> (KafkaCluster, Cluster, Admin) {
+    let fixture = testkit::cluster(3).await.expect("cluster");
+    let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
         .await
-}
-
-async fn setup(topic: &str) -> (Cluster, Admin) {
-    let shared = shared().await;
-    shared
-        .admin
+        .expect("admin");
+    admin
         .create_topics([NewTopic::new(topic, 1, 3)])
         .await
         .expect("topic");
-    await_topic(&shared.admin, topic).await;
-    (shared.admin.cluster().clone(), shared.admin.clone())
+    await_topic(&admin, topic).await;
+    let cluster = admin.cluster().clone();
+    (fixture, cluster, admin)
 }
 
 async fn await_topic(admin: &Admin, topic: &str) {
@@ -123,7 +96,7 @@ async fn a_committed_transaction_is_visible_and_an_aborted_one_is_not() {
     const TOPIC: &str = "txn-visibility";
     const RECORDS: usize = 100;
 
-    let (cluster, _admin) = setup(TOPIC).await;
+    let (_fixture, cluster, _admin) = setup(TOPIC).await;
     let producer = Producer::new(
         cluster.clone(),
         ProducerConfig::new().transactional_id("txn-visibility-1"),
@@ -170,7 +143,7 @@ async fn a_fenced_producer_fails_terminally_rather_than_retrying() {
     const TOPIC: &str = "txn-fencing";
     const ID: &str = "txn-fencing-shared";
 
-    let (cluster, _admin) = setup(TOPIC).await;
+    let (_fixture, cluster, _admin) = setup(TOPIC).await;
 
     let first = Producer::new(cluster.clone(), ProducerConfig::new().transactional_id(ID));
     first.init_transactions().await.expect("first init");
@@ -220,7 +193,7 @@ async fn a_fenced_producer_fails_terminally_rather_than_retrying() {
 async fn the_transaction_api_refuses_an_impossible_order() {
     const TOPIC: &str = "txn-order";
 
-    let (cluster, _admin) = setup(TOPIC).await;
+    let (_fixture, cluster, _admin) = setup(TOPIC).await;
 
     // No transactional id at all.
     let plain = Producer::new(cluster.clone(), ProducerConfig::new());
