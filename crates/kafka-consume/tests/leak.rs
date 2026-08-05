@@ -39,6 +39,10 @@ const CYCLES: usize = 1_000;
 
 async fn setup() -> (KafkaCluster, Cluster) {
     let fixture = testkit::single_broker().await.expect("broker");
+    fixture
+        .wait_for_group_coordinator(Duration::from_secs(60))
+        .await
+        .expect("group coordinator");
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
         .await
         .expect("admin");

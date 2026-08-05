@@ -29,6 +29,10 @@ const TOPIC_B: &str = "fetcher-b";
 
 async fn setup(topics: &[(&str, i32)]) -> (KafkaCluster, Cluster, Admin) {
     let fixture = testkit::cluster(3).await.expect("cluster");
+    fixture
+        .wait_for_group_coordinator(Duration::from_secs(60))
+        .await
+        .expect("group coordinator");
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
         .await
         .expect("admin");

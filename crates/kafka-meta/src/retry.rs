@@ -19,6 +19,23 @@ pub struct RetryPolicy {
     pub max_delay: Duration,
     /// Fraction of the delay to randomise, `0.0..=1.0`.
     pub jitter: f64,
+    /// How long to keep retrying an error that says the coordinator moved or
+    /// has not finished loading — `NOT_COORDINATOR`,
+    /// `COORDINATOR_NOT_AVAILABLE`, `COORDINATOR_LOAD_IN_PROGRESS`.
+    ///
+    /// A **deadline** rather than an attempt count, because this class of
+    /// error is not "the request failed" but "ask again in a moment": the
+    /// group is being handed to a new coordinator, or `__consumer_offsets` is
+    /// still being read. How many attempts that takes is a function of the
+    /// backoff curve, not of the cluster; how long it takes is a property of
+    /// the cluster.
+    ///
+    /// [`max_attempts`](Self::max_attempts) governs it otherwise, and five
+    /// attempts is ~1.5s at the default curve — shorter than a routine
+    /// coordinator election, so a caller saw a raw `NOT_COORDINATOR` for
+    /// something that resolves itself. Java bounds the same case by
+    /// `default.api.timeout.ms`, 60s.
+    pub coordinator_timeout: Duration,
 }
 
 impl Default for RetryPolicy {
@@ -28,15 +45,25 @@ impl Default for RetryPolicy {
             base_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(5),
             jitter: 0.3,
+            // Half Java's, because this library backs a UI: long enough to
+            // ride out an election or a cold `__consumer_offsets`, short
+            // enough that a genuinely coordinator-less cluster still reports
+            // something before a person gives up on the page.
+            coordinator_timeout: Duration::from_secs(30),
         }
     }
 }
 
 impl RetryPolicy {
     /// Never retry — for callers that would rather see the first failure.
+    ///
+    /// Zeroes the coordinator deadline too: "never retry" has to mean it on
+    /// both axes, or a caller that asked for the first failure still waits
+    /// half a minute for a coordinator one.
     pub fn none() -> Self {
         Self {
             max_attempts: 1,
+            coordinator_timeout: Duration::ZERO,
             ..Self::default()
         }
     }
@@ -94,6 +121,33 @@ mod tests {
         // And is capped rather than growing without bound.
         assert_eq!(policy.delay(20), policy.max_delay);
         assert_eq!(policy.delay(u32::MAX), policy.max_delay);
+    }
+
+    /// The regression this field exists for: at the default curve the attempt
+    /// budget expires about a second and a half in, which is shorter than a
+    /// routine coordinator election, so a caller saw a raw `NOT_COORDINATOR`
+    /// for something that resolves itself. Asserted against the *sum* of the
+    /// backoff rather than a hand-copied number, so a change to the curve
+    /// re-checks the premise instead of silently invalidating it.
+    #[test]
+    fn the_attempt_budget_is_far_shorter_than_a_coordinator_election() {
+        let policy = RetryPolicy {
+            jitter: 0.0,
+            ..RetryPolicy::default()
+        };
+        let spent: Duration = (1..=policy.max_attempts).map(|a| policy.delay(a)).sum();
+        assert_eq!(spent, Duration::from_millis(1_500));
+        assert!(
+            policy.coordinator_timeout > spent * 10,
+            "coordinator errors need a budget of a different order, not a bigger attempt count"
+        );
+    }
+
+    /// "Never retry" has to mean it on both axes.
+    #[test]
+    fn none_zeroes_the_coordinator_deadline_too() {
+        assert_eq!(RetryPolicy::none().coordinator_timeout, Duration::ZERO);
+        assert!(!RetryPolicy::none().should_retry(1));
     }
 
     #[test]

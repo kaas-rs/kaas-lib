@@ -18,8 +18,10 @@ permissions:
 # and this repo is public — a fork PR is arbitrary code from a stranger.
 # So `rust` and `docs`, the two jobs wired to `pull_request`, pick their
 # runner per event: forks go to GitHub-hosted, everything else to ARC.
-# The remaining jobs are `workflow_dispatch`-only and can't be reached by
-# a fork at all, so they name the scale set directly.
+# The remaining jobs never run on `pull_request`, so a fork cannot reach
+# them and they name the scale set directly. `integration` also runs on
+# push to `main`, which is likewise unreachable from a fork: a push event
+# requires write access, and the trigger above is branch-limited.
 #
 # `github.event.pull_request` is null for push/dispatch, so the expression
 # falls through to ARC for those.
@@ -112,15 +114,26 @@ jobs:
         run: cargo test --workspace
 
   # The `#[ignore]`d acceptance tests. Every one boots a real broker via
-  # testcontainers, so this is minutes rather than seconds — manual for
-  # now. Promote it to `push` once M0 lands and the runtime is known.
+  # testcontainers, so this is minutes rather than seconds — but it runs on
+  # every push to `main`, not on dispatch alone.
+  #
+  # It was dispatch-only from M0, with a comment promising to promote it
+  # "once M0 lands and the runtime is known". Nineteen milestones later it
+  # was still dispatch-only, so every push went green having run fmt,
+  # clippy and unit tests and nothing else. The whole consumer suite —
+  # M16 through M19 — had therefore never executed in CI, and the first
+  # time it did was the v0.3.0 release gate: on a tag, minutes from an
+  # irreversible publish. A gate nobody runs is not a gate.
+  #
+  # Not `pull_request`: that is the fork-safety line drawn above, and it
+  # stays where it is.
   #
   # Docker comes from the ARC DinD sidecar, not the host: the pod sets
   # DOCKER_HOST=unix:///var/run/docker.sock and testcontainers picks it up
   # with no extra config. The sidecar is not ready the instant the runner
   # container starts, hence the wait below.
   integration:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: arc-runner-set-lib
     steps:
       - name: Wait for Docker daemon (DinD sidecar)

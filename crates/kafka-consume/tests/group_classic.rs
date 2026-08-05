@@ -29,6 +29,10 @@ const PARTITIONS: i32 = 12;
 
 async fn setup() -> KafkaCluster {
     let fixture = testkit::cluster(3).await.expect("cluster");
+    fixture
+        .wait_for_group_coordinator(Duration::from_secs(60))
+        .await
+        .expect("group coordinator");
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
         .await
         .expect("admin");

@@ -172,23 +172,41 @@ impl Cluster {
     /// a *fresh* cluster returns, because `__consumer_offsets` is created
     /// lazily on first use and has no leader for a moment afterwards. Without
     /// a retry the first group lookup against a new cluster is a hard error
-    /// for a condition that clears itself in about a second.
+    /// for a condition that clears itself.
+    ///
+    /// "About a second", this used to say, and the attempt budget was sized
+    /// for that. On a three-node cluster with 50 offset partitions to elect
+    /// leaders for it is not about a second, and every KIP-848 acceptance
+    /// test failed on `NOT_COORDINATOR` the first time the suite ran
+    /// somewhere slower than a laptop. So the wait is bounded by
+    /// [`RetryPolicy::coordinator_timeout`] here exactly as it is in
+    /// `dispatch`: this is the same event, one round trip earlier.
     pub async fn coordinator(&self, kind: CoordinatorKind, key: &str) -> Result<i32> {
         let policy = self.inner.config.retry;
+        let started = std::time::Instant::now();
         let mut attempt = 1;
         loop {
             let delay = policy.delay(attempt);
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
             }
-            match self.coordinator_once(kind, key).await {
+
+            let error = match self.coordinator_once(kind, key).await {
                 Ok(node) => return Ok(node),
-                Err(error) if error.retriable() && policy.should_retry(attempt) => {
-                    tracing::debug!(?kind, key, attempt, %error, "retrying FindCoordinator");
-                    attempt = attempt.saturating_add(1);
-                }
-                Err(error) => return Err(error),
+                Err(error) => error,
+            };
+
+            let budget_left = if error.needs_coordinator_refresh() {
+                started.elapsed() < policy.coordinator_timeout
+            } else {
+                policy.should_retry(attempt)
+            };
+
+            if !error.retriable() || !budget_left {
+                return Err(error);
             }
+            tracing::debug!(?kind, key, attempt, %error, "retrying FindCoordinator");
+            attempt = attempt.saturating_add(1);
         }
     }
 
@@ -346,6 +364,7 @@ impl Cluster {
     /// The retry loop: resolve a broker, send, and decide what a failure means.
     async fn dispatch<R: Rpc + Clone>(&self, target: Target, request: R) -> Result<R::Response> {
         let policy = self.inner.config.retry;
+        let started = std::time::Instant::now();
         let mut attempt = 1;
         loop {
             let delay = policy.delay(attempt);
@@ -366,13 +385,25 @@ impl Cluster {
             if error.needs_metadata_refresh() {
                 self.on_stale_metadata(&target).await;
             }
-            if error.needs_coordinator_refresh()
-                && let Target::Coordinator(kind, key) = &target
-            {
+            let coordinator_moved =
+                error.needs_coordinator_refresh() && matches!(&target, Target::Coordinator(..));
+            if coordinator_moved && let Target::Coordinator(kind, key) = &target {
                 self.invalidate_coordinator(*kind, key);
             }
 
-            if !error.retriable() || !policy.should_retry(attempt) {
+            // A moved or still-loading coordinator is bounded by time, not by
+            // attempts. The attempt count is tuned for "this broker answered
+            // badly"; a coordinator handover is a cluster-side event whose
+            // duration has nothing to do with our backoff curve, and five
+            // attempts expire ~1.5s into an election that routinely takes
+            // longer. See `RetryPolicy::coordinator_timeout`.
+            let budget_left = if coordinator_moved {
+                started.elapsed() < policy.coordinator_timeout
+            } else {
+                policy.should_retry(attempt)
+            };
+
+            if !error.retriable() || !budget_left {
                 return Err(error);
             }
             tracing::debug!(api = %R::API_KEY, attempt, %error, "retrying");

@@ -1,7 +1,7 @@
 //! Container-backed Kafka fixtures.
 
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::future::LocalBoxFuture;
 use testcontainers::{
@@ -187,6 +187,46 @@ impl KafkaCluster {
         ];
         argv.extend(args.into_iter().map(Into::into));
         crate::harness::exec_ok(self, index, argv).await
+    }
+
+    /// Block until the group coordinator can answer, or `timeout` expires.
+    ///
+    /// A broker accepting connections is **not** the same as a cluster that
+    /// can serve a group. `__consumer_offsets` has 50 partitions to create and
+    /// elect leaders for, and until that settles `FindCoordinator` happily
+    /// names a broker that then answers `NOT_COORDINATOR` — so a test that
+    /// subscribes the instant the container is up races the election. Waiting
+    /// for a topic to become describable, which the suites already do, does
+    /// not cover this: it is a different set of partitions.
+    ///
+    /// The probe is `kafka-consumer-groups.sh --list`, which is served from
+    /// the `__consumer_offsets` partitions each broker owns and therefore
+    /// fails until they are assigned. It is a proxy rather than a proof — it
+    /// does not name a specific group — but it is one the image can answer
+    /// without parsing, and `kafka-meta`'s `RetryPolicy::coordinator_timeout`
+    /// covers this class of error anyway. This makes the tests deterministic;
+    /// it is not what makes them correct.
+    pub async fn wait_for_group_coordinator(&self, timeout: Duration) -> Result<()> {
+        let deadline = Instant::now() + timeout;
+        let mut last: Option<Error> = None;
+
+        while Instant::now() < deadline {
+            match self
+                .kafka_cli(0, "kafka-consumer-groups.sh", ["--list"])
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(error) => last = Some(error),
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+
+        Err(Error::config(match last {
+            Some(error) => {
+                format!("the group coordinator was still unavailable after {timeout:?}: {error}")
+            }
+            None => format!("the group coordinator was still unavailable after {timeout:?}"),
+        }))
     }
 }
 
