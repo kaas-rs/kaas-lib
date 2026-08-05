@@ -129,7 +129,7 @@ async fn a_thousand_cancelled_scans_return_to_baseline() {
     // And the connection still works, which rules out "returned to baseline by
     // dying".
     let mut stream = Box::pin(
-        kafka_read::scan(&cluster, ScanSpec::new("leaky").with_limit(10))
+        kafka_read::scan(&cluster, ScanSpec::new("leaky").limit(10))
             .await
             .unwrap(),
     );

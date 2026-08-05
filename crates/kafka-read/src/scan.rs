@@ -166,19 +166,22 @@ impl ScanSpec {
     }
 
     /// Restrict to specific partitions.
-    pub fn with_partitions(mut self, partitions: impl IntoIterator<Item = i32>) -> Self {
+    #[must_use]
+    pub fn partitions(mut self, partitions: impl IntoIterator<Item = i32>) -> Self {
         self.partitions = Some(partitions.into_iter().collect());
         self
     }
 
     /// Start somewhere other than the beginning.
+    #[must_use]
     pub fn from(mut self, from: StartPosition) -> Self {
         self.from = from;
         self
     }
 
     /// Stop after `limit` records.
-    pub fn with_limit(mut self, limit: usize) -> Self {
+    #[must_use]
+    pub fn limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
         self
     }
@@ -188,19 +191,22 @@ impl ScanSpec {
     /// Turns [`StartPosition::Latest`] from a scan of nothing into a tail. It
     /// is still not a consumer: there is no group, no membership and no commit
     /// — the stream ends when it is dropped.
+    #[must_use]
     pub fn following(mut self) -> Self {
         self.follow = true;
         self
     }
 
     /// Filter records after decoding.
-    pub fn with_filter(mut self, filter: RecordFilter) -> Self {
+    #[must_use]
+    pub fn filter(mut self, filter: RecordFilter) -> Self {
         self.filter = Some(filter);
         self
     }
 
     /// Show or hide aborted-transaction records.
-    pub fn with_visibility(mut self, visibility: Visibility) -> Self {
+    #[must_use]
+    pub fn visibility(mut self, visibility: Visibility) -> Self {
         self.visibility = visibility;
         self
     }

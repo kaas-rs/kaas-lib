@@ -247,7 +247,7 @@ org.apache.kafka.clients.consumer.CooperativeStickyAssignor \
         .expect("subscribe")
         // Advertising only this one makes the intersection a single protocol:
         // the group forms on cooperative-sticky or it fails loudly.
-        .with_assignors([Assignor::CooperativeSticky]);
+        .assignors([Assignor::CooperativeSticky]);
 
     let deadline = Instant::now() + Duration::from_secs(120);
     while Instant::now() < deadline && ours.assignment().is_empty() {
@@ -292,7 +292,7 @@ async fn a_cooperative_rebalance_keeps_what_it_can() {
         ClassicConsumer::subscribe(cluster, config(), group, [TOPIC])
             .await
             .expect("subscribe")
-            .with_assignors([Assignor::CooperativeSticky])
+            .assignors([Assignor::CooperativeSticky])
     }
 
     let mut a = cooperative(&fixture, group).await;
@@ -364,7 +364,7 @@ async fn a_static_member_does_not_trigger_a_rebalance_on_restart() {
     let mut first = ClassicConsumer::subscribe(cluster, config(), group, [TOPIC])
         .await
         .expect("subscribe")
-        .with_instance_id("static-1");
+        .instance_id("static-1");
 
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && first.assignment().is_empty() {
@@ -390,7 +390,7 @@ async fn a_static_member_does_not_trigger_a_rebalance_on_restart() {
     let mut restarted = ClassicConsumer::subscribe(cluster, config(), group, [TOPIC])
         .await
         .expect("subscribe")
-        .with_instance_id("static-1");
+        .instance_id("static-1");
 
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && restarted.assignment().is_empty() {

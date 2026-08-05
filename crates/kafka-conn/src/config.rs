@@ -68,42 +68,49 @@ impl ConnectionConfig {
     }
 
     /// Set the client id sent in request headers.
+    #[must_use]
     pub fn with_client_id(mut self, client_id: impl Into<String>) -> Self {
         self.client_id = Some(client_id.into());
         self
     }
 
     /// Set the default per-request deadline.
+    #[must_use]
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
         self
     }
 
     /// Set the connect and handshake deadline.
+    #[must_use]
     pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = timeout;
         self
     }
 
     /// Set the in-flight ceiling.
+    #[must_use]
     pub fn with_max_in_flight(mut self, max: usize) -> Self {
         self.max_in_flight = max.max(1);
         self
     }
 
     /// Refuse mutating requests.
+    #[must_use]
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
         self
     }
 
     /// Connect over TLS.
+    #[must_use]
     pub fn with_tls(mut self, tls: TlsConfig) -> Self {
         self.tls = Some(Arc::new(tls));
         self
     }
 
     /// Authenticate with SASL.
+    #[must_use]
     pub fn with_sasl(mut self, sasl: SaslConfig) -> Self {
         self.sasl = Some(Arc::new(sasl));
         self

@@ -218,18 +218,21 @@ impl BrokerConfig {
     }
 
     /// Number of combined broker+controller nodes. Must be at least one.
+    #[must_use]
     pub fn with_nodes(mut self, nodes: usize) -> Self {
         self.nodes = nodes;
         self
     }
 
     /// Wire security for the external listener.
+    #[must_use]
     pub fn with_security(mut self, security: Security) -> Self {
         self.security = security;
         self
     }
 
     /// Enable a SASL mechanism on the external listener.
+    #[must_use]
     pub fn with_mechanism(mut self, mechanism: SaslMechanism) -> Self {
         if !self.mechanisms.contains(&mechanism) {
             self.mechanisms.push(mechanism);
@@ -238,6 +241,7 @@ impl BrokerConfig {
     }
 
     /// Add a user the broker will accept.
+    #[must_use]
     pub fn with_user(mut self, name: impl Into<String>, password: impl Into<String>) -> Self {
         self.users.push(SaslUser::new(name, password));
         self
@@ -248,6 +252,7 @@ impl BrokerConfig {
     /// `User:ANONYMOUS` is made a superuser so an unauthenticated test client
     /// can still drive the ACL RPCs. M8 is testing our ACL *encoding*, not
     /// Kafka's enforcement.
+    #[must_use]
     pub fn with_authorizer(mut self, enabled: bool) -> Self {
         self.authorizer = enabled;
         self
@@ -257,30 +262,35 @@ impl BrokerConfig {
     ///
     /// Only M4's acceptance test wants this: it is the fixture half of proving
     /// we never send `allow_auto_topic_creation: true`.
+    #[must_use]
     pub fn with_auto_create_topics(mut self, enabled: bool) -> Self {
         self.auto_create_topics = enabled;
         self
     }
 
     /// Enable KIP-932 share groups.
+    #[must_use]
     pub fn with_share_groups(mut self, enabled: bool) -> Self {
         self.share_groups = enabled;
         self
     }
 
     /// Set an arbitrary `server.properties` entry. Later calls win.
+    #[must_use]
     pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.properties.push((key.into(), value.into()));
         self
     }
 
     /// Pass `--feature <spec>` to `kafka-storage format`.
+    #[must_use]
     pub fn with_feature(mut self, spec: impl Into<String>) -> Self {
         self.features.push(spec.into());
         self
     }
 
     /// How long to wait for a node to report itself started.
+    #[must_use]
     pub fn with_startup_timeout(mut self, timeout: Duration) -> Self {
         self.startup_timeout = timeout;
         self
@@ -288,6 +298,7 @@ impl BrokerConfig {
 
     /// Use a different broker image — the seam that lets this suite run against
     /// a `kaas` broker instead of Apache Kafka.
+    #[must_use]
     pub fn with_image(mut self, image: impl Into<String>, tag: impl Into<String>) -> Self {
         self.image = image.into();
         self.tag = tag.into();

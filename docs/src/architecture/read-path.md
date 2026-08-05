@@ -24,8 +24,8 @@ use kafka_read::{ScanEvent, ScanSpec, StartPosition};
 # async fn example(cluster: &kafka_meta::Cluster) -> kafka_read::Result<()> {
 let spec = ScanSpec::new("orders")
     .from(StartPosition::Earliest)
-    .with_partitions([0, 1, 2])
-    .with_limit(10_000);
+    .partitions([0, 1, 2])
+    .limit(10_000);
 
 let mut stream = Box::pin(kafka_read::scan(cluster, spec).await?);
 while let Some(event) = stream.next().await {

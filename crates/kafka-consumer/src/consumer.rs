@@ -655,7 +655,7 @@ impl GroupConsumer {
     /// Join as a **static** member, so a restart inside the session timeout
     /// does not trigger a rebalance.
     #[must_use]
-    pub fn with_instance_id(mut self, instance_id: impl Into<String>) -> Self {
+    pub fn instance_id(mut self, instance_id: impl Into<String>) -> Self {
         self.membership.set_instance_id(instance_id.into());
         self
     }
@@ -912,7 +912,7 @@ impl ClassicConsumer {
     /// Join as a **static** member (KIP-345), so a restart inside the session
     /// timeout does not trigger a rebalance.
     #[must_use]
-    pub fn with_instance_id(mut self, instance_id: impl Into<String>) -> Self {
+    pub fn instance_id(mut self, instance_id: impl Into<String>) -> Self {
         let assignors = self.membership.assignors().to_vec();
         self.membership = crate::classic::ClassicMembership::new(
             self.membership.group_id().to_owned(),
@@ -940,7 +940,7 @@ impl ClassicConsumer {
     /// An empty list is ignored: a member with no assignors cannot join
     /// anything.
     #[must_use]
-    pub fn with_assignors(mut self, assignors: impl IntoIterator<Item = Assignor>) -> Self {
+    pub fn assignors(mut self, assignors: impl IntoIterator<Item = Assignor>) -> Self {
         let assignors: Vec<Assignor> = assignors.into_iter().collect();
         if !assignors.is_empty() {
             self.membership.set_assignors(assignors);

@@ -258,7 +258,7 @@ async fn a_limited_scan_stops_early_and_a_filter_narrows_it() {
     produce(&fixture, "scanned", 1, 1000, "none").await;
 
     let mut stream = Box::pin(
-        kafka_read::scan(&cluster, ScanSpec::new("scanned").with_limit(10))
+        kafka_read::scan(&cluster, ScanSpec::new("scanned").limit(10))
             .await
             .unwrap(),
     );
@@ -272,7 +272,7 @@ async fn a_limited_scan_stops_early_and_a_filter_narrows_it() {
 
     let filtered = kafka_read::scan(
         &cluster,
-        ScanSpec::new("scanned").with_filter(kafka_read::RecordFilter::ValueContains(
+        ScanSpec::new("scanned").filter(kafka_read::RecordFilter::ValueContains(
             bytes::Bytes::from_static(b"999"),
         )),
     )
@@ -336,9 +336,9 @@ async fn a_scan_from_an_offset_never_emits_records_before_it() {
             kafka_read::scan(
                 &cluster,
                 ScanSpec::new("scanned")
-                    .with_partitions([0])
+                    .partitions([0])
                     .from(StartPosition::Offset(start))
-                    .with_limit(20),
+                    .limit(20),
             )
             .await
             .unwrap(),

@@ -272,6 +272,7 @@ impl NewTopic {
     }
 
     /// Add a topic config.
+    #[must_use]
     pub fn with_config(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.configs.push((key.into(), value.into()));
         self

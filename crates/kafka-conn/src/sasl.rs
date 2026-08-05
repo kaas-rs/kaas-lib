@@ -94,6 +94,7 @@ impl SaslConfig {
     }
 
     /// Permit `PLAIN` without TLS.
+    #[must_use]
     pub fn allow_plaintext_password(mut self) -> Self {
         self.allow_plaintext_password = true;
         self

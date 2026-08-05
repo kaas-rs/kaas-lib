@@ -101,6 +101,7 @@ impl TlsConfig {
     }
 
     /// Override the name used for SNI and hostname verification.
+    #[must_use]
     pub fn with_server_name(mut self, name: impl Into<String>) -> Self {
         self.server_name_override = Some(name.into());
         self

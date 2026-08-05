@@ -59,7 +59,7 @@ async fn await_topic(admin: &Admin, topic: &str) {
 /// Read a whole topic back through `kafka-read`.
 async fn read_topic(cluster: &Cluster, topic: &str, partitions: i32) -> Vec<kafka_read::Record> {
     let spec = ScanSpec::new(topic)
-        .with_partitions(0..partitions)
+        .partitions(0..partitions)
         .from(StartPosition::Earliest);
     let mut stream = Box::pin(kafka_read::scan(cluster, spec).await.expect("scan"));
 

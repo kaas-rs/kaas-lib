@@ -50,9 +50,9 @@ async fn await_topic(admin: &Admin, topic: &str) {
 
 async fn read(cluster: &Cluster, topic: &str, visibility: Visibility) -> Vec<kafka_read::Record> {
     let spec = ScanSpec::new(topic)
-        .with_partitions([0])
+        .partitions([0])
         .from(StartPosition::Earliest)
-        .with_visibility(visibility);
+        .visibility(visibility);
     let mut stream = Box::pin(kafka_read::scan(cluster, spec).await.expect("scan"));
 
     let mut records = Vec::new();

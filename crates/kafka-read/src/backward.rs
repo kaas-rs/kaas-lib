@@ -117,7 +117,8 @@ impl TailSpec {
     }
 
     /// Restrict to specific partitions.
-    pub fn with_partitions(mut self, partitions: impl IntoIterator<Item = i32>) -> Self {
+    #[must_use]
+    pub fn partitions(mut self, partitions: impl IntoIterator<Item = i32>) -> Self {
         self.partitions = Some(partitions.into_iter().collect());
         self
     }
@@ -127,19 +128,22 @@ impl TailSpec {
     /// The convergence behaviour is unchanged — an arbitrary anchor needs the
     /// step to grow across offset gaps for exactly the same reason the log end
     /// does.
+    #[must_use]
     pub fn ending_at(mut self, anchor: TailAnchor) -> Self {
         self.anchor = anchor;
         self
     }
 
     /// Filter records after decoding.
-    pub fn with_filter(mut self, filter: RecordFilter) -> Self {
+    #[must_use]
+    pub fn filter(mut self, filter: RecordFilter) -> Self {
         self.filter = Some(filter);
         self
     }
 
     /// Show or hide aborted-transaction records.
-    pub fn with_visibility(mut self, visibility: Visibility) -> Self {
+    #[must_use]
+    pub fn visibility(mut self, visibility: Visibility) -> Self {
         self.visibility = visibility;
         self
     }

@@ -924,9 +924,9 @@ async fn read_partition_with(
     visibility: Visibility,
 ) -> Result<Vec<kafka_read::Record>> {
     let spec = ScanSpec::new(topic)
-        .with_partitions([partition])
+        .partitions([partition])
         .from(StartPosition::Earliest)
-        .with_visibility(visibility);
+        .visibility(visibility);
     let mut stream = Box::pin(kafka_read::scan(cluster, spec).await?);
 
     let mut records = Vec::new();
