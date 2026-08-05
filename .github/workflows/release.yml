@@ -42,17 +42,26 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Everything that can say "no" runs here, in a job with NO environment, so
-  # it needs no approval to start.
+  # Everything that can say "no" runs in jobs with NO environment, so none of
+  # them needs approval to start.
   #
-  # Splitting this out of `publish` is the whole point. `environment:` gates a
-  # job before its first step, so with the gates inside the published job the
-  # reviewer was asked to approve *before* any evidence existed — clicking
-  # blind on the one action in this repository that cannot be undone. Now the
-  # approval prompt appears only once the tag, the lints and the full
+  # Splitting the gates out of `publish` is the whole point. `environment:`
+  # gates a job before its first step, so with the gates inside the published
+  # job the reviewer was asked to approve *before* any evidence existed —
+  # clicking blind on the one action in this repository that cannot be undone.
+  # The approval prompt appears only once the tag, the lints and the full
   # acceptance suite against a real broker have all gone green, which is what
   # RELEASING.md always claimed the reviewer was getting.
-  gate:
+  #
+  # They are three jobs rather than one because they are independent, and one
+  # job runs its steps in sequence: the acceptance suite waited for fmt,
+  # clippy, unit tests and a six-crate packaging dry-run to finish before it
+  # started a single broker, and the release paid the *sum*. Now it pays the
+  # longest, which is the acceptance suite, alone.
+  #
+  # `version` stays a job of its own so a mistyped tag fails in a minute
+  # rather than after the brokers have booted.
+  version:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -63,8 +72,6 @@ jobs:
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
 
       - name: Tag must match the workspace version
         id: version
@@ -94,6 +101,23 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} matches"
           fi
 
+  # The cheap gates. Grouped in one job on purpose: `cargo xtask ci` and the
+  # packaging dry-run both compile the workspace, so they want the same target
+  # directory and the same cache. Splitting them would trade a few minutes of
+  # parallelism for a cold rebuild.
+  checks:
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (honours rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
       - name: Gate — workflow lint
         # The release path itself is a workflow, and a workflow expression
         # error fails in zero seconds with no logs rather than loudly. This
@@ -117,19 +141,40 @@ jobs:
         # through, with crates already live. See RELEASING.md.
         run: cargo publish --workspace --dry-run
 
+  # The long pole, alone, so nothing waits behind it and it waits for nothing.
+  acceptance:
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain (honours rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
       - name: Gate — acceptance suite against a real broker
         # PLAN.md makes these the acceptance criteria for every milestone.
         # Minutes rather than seconds, which is the correct trade for an
         # irreversible upload.
-        run: |
-          docker pull apache/kafka:4.3.1
-          cargo xtask integration
+        #
+        # The pull is its own step so a slow registry reads as a slow pull
+        # rather than as a slow test suite.
+        run: docker pull apache/kafka:4.3.1
+
+      - name: Gate — the suite itself
+        run: cargo xtask integration
 
   # Only this job touches crates.io, and only this job carries the
   # environment — so the approval prompt is the last thing between green
   # gates and a permanent upload.
+  #
+  # `needs` every gate: a job left out here is a gate the reviewer is told
+  # passed without it having run.
   publish:
-    needs: gate
+    needs: [version, checks, acceptance]
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -152,7 +197,7 @@ jobs:
       # context where `secrets` *is* allowed, and the environment's secrets
       # are in scope because this job declares `environment:`.
       HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
-      WORKSPACE_VERSION: ${{ needs.gate.outputs.version }}
+      WORKSPACE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v6
 

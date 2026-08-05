@@ -161,7 +161,19 @@ uploads nothing. Only a tag push publishes for real.
 
 ## What the workflow gates on
 
-The `gate` job, in order, all blocking:
+Three jobs, all blocking, and `publish` needs every one of them.
+
+`version` runs first and alone, so a mistyped tag costs a minute rather than
+a booted cluster. `checks` and `acceptance` then run **in parallel** — they
+are independent, and as sequential steps in one job the acceptance suite
+waited for fmt, clippy, unit tests and a six-crate packaging dry-run before
+it started a single broker. The release paid the sum; it now pays the
+longest.
+
+`checks` keeps `cargo xtask ci` and the packaging dry-run together on
+purpose: both compile the workspace, so they want one target directory and
+one cache. Splitting them buys a few minutes of parallelism and pays for it
+with a cold rebuild.
 
 1. **Tag matches the workspace version**, and all six crates agree on it.
 2. **`actionlint`** — the release path is itself a workflow, and a workflow
