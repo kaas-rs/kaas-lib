@@ -16,7 +16,7 @@ Each KIP is searchable by number on the
 | KIP-345 | Static consumer membership | ✅ both protocols |
 | KIP-368 | SASL re-authentication | ✅ |
 | KIP-405 | Tiered storage | ⚠️ `-4` sentinel surfaced |
-| KIP-447 | Exactly-once v2 | ⚠️ no `sendOffsetsToTransaction` |
+| KIP-447 | Exactly-once v2 | ⚠️ no `sendOffsetsToTransaction` ([#10]) |
 | KIP-480 | Sticky partitioner | ✅ |
 | KIP-482 | Flexible versions / tagged fields | ✅ via the codec |
 | KIP-516 | Topic IDs | ✅ `Fetch` v13+ |
@@ -94,9 +94,15 @@ including the epoch bump KIP-890 hides inside `EndTxn`. `DescribeTransactions`,
 
 **KIP-447 is the gap.** There is no `sendOffsetsToTransaction`: a consumer's
 offsets cannot be committed *inside* a producer transaction, so the
-consume-process-produce loop cannot be made exactly-once end to end. The
-`TxnOffsetCommit` api is routed and typed in `kafka-conn`, so what is missing
-is the producer-side method and its acceptance test, not wire support.
+consume-process-produce loop cannot be made exactly-once end to end. Both
+`AddOffsetsToTxn` and `TxnOffsetCommit` are already typed and routed in
+`kafka-conn`, so what is missing is the producer-side method, a
+group-metadata type to carry `member_id`/generation across the crate
+boundary, and an acceptance test — not wire support.
+
+Tracked in [#10].
+
+[#10]: https://github.com/kaas-rs/kaas-lib/issues/10
 
 ### KIP-699 — batched `FindCoordinator` ⚠️
 
