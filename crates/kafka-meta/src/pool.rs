@@ -105,7 +105,23 @@ impl BrokerPool {
             .ok()
             .and_then(|map| map.get(&node_id).cloned())
             .ok_or_else(|| {
-                Error::InvalidRequest(format!("no known address for broker {node_id}"))
+                // A client-side conclusion wearing the code the broker would
+                // have used, so the routing retry table needs no special
+                // case. This is *stale metadata*, not a bad request: on a
+                // booting or re-electing cluster, topic metadata can name a
+                // leader whose broker entry has not registered yet, and the
+                // gap closes on the next refresh. `InvalidRequest` here made
+                // that one transient response a terminal delivery failure —
+                // non-retriable, no refresh — which is how a codec round-trip
+                // test lost a batch to a broker that was seconds from
+                // existing.
+                Error::from_code(
+                    kafka_conn::ErrorCode::LeaderNotAvailable,
+                    Some(format!(
+                        "no known address for broker {node_id}; \
+                         the metadata naming it is stale"
+                    )),
+                )
             })?;
         self.connect(Endpoint::Node(node_id), &address, Some(node_id))
             .await
@@ -307,10 +323,18 @@ mod tests {
         )
     }
 
+    /// An id the address map has never heard of fails fast — and fails as
+    /// *stale metadata*, because that is what it is: topic metadata named a
+    /// leader whose broker entry has not arrived yet. Classified
+    /// `InvalidRequest` once, which is non-retriable and refreshes nothing,
+    /// so a single mid-boot metadata response turned into a terminal
+    /// delivery failure.
     #[tokio::test]
-    async fn an_unknown_broker_id_is_an_error_not_a_hang() {
+    async fn an_unknown_broker_id_is_stale_metadata_not_a_bad_request() {
         let err = pool().get(42).await.unwrap_err();
-        assert!(matches!(err, Error::InvalidRequest(_)), "{err:?}");
+        assert_eq!(err.code(), Some(kafka_conn::ErrorCode::LeaderNotAvailable));
+        assert!(err.retriable(), "a refresh can fix this: {err:?}");
+        assert!(err.needs_metadata_refresh(), "{err:?}");
     }
 
     #[tokio::test]
