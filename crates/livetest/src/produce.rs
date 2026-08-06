@@ -317,6 +317,42 @@ async fn run(cluster: &Cluster, admin: &Admin, topic: &str, report: &mut Report)
     Ok(())
 }
 
+/// Poll one classic member from its own task until told to stop, publishing
+/// its assignment as it changes, and hand the member back.
+///
+/// A task each rather than one loop over `tokio::join!(a.poll(), b.poll())`:
+/// that loop cannot poll `a` again until `b`'s poll returns, and a classic
+/// `JoinGroup` blocks on the coordinator until the whole group has re-joined.
+/// Lose the race for the two joins to arrive in the same rebalance window and
+/// `b`'s blocking join starves `a`'s heartbeat until the coordinator evicts
+/// it, handing `b` every partition while `a` still reports the ones it has not
+/// learned it lost. The acceptance suite failed exactly that way; see
+/// `kafka_consume::classic`.
+fn drive_classic(
+    mut consumer: ClassicConsumer,
+    assignment: tokio::sync::watch::Sender<Vec<(String, i32)>>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<(ClassicConsumer, Option<kafka_consume::Error>)> {
+    tokio::spawn(async move {
+        let mut failure = None;
+        loop {
+            tokio::select! {
+                result = consumer.poll() => match result {
+                    Ok(_) => {
+                        let _ = assignment.send(consumer.assignment());
+                    }
+                    Err(error) => {
+                        failure = Some(error);
+                        break;
+                    }
+                },
+                _ = stop.changed() => break,
+            }
+        }
+        (consumer, failure)
+    })
+}
+
 /// M17: two members join one group, and between them own every partition
 /// exactly once.
 ///
@@ -413,24 +449,35 @@ async fn group(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<()
         kafka_meta::ClusterConfig::default(),
     )
     .await?;
-    let mut ca = ClassicConsumer::subscribe(cluster_a, config(), &classic_id, [topic]).await?;
-    let mut cb = ClassicConsumer::subscribe(cluster_b, config(), &classic_id, [topic]).await?;
+    let ca = ClassicConsumer::subscribe(cluster_a, config(), &classic_id, [topic]).await?;
+    let cb = ClassicConsumer::subscribe(cluster_b, config(), &classic_id, [topic]).await?;
 
-    // Concurrently, not in turn. `JoinGroup` blocks on the coordinator until
-    // the group forms, so polling one member to completion before touching the
-    // other deadlocks the rebalance: the first sits waiting for a second
-    // member that cannot join because we are still awaiting the first.
+    // Concurrently, and each from its own task — see `drive_classic`. Polling
+    // one member to completion before touching the other deadlocks the
+    // rebalance outright; polling both from one loop is subtler and starves
+    // whichever member is not mid-join.
     let started = Instant::now();
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let (a_tx, a_rx) = tokio::sync::watch::channel(Vec::new());
+    let (b_tx, b_rx) = tokio::sync::watch::channel(Vec::new());
+    let a_task = drive_classic(ca, a_tx, stop_rx.clone());
+    let b_task = drive_classic(cb, b_tx, stop_rx);
+
     let deadline = started + Duration::from_secs(120);
     while Instant::now() < deadline {
-        let (ra, rb) = tokio::join!(ca.poll(), cb.poll());
-        ra?;
-        rb?;
-        let a = ca.assignment().len();
-        let b = cb.assignment().len();
+        let a = a_rx.borrow().len();
+        let b = b_rx.borrow().len();
         if a + b == usize::try_from(PARTITIONS).unwrap_or(0) && a > 0 && b > 0 {
             break;
         }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let _ = stop_tx.send(true);
+    let (mut ca, ca_failure) = a_task.await?;
+    let (mut cb, cb_failure) = b_task.await?;
+    if let Some(error) = ca_failure.or(cb_failure) {
+        return Err(error.into());
     }
 
     let a: std::collections::BTreeSet<(String, i32)> = ca.assignment().into_iter().collect();

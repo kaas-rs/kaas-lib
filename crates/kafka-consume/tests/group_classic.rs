@@ -76,27 +76,77 @@ async fn member(fixture: &KafkaCluster, group: &str) -> ClassicConsumer {
         .expect("subscribe")
 }
 
+/// Poll one member from its own task until told to stop, publishing its
+/// assignment as it changes.
+///
+/// The task is the point, not a tidiness preference — see the note in
+/// [`two_members_cover_every_partition_exactly_once`].
+fn drive(
+    mut consumer: ClassicConsumer,
+    assignment: tokio::sync::watch::Sender<Vec<(String, i32)>>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<ClassicConsumer> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                result = consumer.poll() => {
+                    result.expect("poll");
+                    let _ = assignment.send(consumer.assignment());
+                }
+                _ = stop.changed() => break,
+            }
+        }
+        consumer
+    })
+}
+
 /// Two Rust members: full coverage, no overlap, one leader.
 #[testkit::integration_test]
 async fn two_members_cover_every_partition_exactly_once() {
     let fixture = setup().await;
     let group = "classic-coverage";
 
-    let mut a = member(&fixture, group).await;
-    let mut b = member(&fixture, group).await;
+    // One task per member. `tokio::join!(a.poll(), b.poll())` in a loop reads
+    // as equivalent and is not: the loop cannot poll `a` again until `b`'s
+    // poll returns, and a classic `JoinGroup` blocks on the coordinator until
+    // the whole group has re-joined.
+    //
+    // Both members are constructed before either polls, so their joins
+    // *usually* block side by side and the group forms — which is why this
+    // passed for as long as it did. But whether `b`'s join reaches the
+    // coordinator inside `a`'s rebalance window is timing, not structure: lose
+    // that race on a loaded runner and `a` is already in a closed generation
+    // when `b` arrives, `b`'s blocking join starves `a`'s heartbeat, the
+    // coordinator evicts `a` mid-rebalance, and `b` is handed all twelve
+    // partitions while `a` still reports the twelve it has not yet learned it
+    // lost. That is the failure CI produced — an intersection of all twelve —
+    // and `kafka_consume::classic` states the rule it breaks.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let (a_tx, a_rx) = tokio::sync::watch::channel(Vec::new());
+    let (b_tx, b_rx) = tokio::sync::watch::channel(Vec::new());
 
-    let deadline = Instant::now() + Duration::from_secs(90);
-    while Instant::now() < deadline {
-        let (ra, rb) = tokio::join!(a.poll(), b.poll());
-        ra.expect("a");
-        rb.expect("b");
-        if a.assignment().len() + b.assignment().len() == usize::try_from(PARTITIONS).unwrap()
-            && !a.assignment().is_empty()
-            && !b.assignment().is_empty()
-        {
+    let a_task = drive(member(&fixture, group).await, a_tx, stop_rx.clone());
+    let b_task = drive(member(&fixture, group).await, b_tx, stop_rx);
+
+    // Comfortably inside the two-minute cap the fixture puts on the whole
+    // test, container boot and the seed included, so the assertion below is
+    // what fires rather than the deadline.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (held_a, held_b) = (a_rx.borrow().len(), b_rx.borrow().len());
+        if held_a > 0 && held_b > 0 && held_a + held_b == usize::try_from(PARTITIONS).unwrap() {
             break;
         }
+        assert!(
+            Instant::now() < deadline,
+            "the group never settled: a holds {held_a}, b holds {held_b}, of {PARTITIONS}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
+
+    stop_tx.send(true).expect("stop");
+    let mut a = a_task.await.expect("a task");
+    let mut b = b_task.await.expect("b task");
 
     let owned_a: BTreeSet<(String, i32)> = a.assignment().into_iter().collect();
     let owned_b: BTreeSet<(String, i32)> = b.assignment().into_iter().collect();
