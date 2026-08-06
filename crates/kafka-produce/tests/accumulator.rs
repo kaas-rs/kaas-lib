@@ -288,43 +288,64 @@ async fn one_oversized_record_among_a_thousand_fails_alone() {
     );
 }
 
-/// Every codec, batched rather than one record at a time — compression only
+/// One codec, batched rather than one record at a time — compression only
 /// has anything to work across once there is a batch.
-#[testkit::integration_test]
-async fn every_codec_round_trips_a_whole_batch() {
+///
+/// One test per codec rather than a loop over all five: five sequential
+/// broker boots in a single two-minute budget was the heaviest test in the
+/// suite and the first to die on a starved runner. Split, each boot gets its
+/// own budget and the five run in parallel.
+async fn codec_round_trips_a_whole_batch(codec: Compression, topic: &str) {
     const PARTITIONS: i32 = 3;
     const RECORDS: usize = 2_000;
 
-    for (codec, topic) in [
-        (Compression::None, "accumulator-none"),
-        (Compression::Gzip, "accumulator-gzip"),
-        (Compression::Snappy, "accumulator-snappy"),
-        (Compression::Lz4, "accumulator-lz4"),
-        (Compression::Zstd, "accumulator-zstd"),
-    ] {
-        let (_fixture, cluster, _admin) = setup(topic, PARTITIONS).await;
-        let producer = Producer::new(cluster.clone(), ProducerConfig::new().compression(codec));
+    let (_fixture, cluster, _admin) = setup(topic, PARTITIONS).await;
+    let producer = Producer::new(cluster.clone(), ProducerConfig::new().compression(codec));
 
-        let mut pending = Vec::with_capacity(RECORDS);
-        for i in 0..RECORDS {
-            let record = ProducerRecord::new(topic)
-                .key(format!("k{i}"))
-                .value(format!("value-{i}-{codec:?}"));
-            pending.push(producer.enqueue(record).await.expect("enqueued"));
-        }
-        for delivery in pending {
-            delivery.await.expect("delivered");
-        }
-
-        let read_back = read_topic(&cluster, topic, PARTITIONS).await;
-        assert_eq!(read_back.len(), RECORDS, "{codec:?} lost records");
-
-        let values: HashSet<Vec<u8>> = read_back
-            .iter()
-            .filter_map(|record| record.value.as_ref().map(|v| v.to_vec()))
-            .collect();
-        assert_eq!(values.len(), RECORDS, "{codec:?} duplicated a record");
+    let mut pending = Vec::with_capacity(RECORDS);
+    for i in 0..RECORDS {
+        let record = ProducerRecord::new(topic)
+            .key(format!("k{i}"))
+            .value(format!("value-{i}-{codec:?}"));
+        pending.push(producer.enqueue(record).await.expect("enqueued"));
     }
+    for delivery in pending {
+        delivery.await.expect("delivered");
+    }
+
+    let read_back = read_topic(&cluster, topic, PARTITIONS).await;
+    assert_eq!(read_back.len(), RECORDS, "{codec:?} lost records");
+
+    let values: HashSet<Vec<u8>> = read_back
+        .iter()
+        .filter_map(|record| record.value.as_ref().map(|v| v.to_vec()))
+        .collect();
+    assert_eq!(values.len(), RECORDS, "{codec:?} duplicated a record");
+}
+
+#[testkit::integration_test]
+async fn an_uncompressed_batch_round_trips() {
+    codec_round_trips_a_whole_batch(Compression::None, "accumulator-none").await;
+}
+
+#[testkit::integration_test]
+async fn a_gzip_batch_round_trips() {
+    codec_round_trips_a_whole_batch(Compression::Gzip, "accumulator-gzip").await;
+}
+
+#[testkit::integration_test]
+async fn a_snappy_batch_round_trips() {
+    codec_round_trips_a_whole_batch(Compression::Snappy, "accumulator-snappy").await;
+}
+
+#[testkit::integration_test]
+async fn an_lz4_batch_round_trips() {
+    codec_round_trips_a_whole_batch(Compression::Lz4, "accumulator-lz4").await;
+}
+
+#[testkit::integration_test]
+async fn a_zstd_batch_round_trips() {
+    codec_round_trips_a_whole_batch(Compression::Zstd, "accumulator-zstd").await;
 }
 
 /// `flush` is the only way a caller who never awaits a delivery can know their

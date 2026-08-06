@@ -105,18 +105,64 @@ jobs:
   # packaging dry-run both compile the workspace, so they want the same target
   # directory and the same cache. Splitting them would trade a few minutes of
   # parallelism for a cold rebuild.
+  # On the ARC scale set, like ci.yml's jobs: this workflow triggers only on
+  # tag pushes and manual dispatch, neither of which a fork can reach, so the
+  # fork-safety rule that keeps `pull_request` jobs off the privileged
+  # runners does not apply here. The gates are the compute-heavy half of a
+  # release, and the two-minute per-test deadlines in the acceptance suite
+  # are calibrated on this hardware — on a two-core GitHub-hosted runner the
+  # same suite starves. Only `version` (trivial, wants jq) and `publish`
+  # (trivial, and the one job holding a crates.io credential) stay on
+  # GitHub-hosted.
   checks:
     needs: version
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set-lib
     permissions:
       contents: read
     steps:
+      # The ARC runner image is minimal: no cc, gcc, ld or pkg-config, and
+      # `ring` needs a working C toolchain. Same step as ci.yml's jobs.
+      - name: Install C toolchain
+        run: |
+          if command -v cc >/dev/null 2>&1; then
+            echo "cc already present: $(command -v cc)"
+            exit 0
+          fi
+          if [ "$(id -u)" -eq 0 ]; then SUDO=""
+          elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"
+          else
+            echo "::error::no cc, not root, and no sudo — cannot build native deps"
+            exit 1
+          fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
+            gcc libc6-dev pkg-config ca-certificates
+          echo "cc → $(command -v cc || echo MISSING)"
+
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      # The ARC runners intermittently start a job with the toolchain
+      # installed but cargo not on PATH; probing the known homes makes a
+      # broken pod fail at setup with a legible message instead of as a bare
+      # exit 127 minutes later.
+      - name: Put cargo on PATH, and prove it
+        run: |
+          set -eu
+          for dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" /usr/local/cargo/bin; do
+            if [ -x "$dir/cargo" ]; then
+              printf '%s\n' "$dir" >> "$GITHUB_PATH"
+              echo "cargo -> $dir"
+              "$dir/cargo" --version
+              exit 0
+            fi
+          done
+          echo "::error::no cargo found (looked in CARGO_HOME, ~/.cargo, /usr/local/cargo)"
+          exit 1
 
       - name: Gate — workflow lint
         # The release path itself is a workflow, and a workflow expression
@@ -151,18 +197,66 @@ jobs:
         run: rm -rf target/package
 
   # The long pole, alone, so nothing waits behind it and it waits for nothing.
+  # On ARC for the same reasons as `checks` — and this one needs the DinD
+  # sidecar's Docker daemon, exactly like ci.yml's `integration` job.
   acceptance:
     needs: version
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set-lib
     permissions:
       contents: read
     steps:
+      - name: Wait for Docker daemon (DinD sidecar)
+        run: |
+          echo "DOCKER_HOST=${DOCKER_HOST:-<unset>}"
+          for i in $(seq 1 30); do
+            if docker info >/dev/null 2>&1; then
+              echo "docker daemon ready after ${i}s"
+              docker version
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::docker daemon did not become ready"
+          docker info || true
+          exit 1
+
+      - name: Install C toolchain
+        run: |
+          if command -v cc >/dev/null 2>&1; then
+            echo "cc already present: $(command -v cc)"
+            exit 0
+          fi
+          if [ "$(id -u)" -eq 0 ]; then SUDO=""
+          elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"
+          else
+            echo "::error::no cc, not root, and no sudo — cannot build native deps"
+            exit 1
+          fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
+            gcc libc6-dev pkg-config ca-certificates
+          echo "cc → $(command -v cc || echo MISSING)"
+
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Put cargo on PATH, and prove it
+        run: |
+          set -eu
+          for dir in "${CARGO_HOME:-$HOME/.cargo}/bin" "$HOME/.cargo/bin" /usr/local/cargo/bin; do
+            if [ -x "$dir/cargo" ]; then
+              printf '%s\n' "$dir" >> "$GITHUB_PATH"
+              echo "cargo -> $dir"
+              "$dir/cargo" --version
+              exit 0
+            fi
+          done
+          echo "::error::no cargo found (looked in CARGO_HOME, ~/.cargo, /usr/local/cargo)"
+          exit 1
 
       - name: Gate — acceptance suite against a real broker
         # PLAN.md makes these the acceptance criteria for every milestone.
