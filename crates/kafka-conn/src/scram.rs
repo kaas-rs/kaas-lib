@@ -46,7 +46,6 @@ impl ScramHash {
 const GS2_HEADER: &str = "n,,";
 
 /// A SCRAM conversation in progress.
-#[derive(Debug)]
 pub struct ScramClient {
     hash: ScramHash,
     password: String,
@@ -55,6 +54,28 @@ pub struct ScramClient {
     client_first_bare: String,
     /// Set once the client-final message has been sent.
     expected_server_signature: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for ScramClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The SASLprepped password is still the plaintext credential; never
+        // render it. The nonce and the client-first-bare go over the wire in
+        // the clear, so they stay visible — they are what makes a failed
+        // handshake debuggable.
+        f.debug_struct("ScramClient")
+            .field("hash", &self.hash)
+            .field("password", &"<redacted>")
+            .field("client_nonce", &self.client_nonce)
+            .field("client_first_bare", &self.client_first_bare)
+            .field(
+                "expected_server_signature",
+                match &self.expected_server_signature {
+                    Some(_) => &"<set>",
+                    None => &"<unset>",
+                },
+            )
+            .finish()
+    }
 }
 
 impl ScramClient {
@@ -290,6 +311,29 @@ fn escape_username(username: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `#[derive(Debug)]` here would put the plaintext credential into any
+    /// log line that formats a connection. Asserting on the rendering is what
+    /// stops the derive from coming back.
+    #[test]
+    fn debug_does_not_render_the_password() {
+        let client = ScramClient::new(
+            ScramHash::Sha256,
+            "user",
+            "s3cr3t-pencil",
+            "rOprNGfwEbeRWgbNEkqO".to_owned(),
+        )
+        .unwrap();
+
+        let rendered = format!("{client:?}");
+        assert!(
+            !rendered.contains("s3cr3t-pencil"),
+            "password leaked into Debug: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        // The wire-visible parts stay, or a failed handshake is undebuggable.
+        assert!(rendered.contains("rOprNGfwEbeRWgbNEkqO"), "{rendered}");
+    }
 
     /// RFC 7677 §3, the SCRAM-SHA-256 worked example.
     ///

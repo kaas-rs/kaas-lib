@@ -372,7 +372,7 @@ pub struct ScramCredentialInfo {
 }
 
 /// A SCRAM credential to write.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ScramUpsert {
     /// The user.
     pub user: String,
@@ -386,6 +386,20 @@ pub struct ScramUpsert {
     /// client-side. That is why this api exists at all rather than being a
     /// config setting.
     pub password: String,
+}
+
+impl std::fmt::Debug for ScramUpsert {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Derived, this would print the plaintext password and make a liar of
+        // the field's own documentation. A UI backend that formats an upsert
+        // into an error context writes the credential to its logs.
+        f.debug_struct("ScramUpsert")
+            .field("user", &self.user)
+            .field("mechanism", &self.mechanism)
+            .field("iterations", &self.iterations)
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 impl ScramUpsert {
@@ -868,6 +882,22 @@ fn scram_results(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The password field documents that it never leaves the process; a
+    /// derived `Debug` would break that promise for every caller that formats
+    /// an upsert into an error context.
+    #[test]
+    fn debug_does_not_render_the_password() {
+        let upsert = ScramUpsert::new("alice", ScramMechanism::Sha512, "s3cr3t-pencil");
+
+        let rendered = format!("{upsert:?}");
+        assert!(
+            !rendered.contains("s3cr3t-pencil"),
+            "password leaked into Debug: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(rendered.contains("alice"), "{rendered}");
+    }
 
     #[test]
     fn acl_and_config_resource_numberings_do_not_agree_and_must_not_be_shared() {
