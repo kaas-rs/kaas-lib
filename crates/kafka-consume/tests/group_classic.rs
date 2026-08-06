@@ -77,8 +77,7 @@ async fn member(fixture: &KafkaCluster, group: &str) -> ClassicConsumer {
 }
 
 /// Two Rust members: full coverage, no overlap, one leader.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn two_members_cover_every_partition_exactly_once() {
     let fixture = setup().await;
     let group = "classic-coverage";
@@ -86,7 +85,7 @@ async fn two_members_cover_every_partition_exactly_once() {
     let mut a = member(&fixture, group).await;
     let mut b = member(&fixture, group).await;
 
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
         let (ra, rb) = tokio::join!(a.poll(), b.poll());
         ra.expect("a");
@@ -127,8 +126,7 @@ async fn two_members_cover_every_partition_exactly_once() {
 /// group. The Java client decodes the subscription we encode, and — if it is
 /// elected leader — we decode the assignment it computes. A Rust-only group
 /// exercises neither direction.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_mixed_rust_and_java_group_shares_the_topic() {
     let fixture = setup().await;
     let group = "classic-mixed";
@@ -161,7 +159,7 @@ org.apache.kafka.clients.consumer.RangeAssignor \
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     let mut ours = member(&fixture, group).await;
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && ours.assignment().is_empty() {
         ours.poll().await.expect("poll");
     }
@@ -207,8 +205,7 @@ org.apache.kafka.clients.consumer.RangeAssignor \
 /// It also exercises the half a Rust-only test cannot: `owned_partitions` is a
 /// field the *Java* leader reads out of our subscription when it computes the
 /// assignment, and a field we read out of its subscription when we compute one.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_cooperative_group_forms_with_a_java_member() {
     let fixture = setup().await;
     let group = "classic-cooperative";
@@ -249,7 +246,7 @@ org.apache.kafka.clients.consumer.CooperativeStickyAssignor \
         // the group forms on cooperative-sticky or it fails loudly.
         .assignors([Assignor::CooperativeSticky]);
 
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && ours.assignment().is_empty() {
         ours.poll().await.expect("poll");
     }
@@ -276,8 +273,7 @@ org.apache.kafka.clients.consumer.CooperativeStickyAssignor \
 /// everything and reassigns from scratch also ends up balanced and disjoint,
 /// and would pass a coverage-only test while doing exactly what cooperative
 /// rebalancing exists to avoid.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_cooperative_rebalance_keeps_what_it_can() {
     let fixture = setup().await;
     let group = "classic-cooperative-pair";
@@ -307,7 +303,7 @@ async fn a_cooperative_rebalance_keeps_what_it_can() {
     // A second member arrives. Half the partitions must move; the other half
     // must not.
     let mut b = cooperative(&fixture, group).await;
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
         let (ra, rb) = tokio::join!(a.poll(), b.poll());
         ra.expect("a");
@@ -349,8 +345,7 @@ async fn a_cooperative_rebalance_keeps_what_it_can() {
 
 /// A static member's assignment is parked across a restart rather than
 /// rebalanced away (KIP-345).
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_static_member_does_not_trigger_a_rebalance_on_restart() {
     let fixture = setup().await;
     let group = "classic-static";

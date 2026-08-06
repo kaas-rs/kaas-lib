@@ -2232,9 +2232,19 @@ version = "0.3.0"
 dependencies = [
  "futures",
  "testcontainers",
+ "testkit-macros",
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "testkit-macros"
+version = "0.3.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

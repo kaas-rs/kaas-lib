@@ -33,8 +33,7 @@ async fn create_topic(fixture: &testkit::KafkaCluster, name: &str, partitions: u
         .expect("topic created");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn every_partition_resolves_to_a_leader_inside_its_own_replica_set() {
     let fixture = testkit::cluster(3).await.unwrap();
     create_topic(&fixture, "orders", 6, 3).await;
@@ -80,8 +79,7 @@ async fn every_partition_resolves_to_a_leader_inside_its_own_replica_set() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn metadata_for_an_unknown_topic_does_not_create_it() {
     // The destructive half of the auto-topic-creation trap. The unit test in
     // cluster.rs proves the flag is off in the request we build; this proves
@@ -118,8 +116,7 @@ async fn metadata_for_an_unknown_topic_does_not_create_it() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn the_snapshot_reports_its_own_age() {
     let fixture = testkit::single_broker().await.unwrap();
     let cluster = Cluster::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -136,8 +133,7 @@ async fn the_snapshot_reports_its_own_age() {
     assert!(refreshed.fetched_at() >= first.fetched_at());
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_targeted_refresh_keeps_the_rest_of_the_cache() {
     let fixture = testkit::single_broker().await.unwrap();
     create_topic(&fixture, "alpha", 1, 1).await;
@@ -156,8 +152,7 @@ async fn a_targeted_refresh_keeps_the_rest_of_the_cache() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn the_controller_and_coordinators_resolve_to_real_brokers() {
     let fixture = testkit::cluster(3).await.unwrap();
     let cluster = Cluster::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -189,8 +184,7 @@ async fn the_controller_and_coordinators_resolve_to_real_brokers() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn the_pool_opens_one_connection_per_broker_and_reuses_it() {
     let fixture = testkit::cluster(3).await.unwrap();
     let cluster = Cluster::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -220,8 +214,7 @@ async fn the_pool_opens_one_connection_per_broker_and_reuses_it() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn requests_survive_a_broker_dying_underneath_them() {
     // The retry policy plus metadata invalidation, together. Killing a broker
     // strands its connection; the next request must notice, refresh, and land
@@ -240,8 +233,7 @@ async fn requests_survive_a_broker_dying_underneath_them() {
     assert!(!snapshot.topics().is_empty());
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn send_routed_refuses_to_guess_a_coordinator() {
     use kafka_conn::protocol::messages::OffsetFetchRequest;
 

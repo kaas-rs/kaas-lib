@@ -112,8 +112,7 @@ async fn broker_ids(cluster: &Cluster) -> Vec<i32> {
 
 /// The acceptance case: 12 partitions across 2 topics, 100k records, exact
 /// count and per-partition order.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn twelve_partitions_across_two_topics_stream_in_order() {
     const PER_TOPIC: usize = 50_000;
 
@@ -139,7 +138,7 @@ async fn twelve_partitions_across_two_topics_stream_in_order() {
     // place Kafka promises it.
     let mut last: std::collections::HashMap<(String, i32), i64> = std::collections::HashMap::new();
     let mut total = 0;
-    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
 
     while total < PER_TOPIC * 2 && std::time::Instant::now() < deadline {
         for record in consumer.poll().await.expect("poll") {
@@ -165,8 +164,7 @@ async fn twelve_partitions_across_two_topics_stream_in_order() {
 
 /// The assertion that proves the session is live rather than a full fetch
 /// wearing a session id.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_steady_state_fetch_stops_re_sending_the_assignment() {
     const RECORDS: usize = 2_000;
 
@@ -226,8 +224,7 @@ async fn a_steady_state_fetch_stops_re_sending_the_assignment() {
 }
 
 /// `seek`, `pause` and `resume` — the operations a bounded scan never needs.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn seek_pause_and_resume_change_the_stream_mid_flight() {
     const RECORDS: usize = 500;
 
@@ -331,8 +328,7 @@ async fn seek_pause_and_resume_change_the_stream_mid_flight() {
 }
 
 /// Offsets for a consumer that is not a group member.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_non_member_can_commit_and_resume_from_its_commit() {
     const RECORDS: usize = 300;
     const GROUP: &str = "fetcher-non-member";

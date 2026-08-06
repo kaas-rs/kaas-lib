@@ -30,7 +30,7 @@ use kafka_admin::{Admin, ClusterConfig, NewTopic};
 use kafka_consume::{Consumer, ConsumerConfig, GroupConsumer, Position};
 use kafka_produce::{Producer, ProducerConfig, ProducerRecord};
 use kafka_read::{Cluster, Visibility};
-use testkit::{Cluster as _, KafkaCluster};
+use testkit::{BrokerConfig, Cluster as _, KafkaCluster};
 
 const TOPIC: &str = "leak";
 const PARTITIONS: i32 = 4;
@@ -38,7 +38,18 @@ const PARTITIONS: i32 = 4;
 const CYCLES: usize = 1_000;
 
 async fn setup() -> (KafkaCluster, Cluster) {
-    let fixture = testkit::single_broker().await.expect("broker");
+    // A short KIP-848 session timeout, because the group test below waits for
+    // the broker to evict members that vanished without leaving. At the 45s
+    // default that eviction alone eats a third of the two-minute test budget;
+    // at 15s the mechanism under test is identical and the wait fits. The
+    // `min` property has to come down with it — the broker clamps against it.
+    let fixture = testkit::single_broker_with(
+        BrokerConfig::new()
+            .with_property("group.consumer.min.session.timeout.ms", "15000")
+            .with_property("group.consumer.session.timeout.ms", "15000"),
+    )
+    .await
+    .expect("broker");
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
         .await
         .expect("admin");
@@ -69,8 +80,7 @@ fn cancel_after(cycle: usize) -> Duration {
 
 /// Producers created, used and dropped — some mid-send — must not accumulate
 /// connections or strand the records they accepted.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_thousand_producer_lifecycles_return_to_baseline() {
     let (_fixture, cluster) = setup().await;
 
@@ -113,8 +123,7 @@ async fn a_thousand_producer_lifecycles_return_to_baseline() {
 /// Consumers assigned, polled and dropped mid-fetch must not leave connections
 /// behind. Their broker-side fetch sessions expire on their own, which is what
 /// the session cache is for, but the sockets are ours to clean up.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_thousand_consumer_lifecycles_return_to_baseline() {
     let (_fixture, cluster) = setup().await;
 
@@ -165,8 +174,7 @@ async fn a_thousand_consumer_lifecycles_return_to_baseline() {
 /// Group members are the case with broker-side state: one that dies without
 /// leaving stays a member until its session expires, so a thousand of them
 /// must not make the group unusable for the one that comes after.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn group_members_that_vanish_do_not_poison_the_group() {
     const MEMBERS: usize = 100;
     let (_fixture, cluster) = setup().await;
@@ -212,7 +220,9 @@ async fn group_members_that_vanish_do_not_poison_the_group() {
     .await
     .expect("subscribe");
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    // Bounded by the last zombie's 15s session expiring, not by 100 of them:
+    // the sessions run down concurrently, most of them during the loop above.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while std::time::Instant::now() < deadline && survivor.assignment().is_empty() {
         survivor.poll().await.expect("poll");
     }

@@ -75,8 +75,7 @@ async fn read_partition(cluster: &Cluster, topic: &str, partition: i32) -> Vec<k
     records
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_record_survives_the_round_trip_exactly() {
     let (_fixture, cluster, _admin) = setup("produced", 6).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
@@ -129,8 +128,7 @@ async fn a_record_survives_the_round_trip_exactly() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_tombstone_round_trips_as_null_and_not_as_empty() {
     let (_fixture, cluster, _admin) = setup("tombstones", 1).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
@@ -162,8 +160,7 @@ async fn a_tombstone_round_trips_as_null_and_not_as_empty() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn every_codec_round_trips() {
     let (_fixture, cluster, _admin) = setup("codecs", 1).await;
 
@@ -206,8 +203,7 @@ async fn every_codec_round_trips() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_keyed_record_lands_where_murmur2_says_it_should() {
     let (_fixture, cluster, _admin) = setup("keyed", 6).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
@@ -242,8 +238,7 @@ async fn a_keyed_record_lands_where_murmur2_says_it_should() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn an_unkeyed_record_sticks_to_one_partition() {
     let (_fixture, cluster, _admin) = setup("sticky", 6).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
@@ -273,8 +268,7 @@ async fn an_unkeyed_record_sticks_to_one_partition() {
     assert!((0..6).contains(&after.partition));
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn acks_leader_is_acknowledged_before_the_record_is_readable() {
     let (_fixture, cluster, _admin) = setup("acked", 1).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new().acks(Acks::Leader));
@@ -318,8 +312,7 @@ async fn await_visible(
     panic!("{topic}-{partition} never reached {expected} visible record(s)");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn producing_to_a_partition_that_does_not_exist_is_refused_before_the_socket() {
     let (_fixture, cluster, _admin) = setup("narrow", 2).await;
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
@@ -337,8 +330,7 @@ async fn producing_to_a_partition_that_does_not_exist_is_refused_before_the_sock
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_read_only_client_cannot_produce() {
     let fixture = testkit::single_broker().await.expect("broker");
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())

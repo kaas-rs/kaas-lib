@@ -24,8 +24,7 @@ fn metadata_request() -> MetadataRequest {
         .with_allow_auto_topic_creation(false)
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_hundred_concurrent_requests_all_resolve_on_one_connection() {
     let broker = testkit::single_broker().await.unwrap();
     let conn = Connection::connect(&broker.bootstrap()[0], ConnectionConfig::new())
@@ -57,8 +56,7 @@ async fn a_hundred_concurrent_requests_all_resolve_on_one_connection() {
     assert_eq!(stats.responses_received, 101, "{stats:?}");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn killing_the_broker_resolves_every_pending_future() {
     let broker = testkit::single_broker().await.unwrap();
     let conn = Connection::connect(&broker.bootstrap()[0], ConnectionConfig::new())
@@ -114,8 +112,7 @@ async fn killing_the_broker_resolves_every_pending_future() {
     assert!(conn.is_closed());
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_deadline_is_the_callers_to_set() {
     let broker = testkit::single_broker().await.unwrap();
     let conn = Connection::connect(&broker.bootstrap()[0], ConnectionConfig::new())
@@ -137,8 +134,7 @@ async fn a_deadline_is_the_callers_to_set() {
         .expect("a timed-out request does not poison the socket");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn dropping_a_request_future_leaves_the_connection_consistent() {
     // Rule 5. Cancelling mid-flight must not desynchronise the socket: the
     // response still arrives, is discarded, and the next request gets its own
@@ -165,8 +161,7 @@ async fn dropping_a_request_future_leaves_the_connection_consistent() {
     assert!(!conn.is_closed());
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_read_only_client_refuses_before_opening_a_socket() {
     let broker = testkit::single_broker().await.unwrap();
     let conn = Connection::connect(&broker.bootstrap()[0], ConnectionConfig::new().read_only())

@@ -32,7 +32,10 @@ api key, and `allow_auto_topic_creation` being false.
 
 ## Acceptance — real brokers, no mocks
 
-`#[ignore]`d by default so `cargo test` stays useful without a Docker daemon.
+Every acceptance test wears `#[testkit::integration_test]`: `#[ignore]`d by
+default so `cargo test` stays useful without a Docker daemon, and capped at
+two minutes of wall clock per test — a test that exceeds the deadline fails,
+and `cargo xtask` refuses a hand-written `#[ignore]` that would dodge it.
 Each test boots `apache/kafka:4.3.1` in KRaft mode through
 [`testkit`](../code-tour/testkit.md).
 

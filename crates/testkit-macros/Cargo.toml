@@ -1,0 +1,20 @@
+[package]
+name        = "testkit-macros"
+version.workspace      = true
+publish     = false
+edition.workspace      = true
+license.workspace      = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lib]
+proc-macro = true
+
+# Already in the tree via `tokio-macros`, so this costs no new builds.
+[dependencies]
+proc-macro2 = "1"
+quote       = "1"
+syn         = { version = "2", features = ["full"] }
+
+[lints]
+workspace = true

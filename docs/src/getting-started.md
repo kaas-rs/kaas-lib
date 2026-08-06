@@ -178,7 +178,9 @@ cargo xtask integration            # acceptance tests, boots real brokers
 cargo xtask docs --serve           # this book, with live reload
 ```
 
-The integration tests are `#[ignore]`d by default so `cargo test` stays fast
-without a Docker daemon. Each one boots `apache/kafka:4.3.1` through
+The integration tests wear `#[testkit::integration_test]`, which expands to
+`#[tokio::test]` + `#[ignore = "needs Docker"]` — so `cargo test` stays fast
+without a Docker daemon — and caps each test at two minutes of wall clock,
+container boot included. Each one boots `apache/kafka:4.3.1` through
 [`testkit`](code-tour/testkit.md); nothing in this repository is verified
 against a mock broker.

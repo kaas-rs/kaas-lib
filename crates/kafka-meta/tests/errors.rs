@@ -1,7 +1,8 @@
 //! M5 acceptance: the error taxonomy.
 //!
 //! `cargo test -p kafka-meta --test errors` — no Docker for the table-driven
-//! half; the integration case at the bottom is `#[ignore]`d as usual.
+//! half; the integration case at the bottom wears
+//! `#[testkit::integration_test]` as usual.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -170,8 +171,7 @@ fn every_known_code_renders_with_its_number() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn describing_a_nonexistent_topic_is_a_non_retriable_unknown_topic() {
     use kafka_conn::protocol::messages::MetadataRequest;
     use kafka_conn::protocol::messages::metadata_request::MetadataRequestTopic;

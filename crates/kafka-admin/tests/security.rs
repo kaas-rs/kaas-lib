@@ -26,8 +26,7 @@ use testkit::{BrokerConfig, Cluster as _};
 /// How long a quota change may take to reach the broker serving describes.
 const QUOTA_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn acl_create_describe_delete_round_trip() {
     let fixture = testkit::single_broker_with(BrokerConfig::new().with_authorizer(true))
         .await
@@ -64,8 +63,7 @@ async fn acl_create_describe_delete_round_trip() {
     assert!(!after.contains(&binding));
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn client_quotas_round_trip() {
     let fixture = testkit::single_broker().await.unwrap();
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -128,8 +126,7 @@ async fn client_quotas_round_trip() {
     assert!(removed[0].1.is_ok(), "{removed:?}");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn scram_credentials_round_trip_and_then_authenticate() {
     // Writing a credential is only meaningful if it can then be used, and the
     // hashing is entirely client-side — so a wrong salt or iteration count
@@ -188,8 +185,7 @@ async fn scram_credentials_round_trip_and_then_authenticate() {
     assert!(deleted[0].1.is_ok(), "{deleted:?}");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_reassignment_is_triggered_and_observed_reaching_completion() {
     let fixture = testkit::cluster(3).await.unwrap();
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -244,8 +240,7 @@ async fn a_reassignment_is_triggered_and_observed_reaching_completion() {
     assert_eq!(replicas, vec![2, 3], "the move did not take effect");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn preferred_leader_election_is_a_no_op_when_nothing_needs_it() {
     let fixture = testkit::cluster(3).await.unwrap();
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -270,8 +265,7 @@ async fn preferred_leader_election_is_a_no_op_when_nothing_needs_it() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn transactions_and_producers_describe() {
     let fixture = testkit::single_broker().await.unwrap();
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -328,8 +322,7 @@ async fn transactions_and_producers_describe() {
 /// Driving it from `ApiKey::known()` rather than from a hand-written list is
 /// what makes it cover api keys nobody has thought about yet: adding a variant
 /// without classifying it lands in the deny-by-default arm and shows up here.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_read_only_client_rejects_every_mutating_api_key_before_opening_a_socket() {
     let fixture = testkit::single_broker().await.unwrap();
     let connection =
@@ -383,8 +376,7 @@ async fn a_read_only_client_rejects_every_mutating_api_key_before_opening_a_sock
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_read_only_admin_client_can_still_read() {
     let fixture = testkit::single_broker().await.unwrap();
     let writer = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())

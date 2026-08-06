@@ -28,11 +28,15 @@ use testkit::{BrokerConfig, Cluster as _, KafkaCluster};
 
 /// How long a fixture may take to settle.
 ///
-/// Deliberately generous. The fixture previously slept a fixed 15 seconds,
-/// which was fine on an idle laptop and failed every time on CI, where
-/// several of these fixtures boot their own broker concurrently and a JVM
-/// console consumer needs a good part of that budget just to reach `main`.
-const SETTLE_TIMEOUT: Duration = Duration::from_secs(180);
+/// As generous as the test budget allows. The fixture previously slept a
+/// fixed 15 seconds, which was fine on an idle laptop and failed every time
+/// on CI, where several of these fixtures boot their own broker concurrently
+/// and a JVM console consumer needs a good part of that budget just to reach
+/// `main`. The ceiling is `#[testkit::integration_test]`'s two-minute
+/// deadline on the whole test: this has to leave room for the broker boot
+/// before it *and* stay below the cap, so that a fixture that never settles
+/// fails with the consumer logs attached rather than as a bare timeout.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Start a console consumer in the background, in a group, and leave it running.
 async fn start_consumer(fixture: &KafkaCluster, tool: &str, group: &str, extra: &[&str]) {
@@ -256,8 +260,7 @@ async fn consumer_logs(fixture: &KafkaCluster, groups: &[&str]) -> String {
     out
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn all_three_describable_group_kinds_list_with_the_right_type_and_members() {
     let (_fixture, admin) = fixture_with_all_group_kinds().await;
 
@@ -343,8 +346,7 @@ async fn all_three_describable_group_kinds_list_with_the_right_type_and_members(
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn offsets_can_be_read_and_reset_for_a_classic_group() {
     let fixture = testkit::single_broker().await.unwrap();
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -398,8 +400,7 @@ async fn offsets_can_be_read_and_reset_for_a_classic_group() {
     assert_eq!(offset.offset, 0);
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn offsets_can_be_reset_for_a_kip_848_consumer_group() {
     // The other half of the trap. A KIP-848 group wants `member_epoch = -1` in
     // the same wire field, and sending the classic sentinel yields
@@ -453,8 +454,7 @@ async fn offsets_can_be_reset_for_a_kip_848_consumer_group() {
     assert_eq!(offset.offset, 25);
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn resetting_a_live_groups_offsets_is_refused() {
     // The broker would accept this and let the live member overwrite it
     // seconds later. A reset that "succeeds" and silently does nothing is
@@ -470,8 +470,7 @@ async fn resetting_a_live_groups_offsets_is_refused() {
     assert!(rendered.contains("empty"), "{rendered}");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn groups_can_be_deleted_and_their_offsets_removed() {
     let fixture = testkit::single_broker().await.unwrap();
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -509,8 +508,7 @@ async fn groups_can_be_deleted_and_their_offsets_removed() {
     assert!(!listings.iter().any(|l| l.group_id == "doomed"));
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_groups_lag_can_be_computed_from_committed_and_latest_offsets() {
     // The single most-rendered number in a Kafka UI, and the one that needs
     // both halves of this milestone to be right.

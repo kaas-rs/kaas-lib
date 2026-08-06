@@ -99,8 +99,7 @@ async fn leader_index(cluster: &Cluster, fixture: &KafkaCluster, topic: &str) ->
 
 /// The acceptance case: 20k records to one partition, through a leader that
 /// dies and comes back.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn twenty_thousand_records_survive_a_leader_restart_exactly_once_and_in_order() {
     const TOPIC: &str = "idempotence-restart";
     const RECORDS: usize = 20_000;
@@ -196,8 +195,7 @@ async fn twenty_thousand_records_survive_a_leader_restart_exactly_once_and_in_or
 }
 
 /// The clamp PLAN.md names, asserted where a caller can see it.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_non_idempotent_producer_clamps_its_connections_to_one_in_flight() {
     const TOPIC: &str = "idempotence-in-flight";
 
@@ -248,8 +246,7 @@ async fn a_non_idempotent_producer_clamps_its_connections_to_one_in_flight() {
 ///
 /// Re-claiming would bump the epoch and fence the producer against itself,
 /// which presents as every second batch failing with `INVALID_PRODUCER_EPOCH`.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn the_producer_id_is_claimed_once_for_many_batches() {
     const TOPIC: &str = "idempotence-one-id";
     const RECORDS: usize = 5_000;

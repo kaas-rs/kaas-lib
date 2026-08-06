@@ -39,8 +39,7 @@ fn rss_kib() -> Option<u64> {
     Some(pages * 4)
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_thousand_cancelled_scans_return_to_baseline() {
     let fixture = testkit::single_broker().await.unwrap();
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -156,8 +155,7 @@ async fn a_thousand_cancelled_scans_return_to_baseline() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn cancelling_between_every_single_event_is_safe() {
     // The tightest cancellation schedule: drop after exactly one event, over
     // and over. If any state is left half-updated by a cancellation, this is

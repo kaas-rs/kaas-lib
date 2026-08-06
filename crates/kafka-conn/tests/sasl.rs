@@ -20,8 +20,7 @@ fn metadata_request() -> MetadataRequest {
         .with_allow_auto_topic_creation(false)
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn sasl_plaintext_plain_authenticates() {
     let broker = testkit::single_broker_with(
         BrokerConfig::new()
@@ -43,8 +42,7 @@ async fn sasl_plaintext_plain_authenticates() {
     conn.send(metadata_request()).await.unwrap();
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn plain_over_an_unencrypted_socket_is_refused_by_default() {
     let broker = testkit::single_broker_with(
         BrokerConfig::new()
@@ -66,8 +64,7 @@ async fn plain_over_an_unencrypted_socket_is_refused_by_default() {
     assert!(matches!(err, Error::Authentication(_)), "{err:?}");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn sasl_ssl_scram_sha_512_authenticates() {
     let broker = testkit::single_broker_with(
         BrokerConfig::new()
@@ -89,8 +86,7 @@ async fn sasl_ssl_scram_sha_512_authenticates() {
     conn.send(metadata_request()).await.unwrap();
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_wrong_password_is_an_authentication_error_not_a_timeout() {
     // The distinction matters to a UI: "check your credentials" and "the
     // cluster is unreachable" are different screens, and a handshake that
@@ -123,8 +119,7 @@ async fn a_wrong_password_is_an_authentication_error_not_a_timeout() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn an_unknown_user_is_an_authentication_error() {
     let broker = testkit::single_broker_with(
         BrokerConfig::new()
@@ -146,8 +141,7 @@ async fn an_unknown_user_is_an_authentication_error() {
     assert!(matches!(err, Error::Authentication(_)), "{err:?}");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_connection_survives_kip_368_reauthentication() {
     // Without KIP-368 this connection dies on a timer roughly ten seconds in,
     // and the symptom — a broker that "randomly" drops long-lived connections —

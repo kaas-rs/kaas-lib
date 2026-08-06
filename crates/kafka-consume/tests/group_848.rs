@@ -72,8 +72,7 @@ fn owned(members: &[&GroupConsumer]) -> Vec<BTreeSet<(String, i32)>> {
 }
 
 /// The acceptance case: three members, full coverage, empty intersection.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn three_consumers_cover_every_partition_exactly_once() {
     let (_fixture, cluster) = setup().await;
     let group = "group-848-coverage";
@@ -88,7 +87,7 @@ async fn three_consumers_cover_every_partition_exactly_once() {
         .await
         .expect("c");
 
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
         a.poll().await.expect("a");
         b.poll().await.expect("b");
@@ -134,8 +133,7 @@ async fn three_consumers_cover_every_partition_exactly_once() {
 /// A member leaving hands its partitions on rather than stranding them, and a
 /// continuously-produced stream shows no gap and no double delivery across the
 /// rebalance.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_departing_member_is_replaced_without_a_gap_or_a_duplicate() {
     const RECORDS: usize = 3_000;
 
@@ -232,8 +230,7 @@ async fn a_departing_member_is_replaced_without_a_gap_or_a_duplicate() {
 /// The ordering is the assertion. A hook that fires after the revocation is
 /// worth nothing: by then another member owns the partition and may already be
 /// writing, so a caller flushing its own state is racing somebody else.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
     const RECORDS: usize = 500;
 
@@ -410,8 +407,7 @@ async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
 }
 
 /// A single member owns everything, and leaving is idempotent.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn one_member_owns_the_whole_topic_and_can_leave_twice() {
     let (_fixture, cluster) = setup().await;
     let group = "group-848-single";

@@ -90,8 +90,7 @@ async fn write_transaction(producer: &Producer, topic: &str, prefix: &str, count
 
 /// The acceptance case: one committed transaction, one aborted, same
 /// partition, and two readers that must disagree about what is there.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_committed_transaction_is_visible_and_an_aborted_one_is_not() {
     const TOPIC: &str = "txn-visibility";
     const RECORDS: usize = 100;
@@ -137,8 +136,7 @@ async fn a_committed_transaction_is_visible_and_an_aborted_one_is_not() {
 
 /// Fencing: a second producer sharing the transactional id wins, and the first
 /// must fail terminally rather than retry into a wall.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_fenced_producer_fails_terminally_rather_than_retrying() {
     const TOPIC: &str = "txn-fencing";
     const ID: &str = "txn-fencing-shared";
@@ -188,8 +186,7 @@ async fn a_fenced_producer_fails_terminally_rather_than_retrying() {
 }
 
 /// The API refuses the orders that cannot work, before the network.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn the_transaction_api_refuses_an_impossible_order() {
     const TOPIC: &str = "txn-order";
 

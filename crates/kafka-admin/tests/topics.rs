@@ -90,8 +90,7 @@ fn find<'a, K: PartialEq, T>(
         .expect("a result for every requested item")
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn create_describe_alter_verify_delete() {
     let fixture = testkit::cluster(3).await.unwrap();
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -161,8 +160,7 @@ async fn create_describe_alter_verify_delete() {
     assert!(find(&deleted, &"orders".to_owned()).is_ok(), "{deleted:?}");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn describing_fifty_topics_with_two_missing_gives_48_ok_and_2_err() {
     // Rule 4, stated as an assertion. A global error here would make the topic
     // list unusable on any cluster where something is mid-deletion.
@@ -201,8 +199,7 @@ async fn describing_fifty_topics_with_two_missing_gives_48_ok_and_2_err() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn per_topic_size_on_rf3_is_the_single_replica_size_not_three_times_it() {
     let fixture = testkit::cluster(3).await.unwrap();
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -256,8 +253,7 @@ async fn per_topic_size_on_rf3_is_the_single_replica_size_not_three_times_it() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn all_five_reachable_offset_sentinels_answer() {
     let fixture = testkit::single_broker().await.unwrap();
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -302,8 +298,7 @@ async fn all_five_reachable_offset_sentinels_answer() {
     assert_eq!(latest.offset, Some(100));
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn the_kip_1023_sentinel_reports_the_gap_rather_than_guessing() {
     // An honest blocker made executable: `kafka-protocol` 0.17 caps ListOffsets
     // at v10 and `-6` needs v11. The right behaviour is an error that names the
@@ -331,8 +326,7 @@ async fn the_kip_1023_sentinel_reports_the_gap_rather_than_guessing() {
     assert!(rendered.contains("v11"), "{rendered}");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn describe_cluster_and_log_dirs_agree_with_metadata() {
     let fixture = testkit::cluster(3).await.unwrap();
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
@@ -355,8 +349,7 @@ async fn describe_cluster_and_log_dirs_agree_with_metadata() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn delete_records_moves_the_low_watermark() {
     let fixture = testkit::single_broker().await.unwrap();
     let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())

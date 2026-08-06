@@ -8,6 +8,7 @@ repository.workspace   = true
 rust-version.workspace = true
 
 [dependencies]
+testkit-macros = { path = "../testkit-macros" }
 testcontainers = { workspace = true }
 tokio          = { workspace = true }
 thiserror      = { workspace = true }

@@ -10,8 +10,9 @@
 //! the command that actually decides whether a milestone is done. A
 //! green `ci` is not evidence.
 
-use std::env;
+use std::path::Path;
 use std::process::Command;
+use std::{env, fs};
 
 use anyhow::{Context, Result, bail};
 
@@ -32,8 +33,64 @@ fn main() -> Result<()> {
     }
 }
 
+/// Refuse hand-written `#[ignore]` in workspace test sources.
+///
+/// The integration job is `cargo test -- --ignored`, so `#[ignore]` is the
+/// door into it — and `#[testkit::integration_test]` is the only thing
+/// allowed to write it, because that attribute is where the two-minute
+/// per-test deadline lives. A bare `#[ignore]` would put a test in the job
+/// with no deadline at all, and it would look exactly like all the others
+/// until the day it wedged the suite.
+///
+/// `crates/interop` is exempt: it is not a workspace member and runs under
+/// `cargo xtask interop`, a different job with different rules.
+fn enforce_test_deadline() -> Result<()> {
+    // Baked in at build time; the workspace root is xtask's parent. Correct
+    // regardless of the directory `cargo xtask` is invoked from.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .context("xtask has no parent directory")?;
+
+    let mut offenders = Vec::new();
+    for crate_dir in fs::read_dir(root.join("crates"))? {
+        let crate_dir = crate_dir?.path();
+        if crate_dir.file_name().is_some_and(|name| name == "interop") {
+            continue;
+        }
+        let tests = crate_dir.join("tests");
+        if !tests.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&tests)? {
+            let file = entry?.path();
+            if file.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let source =
+                fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+            for (index, line) in source.lines().enumerate() {
+                if line.trim_start().starts_with("#[ignore") {
+                    offenders.push(format!("  {}:{}", file.display(), index + 1));
+                }
+            }
+        }
+    }
+
+    if offenders.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "hand-written #[ignore] found in workspace tests — use \
+             #[testkit::integration_test], which is where the two-minute \
+             deadline lives:\n{}",
+            offenders.join("\n")
+        )
+    }
+}
+
 /// fmt + clippy + unit tests. No Docker required.
 fn ci() -> Result<()> {
+    enforce_test_deadline()?;
     run("cargo", &["fmt", "--check"])?;
     run(
         "cargo",
@@ -53,6 +110,12 @@ fn ci() -> Result<()> {
 /// The `#[ignore]`d integration tests. Requires a reachable Docker
 /// daemon — `testcontainers` boots `apache/kafka:4.3.1` per fixture.
 ///
+/// Every test in this job wears `#[testkit::integration_test]`, which caps it
+/// at two minutes of wall clock, container boot included — enforced by
+/// [`enforce_test_deadline`] refusing any other way in. A test that runs
+/// longer fails; a suite that wedges becomes one red test instead of a CI job
+/// the runner eventually kills.
+///
 /// `--no-fail-fast` because these are acceptance criteria, not a build gate.
 /// Cargo otherwise stops at the first *test binary* that fails, and each one
 /// here is a whole milestone: a single broken assertion in `kafka-read`'s
@@ -61,6 +124,7 @@ fn ci() -> Result<()> {
 /// red is the entire point of the command, so pay for every one of them.
 /// The exit status still reflects any failure.
 fn integration() -> Result<()> {
+    enforce_test_deadline()?;
     run(
         "cargo",
         &[

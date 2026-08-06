@@ -56,8 +56,7 @@ async fn setup(topic: &str, partitions: i32, config: BrokerConfig) -> (KafkaClus
     (fixture, cluster)
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn the_last_500_of_100k_records_are_exactly_the_last_500() {
     let (fixture, cluster) = setup("tailed", 1, BrokerConfig::new()).await;
     produce_randomised(&fixture, "tailed", 100_000).await;
@@ -123,8 +122,7 @@ async fn the_last_500_of_100k_records_are_exactly_the_last_500() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_compacted_topic_with_offset_gaps_terminates_and_counts_correctly() {
     // The second failure mode: offsets are no longer one apart, so offset
     // arithmetic over-estimates every window and a fixed step crawls. This
@@ -210,8 +208,7 @@ async fn a_compacted_topic_with_offset_gaps_terminates_and_counts_correctly() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_tail_longer_than_the_partition_returns_everything_without_looping() {
     let (fixture, cluster) = setup("short", 1, BrokerConfig::new()).await;
     fixture
@@ -238,8 +235,7 @@ async fn a_tail_longer_than_the_partition_returns_everything_without_looping() {
     assert_eq!(tails[0].records.len(), 25);
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn an_empty_partition_tails_to_nothing() {
     let (_fixture, cluster) = setup("empty", 1, BrokerConfig::new()).await;
     let tails = tokio::time::timeout(
@@ -253,8 +249,7 @@ async fn an_empty_partition_tails_to_nothing() {
     assert_eq!(tails[0].fetches, 0, "an empty partition needs no fetch");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_multi_partition_tail_spreads_the_limit() {
     let (fixture, cluster) = setup("spread", 4, BrokerConfig::new()).await;
     fixture
@@ -294,8 +289,7 @@ async fn a_multi_partition_tail_spreads_the_limit() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn an_offset_anchored_tail_includes_the_anchor_and_stops_there() {
     // The property the whole anchor exists for: `Offset(n)` is an *inclusive*
     // upper bound. An off-by-one here is invisible on a live cluster — the
@@ -329,8 +323,7 @@ async fn an_offset_anchored_tail_includes_the_anchor_and_stops_there() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_partition_whose_log_end_is_below_the_anchor_yields_its_own_tail() {
     // Partitions of one topic sit at different offsets, so a single anchor is
     // routinely past the end of some of them. That is a result, not an error:
@@ -379,8 +372,7 @@ async fn a_partition_whose_log_end_is_below_the_anchor_yields_its_own_tail() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn an_anchor_below_the_log_start_is_an_empty_result() {
     let (fixture, cluster) = setup("expired", 1, BrokerConfig::new()).await;
     fixture
@@ -413,8 +405,7 @@ async fn an_anchor_below_the_log_start_is_an_empty_result() {
     assert_eq!(tails[0].fetches, 0, "and it costs no fetch");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn an_anchored_tail_converges_on_a_compacted_topic() {
     // The step-growing behaviour is the reason §3.3 could be additive rather
     // than a second implementation: an arbitrary anchor faces exactly the
@@ -503,8 +494,7 @@ async fn an_anchored_tail_converges_on_a_compacted_topic() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_timestamp_anchor_stops_at_or_before_the_instant() {
     let (fixture, cluster) = setup("timed", 1, BrokerConfig::new()).await;
 
@@ -558,8 +548,7 @@ async fn a_timestamp_anchor_stops_at_or_before_the_instant() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_timestamp_anchor_after_every_record_reads_the_whole_tail() {
     let (fixture, cluster) = setup("timedpast", 1, BrokerConfig::new()).await;
     fixture

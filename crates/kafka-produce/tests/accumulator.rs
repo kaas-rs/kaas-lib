@@ -148,8 +148,7 @@ async fn traffic(cluster: &Cluster, brokers: &[i32]) -> Traffic {
 
 /// The acceptance case: 50k records, every one delivered, in far fewer than
 /// 50k requests.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn fifty_thousand_records_arrive_in_under_five_hundred_requests() {
     const TOPIC: &str = "accumulator-batching";
     const PARTITIONS: i32 = 6;
@@ -227,8 +226,7 @@ async fn fifty_thousand_records_arrive_in_under_five_hundred_requests() {
 
 /// Rule 4 in the write direction: the oversized record fails, the batch it
 /// would have joined does not.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn one_oversized_record_among_a_thousand_fails_alone() {
     const TOPIC: &str = "accumulator-oversized";
     const RECORDS: usize = 1_000;
@@ -283,8 +281,7 @@ async fn one_oversized_record_among_a_thousand_fails_alone() {
 
 /// Every codec, batched rather than one record at a time — compression only
 /// has anything to work across once there is a batch.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn every_codec_round_trips_a_whole_batch() {
     const PARTITIONS: i32 = 3;
     const RECORDS: usize = 2_000;
@@ -323,8 +320,7 @@ async fn every_codec_round_trips_a_whole_batch() {
 
 /// `flush` is the only way a caller who never awaits a delivery can know their
 /// records left the buffer.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn flush_waits_for_records_nobody_awaited() {
     const TOPIC: &str = "accumulator-flush";
     const RECORDS: usize = 5_000;
@@ -361,8 +357,7 @@ async fn flush_waits_for_records_nobody_awaited() {
 
 /// The buffer bound is real: a producer given far less memory than the payload
 /// still delivers everything, by making its caller wait.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_tiny_buffer_applies_backpressure_rather_than_dropping_records() {
     const TOPIC: &str = "accumulator-backpressure";
     const RECORDS: usize = 10_000;
@@ -395,8 +390,7 @@ async fn a_tiny_buffer_applies_backpressure_rather_than_dropping_records() {
 /// Ordering is the property the one-batch-per-partition rule exists to
 /// protect, and it is checked per partition because that is the only place
 /// Kafka promises it.
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn records_keep_their_order_within_a_partition() {
     const TOPIC: &str = "accumulator-order";
     const RECORDS: usize = 20_000;

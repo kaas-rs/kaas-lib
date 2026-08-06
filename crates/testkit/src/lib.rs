@@ -53,3 +53,10 @@ pub use config::{
 pub use error::{Error, Result};
 pub use harness::{Cluster, ExecOutput, ExternalCluster, exec_ok};
 pub use kafka::{KafkaCluster, cluster, cluster_with, single_broker, single_broker_with};
+/// The attribute every integration test wears: `#[tokio::test]` +
+/// `#[ignore = "needs Docker"]` plus a hard two-minute deadline on the whole
+/// test, container boot included. `cargo xtask` refuses a hand-written
+/// `#[ignore]` in workspace test sources, so this is the only door into the
+/// integration job — which is what makes the deadline a property of the job
+/// rather than a convention.
+pub use testkit_macros::integration_test;

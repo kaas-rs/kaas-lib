@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "xtask",
     "crates/testkit",
+    "crates/testkit-macros",
     "crates/kafka-conn",
     "crates/kafka-meta",
     "crates/kafka-admin",

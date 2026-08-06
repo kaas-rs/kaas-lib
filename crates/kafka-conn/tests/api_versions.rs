@@ -16,8 +16,7 @@
 use kafka_conn::{ApiKey, Connection, ConnectionConfig};
 use testkit::Cluster;
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn api_versions_round_trip_and_negotiation() {
     let broker = testkit::single_broker().await.unwrap();
     let addr = broker.bootstrap()[0].clone();
@@ -94,8 +93,7 @@ async fn api_versions_round_trip_and_negotiation() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn negotiation_picks_the_lower_of_the_two_ceilings() {
     let broker = testkit::single_broker().await.unwrap();
     let conn = Connection::connect(&broker.bootstrap()[0], ConnectionConfig::new())
@@ -121,8 +119,7 @@ async fn negotiation_picks_the_lower_of_the_two_ceilings() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn the_handshake_counts_its_own_bytes() {
     // The counters exist from M2 but are fed by the handshake too; M10's
     // acceptance arithmetic is only meaningful if nothing bypasses them.

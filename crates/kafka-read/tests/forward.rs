@@ -59,8 +59,7 @@ async fn setup(partitions: i32) -> (KafkaCluster, Cluster, Admin) {
     (fixture, cluster, admin)
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn ten_thousand_records_across_six_partitions_with_mixed_codecs() {
     let (fixture, cluster, _admin) = setup(6).await;
 
@@ -133,8 +132,7 @@ async fn ten_thousand_records_across_six_partitions_with_mixed_codecs() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_corrupt_batch_yields_malformed_and_the_scan_continues() {
     // Hand-crafted corruption, produced by writing over a record batch in the
     // broker's own log segment. Everything before and after it must still
@@ -213,8 +211,7 @@ async fn a_corrupt_batch_yields_malformed_and_the_scan_continues() {
     println!("{records} records, {malformed} malformed batches");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn truncating_a_fetch_mid_batch_produces_no_malformed_events() {
     // The not-a-bug that matters most. A `max_bytes` small enough to cut a
     // batch in half is the normal case for any large fetch; a decoder that
@@ -251,8 +248,7 @@ async fn truncating_a_fetch_mid_batch_produces_no_malformed_events() {
     assert_eq!(records, 2000, "a tight byte budget must not lose records");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_limited_scan_stops_early_and_a_filter_narrows_it() {
     let (fixture, cluster, _admin) = setup(1).await;
     produce(&fixture, "scanned", 1, 1000, "none").await;
@@ -288,8 +284,7 @@ async fn a_limited_scan_stops_early_and_a_filter_narrows_it() {
     assert!((1..100).contains(&matched), "{matched} records matched 999");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_scan_from_a_timestamp_skips_what_came_before() {
     let (fixture, cluster, _admin) = setup(1).await;
     produce(&fixture, "scanned", 1, 500, "none").await;
@@ -318,8 +313,7 @@ async fn a_scan_from_a_timestamp_skips_what_came_before() {
     assert_eq!(records, 500, "the timestamp cut the scan in half");
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_scan_from_an_offset_never_emits_records_before_it() {
     // A fetch begins at whatever *batch* contains the offset, so the first one
     // routinely hands back records from before it. The walk in `backward` has
@@ -363,8 +357,7 @@ async fn a_scan_from_an_offset_never_emits_records_before_it() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn a_following_scan_waits_at_the_log_end_and_sees_what_arrives_next() {
     // Without `following`, a scan from `Latest` plans against a log end it is
     // already standing on and finishes immediately having emitted nothing —
@@ -410,8 +403,7 @@ async fn a_following_scan_waits_at_the_log_end_and_sees_what_arrives_next() {
     }
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn following_does_not_stall_behind_an_idle_partition() {
     // The regression this guards: a tail that polls every idle partition
     // before emitting anything pays one `max_wait_ms` per record. On a topic
@@ -449,8 +441,7 @@ async fn following_does_not_stall_behind_an_idle_partition() {
     );
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn dropping_a_following_scan_stops_it() {
     // The same cancel-safety property as a bounded scan, on the stream that
     // actually stays open long enough for a leak to matter.
@@ -482,8 +473,7 @@ async fn dropping_a_following_scan_stops_it() {
     assert_eq!(cluster.pool().live_connections().await, before);
 }
 
-#[tokio::test]
-#[ignore = "needs Docker"]
+#[testkit::integration_test]
 async fn dropping_a_scan_stops_it() {
     // Cancel safety, at the scan level. The stream does its own work as it is
     // polled, so dropping it must free everything immediately rather than

@@ -41,6 +41,7 @@ kafka-protocol = { version = "0.17", default-features = false,
 ```
 crates/
   testkit/        # testcontainers fixtures: brokers, clusters, SASL/authorizer configs
+  testkit-macros/ # #[testkit::integration_test] — the two-minute per-test deadline
   kafka-conn/     # framing, correlation, ApiVersions, TLS, SASL, connection pool
   kafka-meta/     # metadata cache, leader + coordinator routing, error taxonomy, RPC routing
   kafka-admin/    # admin RPCs
@@ -106,7 +107,7 @@ cargo test -p <crate>                 # unit
 cargo test -p <crate> -- --ignored    # integration, needs Docker
 ```
 
-Integration tests are `#[ignore]`d by default so `cargo test` stays fast without Docker.
+Integration tests are `#[ignore]`d by default so `cargo test` stays fast without Docker. They wear `#[testkit::integration_test]` — never a bare `#[tokio::test]` + `#[ignore]` pair — which expands to exactly that pair plus a **hard two-minute deadline** on the whole test, container boot included. A test that exceeds it fails. `cargo xtask ci` and `cargo xtask integration` refuse hand-written `#[ignore]` in workspace test sources, so the deadline is a property of the job, not a convention; keep internal poll deadlines comfortably under two minutes so the assertion that fires is the informative one.
 
 Lints live in `[workspace.lints]` at the root, so a new crate inherits rule 2 by adding `[lints] workspace = true` to its manifest rather than by repeating `#![deny(...)]` attributes and eventually forgetting one. `.cargo/config.toml` also sets `rustflags = ["-D", "warnings"]`, so warnings fail the build locally, not just in CI.
 
