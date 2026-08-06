@@ -1,6 +1,8 @@
 # PLAN.md — Kafka 4.x client layer
 
-Scope: enough client to back a Kafka cluster UI. Admin coverage is the bulk; the read path is browse-shaped, not group-consumer-shaped. Producer is minimal. Estimated 3–5 weeks of agent-assisted work — the slip risk is not RPC count in M6–M8, it is M7's fixtures and M9/M10 correctness.
+> **This file is a build log, not the current scope.** It is written in the order the work happened, so its early sections describe an admin-first client for a cluster UI. That is history: phase 2 landed and kaas-lib is a general-purpose Kafka client. For what the project *is*, read `CLAUDE.md`; for what shipped, read the [roadmap](docs/src/guide/roadmap.md). Milestone acceptance commands below remain authoritative — they are what each milestone was verified against.
+
+Original scope: enough client to back a Kafka cluster UI. Admin coverage is the bulk; the read path is browse-shaped, not group-consumer-shaped. Producer is minimal. Estimated 3–5 weeks of agent-assisted work — the slip risk is not RPC count in M6–M8, it is M7's fixtures and M9/M10 correctness.
 
 M0–M11 are that client. **Phase 2 (M12–M19) is the extension to a general-purpose one** — a real producer and real consumer-group membership. It roughly doubles the codebase, and the correctness bar is higher than anything in phase 1: these are the paths where a bug loses or duplicates data rather than rendering a wrong number in a UI.
 

@@ -1,14 +1,16 @@
 //! The consume path: incremental fetch sessions, a streaming fetcher, and
 //! offsets for a consumer that is not a group member.
 //!
-//! # What this is, and what M17/M18 add
+//! # The two modes
 //!
-//! A [`Consumer`] here reads an **explicitly assigned** set of partitions.
-//! Nothing rebalances it, nothing heartbeats, and no broker knows it exists as
-//! a member of anything. That is a complete and useful mode — it is how you
-//! pin a reader to a partition, or run a single-instance tail — and it is also
-//! the substrate the group protocols sit on. Group membership is M17 (KIP-848)
-//! and M18 (classic).
+//! A [`Consumer`] reads an **explicitly assigned** set of partitions. Nothing
+//! rebalances it, nothing heartbeats, and no broker knows it exists as a
+//! member of anything. That is a complete and useful mode — it is how you pin
+//! a reader to a partition, or run a single-instance tail — and it is also the
+//! substrate the group protocols sit on.
+//!
+//! Group membership is the other mode, and both protocols are implemented:
+//! KIP-848 and the classic `JoinGroup`/`SyncGroup`/`Heartbeat` path.
 //!
 //! It does borrow a group's *offset storage*: set
 //! [`ConsumerConfig::group_id`] and [`Consumer::commit`] stores positions

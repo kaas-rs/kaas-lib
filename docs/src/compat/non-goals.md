@@ -4,44 +4,64 @@ The fastest honest answer to "can I use this". Everything here is a decision,
 not a gap waiting to be closed by accident — though
 [Roadmap](../guide/roadmap.md) covers which ones are on the list to lift.
 
-## This is not yet a general-purpose Kafka client
+## What is no longer a non-goal
 
-**There is a producer, and it is deliberately a small one.**
-[`kafka-produce`](../code-tour/kafka-produce.md) encodes v2 record batches,
-partitions by Java-compatible murmur2, sticks unkeyed records to one partition
-per KIP-480, and writes with every compression codec. What it does not have
-is a batching accumulator, idempotence or transactions, so a produce costs one
-round trip per record, and an ambiguous failure — a timeout, a dropped
-connection — is reported rather than retried, because re-sending without a
-sequence number is how a producer duplicates data. `acks=0` is refused at the
-type level; see that crate's documentation for why.
+This page used to open by saying kaas-lib was not a general-purpose client:
+a small producer with no accumulator, and no group membership at all. Both
+have since shipped, and the page is kept honest here rather than quietly
+edited, because "can I use this" deserves a straight answer.
 
-**There is no consumer-group membership.** The library *describes* groups
-thoroughly — all three describable kinds, members, assignments, committed
-offsets — but it never joins one. No `JoinGroup`, no
-`ConsumerGroupHeartbeat`, no rebalance, no auto-commit, no poll loop.
+- **The producer is a real one.**
+  [`kafka-produce`](../code-tour/kafka-produce.md) has a batching accumulator
+  with linger and bounded buffer memory, Java-compatible murmur2
+  partitioning, KIP-480 sticky partitioning, every compression codec,
+  idempotence and transactions.
+- **Group membership exists**, in both protocols — KIP-848 and the classic
+  `JoinGroup`/`SyncGroup`/`Heartbeat` path, with assignor payloads
+  byte-identical to Java's.
+- **Incremental fetch sessions exist** (KIP-227), behind a streaming fetcher
+  that batches partitions per broker.
 
-If you need high-throughput producing, exactly-once semantics, or group
-membership today, use [`rdkafka`](https://crates.io/crates/rdkafka). It wraps
-librdkafka, needs cmake and a C toolchain, and is the mature option.
+Two genuine omissions remain inside that surface, and both are decisions:
 
-## The read path is browse-shaped, not consumer-shaped
+- **`acks=0` is not offered.** It is a request the broker never answers, so a
+  correlation-based client would leave a pending `oneshot` forever and report
+  every successful write as a timeout. Refused at the config boundary rather
+  than given a fire-and-forget path.
+- **Classic groups advertise `range`, `roundrobin` and `cooperative-sticky`,
+  not eager `sticky`.** `StickyAssignor` carries its state in the
+  subscription's `user_data` as a struct with no schema in `kafka-protocol`,
+  and hand-rolling a wire format is what this codebase does not do.
+  Cooperative-sticky has no such problem, so incremental rebalancing is
+  available; a group whose other members are pinned to eager `sticky` alone
+  fails at join time with `INCONSISTENT_GROUP_PROTOCOL`, which is loud rather
+  than subtle.
 
-`scan` and `tail` answer a UI's questions: show me this topic from here, show
-me what just happened. They are bounded, one-shot, and they never commit an
-offset.
+[`rdkafka`](https://crates.io/crates/rdkafka) remains the more mature option,
+and the honest tradeoff is maturity against toolchain: it wraps librdkafka
+and wants cmake and a C toolchain, where this is Rust apart from the `lz4`
+and `zstd` codecs, which reach C through `lz4-sys` and `zstd-sys`.
 
-Consequences worth being explicit about:
+## `kafka-read` is browse-shaped, and stays that way
+
+This is a scoping decision between two crates rather than a missing feature.
+If you want a consumer, use `kafka-consume`. `kafka-read`'s `scan` and `tail`
+answer a UI's questions — show me this topic from here, show me what just
+happened — and they are bounded, one-shot, and never commit an offset.
+
+Consequences worth being explicit about, all of them about `kafka-read`
+specifically:
 
 - **No incremental fetch sessions.** Every fetch is a full fetch. Correct for
-  one-shot scans, wrong for a steady-state consumer — see
-  [KIP-227](kip-index.md).
+  one-shot scans, wrong for a steady-state consumer — which is why
+  `kafka-consume` has them and this does not. See [KIP-227](kip-index.md).
 - **No offset commits from the read path.** `kafka-admin` can commit offsets
-  as an *admin* operation (resetting a group's position); the read path never
-  does it as a side effect of reading.
+  as an *admin* operation (resetting a group's position) and `kafka-consume`
+  commits as a group member; `kafka-read` never does it as a side effect of
+  reading.
 - **No partition assignment or ownership.** Two `scan` calls on the same
   partition both read it. Nothing coordinates them, because nothing is
-  supposed to.
+  supposed to — coordination is what group membership is for.
 
 ## We do not parse `__consumer_offsets`
 

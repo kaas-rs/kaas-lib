@@ -109,6 +109,12 @@ are wrong.
 
 ## What is not here
 
-No producer, no consumer-group membership, no fetch sessions. The scan API is
-one-shot by design and does not maintain incremental fetch state. See
-[Non-goals](../compat/non-goals.md) and [Roadmap](../guide/roadmap.md).
+The producer, group membership and fetch sessions that this section once
+listed as absent have all landed — they live in `kafka-produce` and
+`kafka-consume`. What remains true is narrower: **`kafka-read`'s scan API is
+one-shot by design and maintains no incremental fetch state**, because a
+browse is not a subscription. `kafka-consume` is the crate that keeps a
+session.
+
+See [Non-goals](../compat/non-goals.md) for the decisions that are still
+decisions, and [Roadmap](../guide/roadmap.md) for what shipped.

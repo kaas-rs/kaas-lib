@@ -1,9 +1,13 @@
 # kaas-lib
 
-A Kafka 4.x client layer for Rust, built directly on the
+A general-purpose Kafka 4.x client library for Rust, built directly on the
 [`kafka-protocol`](https://github.com/kafka-protocol-rs/kafka-protocol-rs)
-codec. Admin and control-plane first, with a read path shaped for browsing a
-topic rather than for joining a consumer group.
+codec. Admin, produce and consume are all first-class, with a fluent API and
+no librdkafka underneath.
+
+It was written to support the [kaas initiative](#relationship-to-the-kaas-initiative)
+— the kaas broker, kaas-ui, and the tooling around them — but nothing in it
+assumes a kaas component on either end.
 
 📖 **[Documentation](https://kaas-rs.github.io/kaas-lib/)**
 
@@ -20,9 +24,9 @@ topic rather than for joining a consumer group.
 
 ```toml
 [dependencies]
-kafka-admin   = "0.2"
-kafka-read    = "0.2"
-kafka-produce = "0.2"
+kafka-admin   = "0.3"
+kafka-read    = "0.3"
+kafka-produce = "0.3"
 ```
 
 The crates publish to crates.io in lockstep at a single version — they are one
@@ -44,6 +48,17 @@ version-dependent request shapes are all handled below the API you call.
 Where a difference genuinely cannot be absorbed, it surfaces as something
 legible — `Unsupported`, `Unrecognized`, or an `UnsupportedApi` carrying both
 version ranges — rather than as a silently wrong answer.
+
+**Rust, not a binding.** There is no librdkafka here, and no cmake. One
+honest exception: the `lz4` and `zstd` codecs reach C through
+`kafka-protocol`'s `lz4-sys` and `zstd-sys`, so a build wants a C compiler
+for those two. `gzip` and `snappy` are pure Rust. That is a much smaller ask
+than a vendored broker client, but it is not zero and we would rather say so
+than imply otherwise.
+
+**Everything is built by chaining.** Optional settings are consuming
+`with_*` builders on owned types, so configuration reads as one expression
+and there is no `let mut` and no half-built struct to pass around.
 
 ## Three invariants and a constraint
 
@@ -67,8 +82,9 @@ Most of the design follows from four statements, covered in the
 37 of the protocol's 87 api keys — see the
 [API support matrix](https://kaas-rs.github.io/kaas-lib/compat/api-matrix.html).
 
-This is no longer a read-only library. `kafka-produce` writes records with a
-batching accumulator, Java-compatible murmur2 partitioning, KIP-480 sticky
+The write and consume paths are complete, which is what "general-purpose"
+was shorthand for. `kafka-produce` writes records with a batching
+accumulator, Java-compatible murmur2 partitioning, KIP-480 sticky
 partitioning for unkeyed records, every compression codec, idempotence and
 transactions. `kafka-consume` reads them back over incremental fetch
 sessions (KIP-227), as a manually-assigned consumer or as a member of a
@@ -107,11 +123,17 @@ Integration tests are `#[ignore]`d by default so `cargo test` stays fast
 without a Docker daemon. There are no mocked brokers in this workspace —
 every milestone is verified against a real broker in a container.
 
-## Relationship to kaas
+## Relationship to the kaas initiative
 
-This is a **client**. [`kaas`](https://github.com/kaas-rs/kaas) is a
-**broker**. They speak the same protocol from opposite ends and deliberately
-share no code: kaas-lib is the natural conformance harness for kaas, and two
+kaas-lib exists to support the kaas initiative — the
+[`kaas`](https://github.com/kaas-rs/kaas) broker, kaas-ui, and the tooling
+around them. That is where it came from, not what limits it: the crates are
+published for any Rust program that speaks to a Kafka 4.x cluster, and no
+public API assumes a kaas component on either end.
+
+Within that, one boundary is deliberate. This is a **client**; `kaas` is a
+**broker**. They speak the same protocol from opposite ends and share no
+code: kaas-lib is the natural conformance harness for kaas, and two
 implementations sharing a codec would share its bugs — a mutual misreading of
 the spec encodes and decodes consistently, passes green, and hides exactly
 the class of wire bug the harness exists to catch.

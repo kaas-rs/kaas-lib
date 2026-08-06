@@ -1,9 +1,12 @@
-//! Admin RPCs for a Kafka cluster UI.
+//! Admin RPCs for a Kafka cluster: topics, configs, offsets, groups, ACLs,
+//! quotas and partitions.
 //!
 //! Everything here obeys rule 4: a call that names several resources returns
 //! [`PerItem`], one answer per resource. Describing five hundred topics where
 //! three are mid-deletion returns 497 descriptions and three errors, because
-//! the alternative makes a UI unusable on precisely the clusters that need one.
+//! the alternative fails the whole call over three resources the caller may
+//! not even have asked about — and it is a UI rendering a cluster that feels
+//! this first, on precisely the clusters that need one.
 //!
 //! ```no_run
 //! # async fn example() -> kafka_admin::Result<()> {

@@ -2,9 +2,23 @@
 
 ## What this is
 
-A Kafka 4.x client layer built directly on the `kafka-protocol` crate, for the backend of a Kafka cluster UI (a kafbat-ui equivalent). Admin/control-plane first, plus a UI-shaped read path. Not a general-purpose client — see PLAN.md for scope.
+A **general-purpose Kafka 4.x client library for Rust**, built directly on the `kafka-protocol` crate. Admin, produce and consume are all first-class: 37 of the protocol's 87 api keys, a batching producer with idempotence and transactions, both consumer-group protocols, and a browse-shaped read path on the side.
 
-## Relationship to kaas
+Three properties define the shape, and each is a rule rather than a description:
+
+1. **General-purpose.** Any Rust program talking to Kafka is in scope. This was not always true — phase 1 (M0–M11) was admin-first for a cluster UI, phase 2 (M12–M19) made it general, and phase 2 has landed. PLAN.md is still written in that historical order; do not read its framing as current scope. When the two disagree, this file wins.
+2. **Rust end to end.** No librdkafka, no vendored C client, no cmake. This is the main reason to choose this library over `rdkafka`. It is *almost* literally true — see the honest exception below.
+3. **Fluent construction.** Owned config, request and record types are built by chaining consuming-`self` methods. See rule 7.
+
+### The one place "pure Rust" is not true
+
+`lz4` and `zstd` bind to C. Both come in through `kafka-protocol`'s feature list in the Stack section below: `lz4` → `lz4-sys`, `zstd` → `zstd-sys`, and `cc` compiles them at build time. `gzip` (flate2/miniz_oxide) and `snappy` (snap) are pure Rust.
+
+So a downstream build needs a C compiler for two codecs, though not the cmake-plus-librdkafka toolchain `rdkafka` requires. Do not paper over this in docs or a README. Closing it means either dropping codecs real clusters use — zstd especially — or hand-rolling compression, and hand-rolling wire formats is precisely what this codebase does not do. Treat it as an honest blocker under rule 3, not a todo.
+
+## Why it exists: the kaas initiative
+
+kaas-lib was written to support the **kaas initiative** — the broker (`kaas-rs/kaas`), the UI (`kaas-rs/kaas-ui`), and the tooling around them. That is its origin, not its boundary. Nothing in the public API assumes a kaas component on either end, the crates publish to crates.io for anyone, and "a kaas component does not need this" is not a reason to reject a general-purpose feature.
 
 **This repo is a client. `kaas` (kaas-rs/kaas) is a broker.** They speak the same protocol from opposite ends. If you are carrying context from the kaas repo, none of its architecture applies here.
 
@@ -38,6 +52,8 @@ kafka-protocol = { version = "0.17", default-features = false,
 
 ## Layout
 
+The six published crates release in lockstep at one version — they are one library split along a layering boundary, not six independently useful things.
+
 ```
 crates/
   testkit/        # testcontainers fixtures: brokers, clusters, SASL/authorizer configs
@@ -46,7 +62,16 @@ crates/
   kafka-meta/     # metadata cache, leader + coordinator routing, error taxonomy, RPC routing
   kafka-admin/    # admin RPCs
   kafka-read/     # scan API (forward + backward)
+  kafka-produce/  # record batch encoding, murmur2 + sticky partitioning, accumulator,
+                  #   idempotence, transactions
+  kafka-consume/  # KIP-227 fetch sessions, streaming fetcher, KIP-848 + classic groups
+  livetest/       # run the library at a real, shared, long-lived cluster (not published)
+  interop/        # rdkafka cross-client checks — OUTSIDE the workspace on purpose,
+                  #   because rdkafka wants cmake and a C toolchain and `xtask ci`
+                  #   must not. Built by `cargo xtask interop`.
 ```
+
+`kafka-produce` and `kafka-consume` are why point 1 above is true; a change that treats them as second-class is a change that contradicts the goal.
 
 ## Upstream constraint: the crate is a Kafka release behind the broker
 
@@ -68,6 +93,11 @@ When any of these blocks a milestone, that is an honest blocker (rule 3) — say
 4. **Multi-resource admin calls return per-item results**, i.e. `Vec<(ResourceId, Result<T, KafkaError>)>`, never `Result<Vec<T>, _>`. Describing 500 topics where 3 are mid-deletion must return 497 successes.
 5. **Every public async fn must be cancel-safe.** Dropping the future releases buffers and either completes-and-discards the in-flight request or closes the connection. Never leave a connection with a half-read response.
 6. Conventional commits. Work lands on `main` — no feature branches, single-developer repo.
+7. **Public configuration is fluent, and the prefix is `with_`.** Every optional setting on an owned config, request or record type is a consuming builder — `pub fn with_x(mut self, …) -> Self` — so callers chain from a `new()` or `default()` without a `let mut`. Two parts to this, and the second is the one that gets forgotten:
+   - **Never `&mut self` setters, never `pub` mutable fields** for anything a caller is expected to set. There are currently zero `&mut self` setters in the workspace; keep it that way.
+   - **The prefix is `with_`, without exception**, including boolean toggles (`with_read_only()`, not `read_only()`). One convention that reads slightly awkwardly in a few places beats two conventions that each read well, because a caller should never have to check which crate they are in to know what a setter is called.
+
+   Note this is *not* the `.with_*()` on `kafka_protocol` structs — those are upstream's generated builders, mandated by `#[non_exhaustive]` (see the traps below). Rule 7 is about our own owned types. The two happen to agree, which is convenient rather than meaningful.
 
 ## Protocol traps — read before writing wire code
 

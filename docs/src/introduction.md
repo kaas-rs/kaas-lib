@@ -1,10 +1,19 @@
 # Introduction
 
-kaas-lib is a Kafka 4.x client layer for Rust, built directly on the
+kaas-lib is a general-purpose Kafka 4.x client library for Rust, built
+directly on the
 [`kafka-protocol`](https://github.com/kafka-protocol-rs/kafka-protocol-rs)
-crate. It exists to back a Kafka cluster UI — a kafbat-ui equivalent — so
-its shape is admin-and-control-plane first, with a read path designed for
-browsing a topic rather than for joining a consumer group.
+crate. Admin, produce and consume are all first-class, configuration is
+built by chaining `with_*` builders, and there is no librdkafka underneath.
+
+It was written to support the **kaas initiative** — the
+[kaas](https://github.com/kaas-rs/kaas) broker, kaas-ui, and the tooling
+around them. That is its origin rather than its boundary: the crates are
+published for any Rust program that talks to a Kafka 4.x cluster, and no
+public API assumes a kaas component on either end. The library began
+admin-first, with a read path shaped for browsing a topic; phase 2 added a
+real producer and both consumer-group protocols, which is what
+"general-purpose" was shorthand for. See the [roadmap](guide/roadmap.md).
 
 If you know Apache Kafka, you know what every RPC in here does. What this
 book is actually about is the layer *around* those RPCs: which broker each
@@ -122,49 +131,43 @@ over into a wrong number is the bug this design exists to prevent.
 
 ## What is here, and what is not
 
-Five library crates, layered strictly:
+Six library crates, layered strictly:
 [`kafka-conn`](code-tour/kafka-conn.md) (the wire),
 [`kafka-meta`](code-tour/kafka-meta.md) (routing and cluster state),
-[`kafka-admin`](code-tour/kafka-admin.md) (31 admin RPCs), and
-[`kafka-read`](code-tour/kafka-read.md) (forward and backward scans), plus
+[`kafka-admin`](code-tour/kafka-admin.md) (31 admin RPCs),
+[`kafka-read`](code-tour/kafka-read.md) (forward and backward scans),
+[`kafka-produce`](code-tour/kafka-produce.md) (the write path) and
+`kafka-consume` (fetch sessions and group membership), plus
 [`testkit`](code-tour/testkit.md) for container fixtures.
 
-There is **no producer and no consumer-group membership**. That is a scope
-decision, not an oversight — see [Non-goals](compat/non-goals.md) for what
-that rules out today.
+They publish in lockstep at one version: this is one library split along a
+layering boundary, not six independently useful things.
 
-## The stretch goal: a full-fledged client
+What is deliberately *not* here is on [Non-goals](compat/non-goals.md), and
+it is a shorter list than it used to be.
 
-The long-term aim is to drop the "admin-first" qualifier entirely and make
-this a **general-purpose Kafka client** — a real producer and real
-consumer-group membership alongside the admin surface it already has.
+## Rust, not a binding
 
-That is a bigger claim than it sounds, so here is the honest version of where
-it stands.
+There is no librdkafka in this dependency tree, and no cmake. That is the
+main reason to reach for this library over
+[`rdkafka`](https://crates.io/crates/rdkafka), which wraps a mature C client
+and is the right answer when maturity matters more than toolchain.
 
-**Most of the foundation is already general-purpose.** Roughly 80% of the
-codebase has nothing UI-shaped about it and would not be rebuilt: version
-negotiation, the routing table, the connection pool, the error taxonomy,
-SASLprep and KIP-368 re-authentication, the tolerant record decoder and
-bounded decompression. `kafka-admin` *is* an AdminClient. These are the
-unglamorous parts that pure-Rust client attempts usually skimp on, and they
-are done and tested against a real broker.
+One honest exception, because it would be easy to imply otherwise: two
+compression codecs reach C. `kafka-protocol`'s `lz4` and `zstd` features pull
+`lz4-sys` and `zstd-sys`, which `cc` builds from source, so a downstream
+build wants a C compiler for those. `gzip` (miniz_oxide) and `snappy` (snap)
+are pure Rust. Closing the gap would mean dropping codecs that real clusters
+use — zstd especially — or hand-rolling compression, and hand-rolling wire
+formats is exactly what this codebase does not do.
 
-**What is missing is sharply defined**, which is what makes it tractable:
+## Everything is built by chaining
 
-- a **producer** — batching, a Java-compatible murmur2 partitioner,
-  idempotence, transactions
-- **consumer-group membership** — KIP-848 first, since server-side assignment
-  removes the byte-compatibility problem that makes the classic protocol hard
-- **incremental fetch sessions**, and a streaming fetcher to go with them
-
-[Roadmap](guide/roadmap.md) has the shape of it and the reasoning behind the
-ordering; `PLAN.md` in the repository carries the full milestone breakdown
-(M12–M19) with acceptance criteria for each.
-
-It roughly doubles the codebase, and the correctness bar is higher than
-anything in the current scope — these are the paths where a bug **loses or
-duplicates data** rather than rendering a wrong number in a UI.
+Optional settings are consuming `with_*` builders on owned types, so a
+configuration is one expression rather than a `let mut` and a sequence of
+assignments, and a half-built value never has to be passed anywhere. It is a
+single convention across every crate: if a type has an optional setting, it
+has a `with_` method for it.
 
 ### Contributions are very welcome
 
