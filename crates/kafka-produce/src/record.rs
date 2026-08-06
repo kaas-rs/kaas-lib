@@ -63,9 +63,56 @@ impl ProducerRecord {
     }
 
     /// Write to an explicit partition, bypassing the partitioner.
+    ///
+    /// Takes an `i32` because naming a partition is a decision. A caller
+    /// *relaying* one it was handed wants [`maybe_partition`] instead.
+    ///
+    /// [`maybe_partition`]: Self::maybe_partition
     #[must_use]
     pub fn partition(mut self, partition: i32) -> Self {
         self.partition = Some(partition);
+        self
+    }
+
+    /// Set the partition from an `Option`, leaving the choice to the
+    /// partitioner when there is none.
+    ///
+    /// [`partition`] is the method for code that has decided on a partition.
+    /// This one is for code that is passing one through — from a `--partition`
+    /// flag, a config field, a request parameter — where "no partition" is a
+    /// value the caller holds rather than a branch it takes. Without it, such
+    /// a caller has to break the chain to apply what it was given:
+    ///
+    /// ```
+    /// # use kafka_produce::ProducerRecord;
+    /// # let configured: Option<i32> = Some(3);
+    /// let mut record = ProducerRecord::new("t").value("v");
+    /// if let Some(partition) = configured {
+    ///     record = record.partition(partition);
+    /// }
+    /// # assert_eq!(record.partition, Some(3));
+    /// ```
+    ///
+    /// The `let mut` and the rebinding are the whole reason this exists:
+    ///
+    /// ```
+    /// # use kafka_produce::ProducerRecord;
+    /// # let configured: Option<i32> = Some(3);
+    /// let record = ProducerRecord::new("t")
+    ///     .value("v")
+    ///     .maybe_partition(configured);
+    /// # assert_eq!(record.partition, Some(3));
+    /// ```
+    ///
+    /// Assignment rather than a merge: `maybe_partition(None)` clears a
+    /// partition set earlier in the chain, the same way a second [`partition`]
+    /// call overwrites the first. Last call wins, which is the only rule that
+    /// does not require knowing what came before it.
+    ///
+    /// [`partition`]: Self::partition
+    #[must_use]
+    pub fn maybe_partition(mut self, partition: Option<i32>) -> Self {
+        self.partition = partition;
         self
     }
 
@@ -134,6 +181,30 @@ mod tests {
         assert_eq!(tombstone.value, None);
         assert_eq!(empty.value, Some(Bytes::new()));
         assert_ne!(tombstone, empty);
+    }
+
+    #[test]
+    fn a_relayed_partition_reaches_the_same_record_as_a_chosen_one() {
+        // The point of the method: a caller holding `Option<i32>` builds the
+        // record a caller holding `i32` builds, without leaving the chain.
+        assert_eq!(
+            ProducerRecord::new("t").maybe_partition(Some(3)),
+            ProducerRecord::new("t").partition(3)
+        );
+        assert_eq!(
+            ProducerRecord::new("t").maybe_partition(None).partition,
+            None
+        );
+    }
+
+    #[test]
+    fn a_relayed_none_clears_a_partition_set_earlier() {
+        // Assignment, not a merge. A `maybe_partition` that silently ignored
+        // `None` would make the last call in a chain conditional on the ones
+        // before it, which is the kind of rule nobody remembers at the call
+        // site.
+        let record = ProducerRecord::new("t").partition(3).maybe_partition(None);
+        assert_eq!(record.partition, None);
     }
 
     #[test]
