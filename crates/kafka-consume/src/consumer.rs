@@ -1013,7 +1013,27 @@ impl ClassicConsumer {
         // before the re-join, which is what makes it a *pre*-revocation hook.
         self.settle().await;
 
-        if self.rejoin {
+        // Drive the group machinery to quiescence *within* this poll rather
+        // than one protocol step per call. One step per poll deadlocked two
+        // members driven from a single task — `tokio::join!(a.poll(),
+        // b.poll())`, the shape every pairwise test uses: `b` blocks inside
+        // JoinGroup waiting for `a` to re-join, but `a` only flagged `rejoin`
+        // and will not act on it until its *next* poll, which cannot start
+        // until `b`'s returns. The coordinator ends that stand-off at the
+        // rebalance timeout by evicting whoever never re-joined, and the
+        // evicted member then surfaced `UNKNOWN_MEMBER_ID` as a hard error.
+        //
+        // The bound covers the longest ordinary dance — detect via heartbeat,
+        // join + sync, the KIP-429 second round, and a KIP-394 handshake —
+        // with room for one surprise. Running out is not an error: the flags
+        // survive, the caller polls again.
+        for _ in 0..6 {
+            if !self.rejoin {
+                if !self.heartbeat_says_rejoin().await? {
+                    break;
+                }
+                continue;
+            }
             let sizes = self.partition_counts().await?;
             let held = self.inner.assignment();
             match self
@@ -1073,39 +1093,75 @@ impl ClassicConsumer {
                         rebalance::assign(&mut self.listener, gained).await;
                     }
                 }
-                Err(error) => {
+                Err(error) => match error.code() {
                     // KIP-394: the coordinator refuses a first join and hands
-                    // back the id to use. That is the handshake, so the next
-                    // poll simply tries again with the id it gave us.
-                    if error.code() != Some(kafka_conn::ErrorCode::MemberIdRequired) {
-                        return Err(error);
+                    // back the id to use. That is the handshake, not a
+                    // failure — the next cycle joins with the granted id.
+                    Some(kafka_conn::ErrorCode::MemberIdRequired) => {}
+                    // This member was evicted — it missed a rebalance or its
+                    // session lapsed, and the coordinator no longer knows the
+                    // id it is presenting. Re-presenting it can only fail the
+                    // same way, so do what the Java client does: drop the
+                    // identity, treat everything held as revoked, and go
+                    // through the door as a new member. The commit inside
+                    // `settle` is refused for an evicted member and ignored —
+                    // redelivery of the uncommitted tail is exactly
+                    // at-least-once.
+                    Some(
+                        kafka_conn::ErrorCode::UnknownMemberId
+                        | kafka_conn::ErrorCode::IllegalGeneration,
+                    ) => {
+                        self.membership.forget();
+                        let held = self.inner.assignment();
+                        if !held.is_empty() {
+                            self.pending_revoke = Some(self.inner.revoked_positions(&held));
+                            self.settle().await;
+                        }
+                        // And actually let go: an evicted member that keeps
+                        // its assignment keeps *fetching* partitions somebody
+                        // else now owns, and re-advertises them as `owned` to
+                        // the sticky assignor when it rejoins — which is how
+                        // two members end up claiming the same twelve
+                        // partitions. A new member owns nothing.
+                        self.inner.reassign(Vec::new()).await?;
                     }
-                    return Ok(Vec::new());
-                }
+                    // The group moved on mid-sync; joining again is the
+                    // protocol's answer, not an error.
+                    Some(kafka_conn::ErrorCode::RebalanceInProgress) => {}
+                    _ => return Err(error),
+                },
             }
         }
 
-        if self.membership.heartbeat(self.inner.cluster()).await? {
-            // `REBALANCE_IN_PROGRESS` arriving mid-poll is normal, not an
-            // error: it means re-join, which the next poll does.
-            //
-            // What happens to the assignment in the meantime is the difference
-            // between the two rebalance styles. An **eager** member gives
-            // everything up right now, before it re-joins, so the whole
-            // assignment goes to the listener and the auto-commit follows it. A
-            // **cooperative** member holds on to everything and finds out from
-            // the sync which partitions actually moved — revoking here would
-            // throw away the stickiness that is the entire point.
-            self.rejoin = true;
-            if !self.membership.is_cooperative() {
-                let held = self.inner.assignment();
-                self.pending_revoke = Some(self.inner.revoked_positions(&held));
-                self.settle().await;
-            }
+        if self.rejoin {
+            // Out of budget mid-dance. The flags survive, so the next poll
+            // picks up exactly where this one stopped.
             return Ok(Vec::new());
         }
-
         self.inner.poll().await
+    }
+
+    /// One heartbeat; `true` means the group is rebalancing and this member
+    /// must re-join.
+    ///
+    /// What happens to the assignment in the meantime is the difference
+    /// between the two rebalance styles. An **eager** member gives everything
+    /// up right now, before it re-joins, so the whole assignment goes to the
+    /// listener and the auto-commit follows it. A **cooperative** member
+    /// holds on to everything and finds out from the sync which partitions
+    /// actually moved — revoking here would throw away the stickiness that is
+    /// the entire point.
+    async fn heartbeat_says_rejoin(&mut self) -> Result<bool> {
+        if !self.membership.heartbeat(self.inner.cluster()).await? {
+            return Ok(false);
+        }
+        self.rejoin = true;
+        if !self.membership.is_cooperative() {
+            let held = self.inner.assignment();
+            self.pending_revoke = Some(self.inner.revoked_positions(&held));
+            self.settle().await;
+        }
+        Ok(true)
     }
 
     /// Tell the listener what is being revoked, then commit it.

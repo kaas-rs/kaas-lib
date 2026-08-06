@@ -90,7 +90,11 @@ pub struct RevokedPartition {
 ///     }
 /// }
 /// ```
-pub trait RebalanceListener: Send {
+/// `Send + Sync` because a consumer holding one must itself be movable to —
+/// and pollable from — a spawned task: driving each member from its own task
+/// is a documented requirement of the classic protocol (see
+/// [`crate::classic`]), and the poll future holds `&self` across awaits.
+pub trait RebalanceListener: Send + Sync {
     /// Fires while this member still owns `revoked`, before anything is given
     /// up and before auto-commit runs.
     fn on_revoke(&mut self, revoked: Vec<RevokedPartition>) -> BoxFuture<'_, Result<()>>;

@@ -92,6 +92,22 @@
 //! KIP-848 has no such constraint: `ConsumerGroupHeartbeat` returns
 //! immediately, so members can share a connection freely. That difference is
 //! why the modern path worked first time and this one did not.
+//!
+//! # Each member needs its own task too, for the same reason
+//!
+//! The same blocking JoinGroup makes `tokio::join!(a.poll(), b.poll())` in a
+//! loop unsafe across a *staggered* rebalance — one where `a` is already in
+//! the group when `b` arrives. `b`'s join blocks until `a` re-joins; `a`'s
+//! re-join — and, worse, `a`'s **heartbeats** — ride on `a.poll()`, which the
+//! loop only calls again once `b`'s poll returns. So `a` goes silent for as
+//! long as `b` blocks, its session lapses mid-rebalance, and the coordinator
+//! evicts it — observed live as the two members evicting each other in
+//! alternation, twenty seconds per generation, forever. Java papers over this
+//! with the KIP-62 background heartbeat thread; this client is poll-driven by
+//! design, so the rule is: **poll each member from its own task** whenever
+//! another member of the same group may be mid-join. Members that join
+//! *together* (both from scratch) are fine — their joins block side by side —
+//! which is why only the staggered case bites.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1283,6 +1299,18 @@ impl ClassicMembership {
             return Err(Error::from_code(code, None));
         }
         decode_assignment(response.assignment)
+    }
+
+    /// Forget the coordinator-issued identity, because the coordinator has.
+    ///
+    /// The response to an evicted member: `UNKNOWN_MEMBER_ID` on a join means
+    /// this id no longer exists on the coordinator, and re-presenting it can
+    /// only fail the same way. The next join runs the KIP-394 handshake from
+    /// scratch and re-learns generation, protocol and leadership.
+    pub(crate) fn forget(&mut self) {
+        self.member_id.clear();
+        self.generation_id = NO_GENERATION;
+        self.leader = false;
     }
 
     /// One heartbeat. `REBALANCE_IN_PROGRESS` is normal, not an error.

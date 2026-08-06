@@ -300,19 +300,42 @@ async fn a_cooperative_rebalance_keeps_what_it_can() {
     let alone: BTreeSet<(String, i32)> = a.assignment().into_iter().collect();
     assert_eq!(alone.len(), usize::try_from(PARTITIONS).unwrap());
 
+    // `a` moves to its own task before `b` arrives. A staggered classic
+    // rebalance blocks `b`'s JoinGroup until `a` re-joins, and `a` only acts
+    // — only *heartbeats* — when polled: driving both from one task via
+    // `tokio::join!` starves whichever member is not mid-join, and the
+    // coordinator evicts it twenty seconds later. See the module docs on
+    // `kafka_consume::classic` — each member needs its own task, exactly as
+    // it needs its own connection.
+    let (assignment_tx, assignment_rx) = tokio::sync::watch::channel(Vec::new());
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let a_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                result = a.poll() => {
+                    result.expect("a");
+                    let _ = assignment_tx.send(a.assignment());
+                }
+                _ = stop_rx.changed() => break,
+            }
+        }
+        a
+    });
+
     // A second member arrives. Half the partitions must move; the other half
     // must not.
     let mut b = cooperative(&fixture, group).await;
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
-        let (ra, rb) = tokio::join!(a.poll(), b.poll());
-        ra.expect("a");
-        rb.expect("b");
-        let (owned_a, owned_b) = (a.assignment().len(), b.assignment().len());
+        b.poll().await.expect("b");
+        let owned_a = assignment_rx.borrow().len();
+        let owned_b = b.assignment().len();
         if owned_a + owned_b == usize::try_from(PARTITIONS).unwrap() && owned_a > 0 && owned_b > 0 {
             break;
         }
     }
+    stop_tx.send(true).expect("stop");
+    let mut a = a_task.await.expect("a task");
 
     let owned_a: BTreeSet<(String, i32)> = a.assignment().into_iter().collect();
     let owned_b: BTreeSet<(String, i32)> = b.assignment().into_iter().collect();
