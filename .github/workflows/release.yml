@@ -141,6 +141,15 @@ jobs:
         # through, with crates already live. See RELEASING.md.
         run: cargo publish --workspace --dry-run
 
+      - name: Drop the package-verify leftovers before the cache is saved
+        # `rust-cache`'s post step walks `target/` to prune it and blindly
+        # probes `tests/` and `trybuild/` under anything shaped like a target
+        # dir — including `target/package/<crate>-<ver>/`, where the dry-run
+        # extracted every crate. Each miss becomes an ENOENT error annotation
+        # on a green job, which reads like a failed release to anyone
+        # skimming the run. The leftovers are also dead weight in the cache.
+        run: rm -rf target/package
+
   # The long pole, alone, so nothing waits behind it and it waits for nothing.
   acceptance:
     needs: version
