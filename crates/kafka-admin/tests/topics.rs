@@ -105,6 +105,15 @@ async fn create_describe_alter_verify_delete() {
     assert!(find(&created, &"orders".to_owned()).is_ok(), "{created:?}");
 
     // Describe.
+    //
+    // Polled first, for the reason `await_config` is polled below, one level
+    // up: the controller has acked the creation and the broker answering this
+    // describe applies metadata from the log asynchronously, so an immediate
+    // describe can report the topic we just created as
+    // UNKNOWN_TOPIC_OR_PARTITION. Narrow on an idle machine, wide enough on a
+    // loaded runner — it failed exactly this way in CI.
+    await_topics_visible(&admin, &["orders".to_owned()]).await;
+
     let described = admin.describe_topics(["orders"]).await.unwrap();
     let info = find(&described, &"orders".to_owned())
         .as_ref()
@@ -311,6 +320,11 @@ async fn the_kip_1023_sentinel_reports_the_gap_rather_than_guessing() {
         .create_topics([NewTopic::new("tiered", 1, 1)])
         .await
         .unwrap();
+    // Same propagation window, and the assertion here is on the *text* of the
+    // error — so a topic the broker has not applied yet would fail this as an
+    // error that does not mention v11, which reads like the sentinel gap being
+    // reported wrongly rather than the topic not being there yet.
+    await_topics_visible(&admin, &["tiered".to_owned()]).await;
 
     let listed = admin
         .list_offsets(
