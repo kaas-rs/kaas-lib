@@ -255,14 +255,22 @@ pub(crate) fn decode_partition(
 ) -> DecodedPartition {
     let mut out = DecodedPartition::default();
 
-    // Producers whose records are hidden. A transaction's records run from its
-    // first offset until the marker, so membership is by producer id and the
-    // set only grows as we pass each aborted transaction's start.
-    let aborted_producers: HashSet<i64> = if options.visibility == Visibility::CommittedOnly {
-        aborted.iter().map(|a| a.producer_id).collect()
+    // Aborted spans, entered and left as the walk passes them. An entry
+    // `(producer_id, first_offset)` hides that producer's records from
+    // `first_offset` up to its abort marker — and nothing before it. This
+    // used to collect the producer ids up front instead, which also hid the
+    // same producer's *earlier, committed* transactions whenever they shared
+    // a fetch response with the aborted entry: a committed transaction
+    // followed by an aborted one from the same producer read back as nothing
+    // at all, exactly when the broker answered both in one response.
+    let mut spans: Vec<&AbortedTransaction> = if options.visibility == Visibility::CommittedOnly {
+        aborted.iter().collect()
     } else {
-        HashSet::new()
+        Vec::new()
     };
+    spans.sort_by_key(|span| span.first_offset);
+    let mut spans = spans.into_iter().peekable();
+    let mut aborted_producers: HashSet<i64> = HashSet::new();
 
     while records.has_remaining() {
         let header = match peek_header(&records) {
@@ -287,9 +295,27 @@ pub(crate) fn decode_partition(
 
         let mut batch = records.split_to(header.total_len);
 
+        // Enter every aborted span whose start this batch has reached. A
+        // span's first offset is the first *data* record of the transaction,
+        // so by the time a batch at or past it appears, its producer is
+        // hiding.
+        while spans
+            .peek()
+            .is_some_and(|span| span.first_offset <= header.base_offset)
+        {
+            if let Some(span) = spans.next() {
+                aborted_producers.insert(span.producer_id);
+            }
+        }
+
         if header.control {
-            // A transaction marker. Not user data.
+            // A transaction marker. Not user data — and the end of its
+            // producer's aborted span, if one is open. Marker type does not
+            // need decoding: the only control batch that can appear between
+            // a span's first offset and its end is that span's own abort
+            // marker, so a commit marker only ever lands here as a no-op.
             out.control_batches_skipped += 1;
+            aborted_producers.remove(&header.producer_id);
             continue;
         }
 
@@ -712,6 +738,168 @@ mod tests {
         );
         assert!(hidden.outcomes.is_empty(), "{hidden:?}");
         assert_eq!(hidden.aborted_records_skipped, 1);
+    }
+
+    /// The shape that read back as *nothing at all*: one producer, a
+    /// committed transaction followed by an aborted one, both in the same
+    /// response. The aborted entry names the producer, but its span starts at
+    /// `first_offset` — hiding the committed half too is the bug that made
+    /// `Visibility::CommittedOnly` return zero records from a partition
+    /// holding a hundred committed ones.
+    #[test]
+    fn an_aborted_transaction_does_not_hide_the_same_producers_committed_one() {
+        const PID: i64 = 1234;
+
+        fn flagged(records: &[kafka_protocol::records::Record], flags: i16) -> Bytes {
+            let encoded = encode(records, Compression::None);
+            let mut buf = BytesMut::from(&encoded[..]);
+            let attributes = read_i16(&buf, header::ATTRIBUTES).expect("attributes");
+            let patched = (attributes | flags).to_be_bytes();
+            if let Some(slot) = buf.get_mut(header::ATTRIBUTES..header::ATTRIBUTES + 2) {
+                slot.copy_from_slice(&patched);
+            }
+            buf.freeze()
+        }
+
+        fn txn_record(offset: i64, value: &str) -> kafka_protocol::records::Record {
+            let mut record = sample_record(offset, value);
+            record.transactional = true;
+            record.producer_id = PID;
+            record
+        }
+
+        // committed data (0), commit marker (1), aborted data (2), abort
+        // marker (3) — the log as the broker serves it after the two
+        // transactions in the acceptance test.
+        let mut stream = BytesMut::new();
+        stream.extend_from_slice(&flagged(&[txn_record(0, "committed")], TRANSACTIONAL_FLAG));
+        stream.extend_from_slice(&flagged(
+            &[txn_record(1, "commit marker")],
+            TRANSACTIONAL_FLAG | CONTROL_FLAG,
+        ));
+        stream.extend_from_slice(&flagged(&[txn_record(2, "aborted")], TRANSACTIONAL_FLAG));
+        stream.extend_from_slice(&flagged(
+            &[txn_record(3, "abort marker")],
+            TRANSACTIONAL_FLAG | CONTROL_FLAG,
+        ));
+
+        let aborted = [AbortedTransaction {
+            producer_id: PID,
+            first_offset: 2,
+        }];
+
+        let committed = decode_partition(
+            "orders",
+            0,
+            stream.clone().freeze(),
+            &aborted,
+            &DecodeOptions {
+                visibility: Visibility::CommittedOnly,
+                ..DecodeOptions::default()
+            },
+        );
+        let values: Vec<String> = committed
+            .outcomes
+            .iter()
+            .filter_map(|outcome| outcome.record())
+            .filter_map(|record| record.value.as_ref())
+            .map(|value| String::from_utf8_lossy(value).into_owned())
+            .collect();
+        assert_eq!(
+            values,
+            ["committed"],
+            "the committed transaction must stay visible: {committed:?}"
+        );
+        assert_eq!(committed.aborted_records_skipped, 1);
+        assert_eq!(committed.control_batches_skipped, 2);
+
+        // The same stream under `All` shows both halves.
+        let everything = decode_partition(
+            "orders",
+            0,
+            stream.freeze(),
+            &aborted,
+            &DecodeOptions::default(),
+        );
+        assert_eq!(everything.outcomes.len(), 2, "{everything:?}");
+    }
+
+    /// A producer with two aborted transactions back to back: the first
+    /// marker must not end the second span.
+    #[test]
+    fn consecutive_aborted_transactions_each_hide_their_own_span() {
+        const PID: i64 = 1234;
+
+        fn flagged(records: &[kafka_protocol::records::Record], flags: i16) -> Bytes {
+            let encoded = encode(records, Compression::None);
+            let mut buf = BytesMut::from(&encoded[..]);
+            let attributes = read_i16(&buf, header::ATTRIBUTES).expect("attributes");
+            let patched = (attributes | flags).to_be_bytes();
+            if let Some(slot) = buf.get_mut(header::ATTRIBUTES..header::ATTRIBUTES + 2) {
+                slot.copy_from_slice(&patched);
+            }
+            buf.freeze()
+        }
+
+        fn txn_record(offset: i64, value: &str) -> kafka_protocol::records::Record {
+            let mut record = sample_record(offset, value);
+            record.transactional = true;
+            record.producer_id = PID;
+            record
+        }
+
+        let mut stream = BytesMut::new();
+        stream.extend_from_slice(&flagged(
+            &[txn_record(0, "aborted one")],
+            TRANSACTIONAL_FLAG,
+        ));
+        stream.extend_from_slice(&flagged(
+            &[txn_record(1, "abort marker")],
+            TRANSACTIONAL_FLAG | CONTROL_FLAG,
+        ));
+        stream.extend_from_slice(&flagged(
+            &[txn_record(2, "aborted two")],
+            TRANSACTIONAL_FLAG,
+        ));
+        stream.extend_from_slice(&flagged(
+            &[txn_record(3, "abort marker")],
+            TRANSACTIONAL_FLAG | CONTROL_FLAG,
+        ));
+        stream.extend_from_slice(&flagged(
+            &[txn_record(4, "committed after")],
+            TRANSACTIONAL_FLAG,
+        ));
+
+        let aborted = [
+            AbortedTransaction {
+                producer_id: PID,
+                first_offset: 0,
+            },
+            AbortedTransaction {
+                producer_id: PID,
+                first_offset: 2,
+            },
+        ];
+
+        let committed = decode_partition(
+            "orders",
+            0,
+            stream.freeze(),
+            &aborted,
+            &DecodeOptions {
+                visibility: Visibility::CommittedOnly,
+                ..DecodeOptions::default()
+            },
+        );
+        let values: Vec<String> = committed
+            .outcomes
+            .iter()
+            .filter_map(|outcome| outcome.record())
+            .filter_map(|record| record.value.as_ref())
+            .map(|value| String::from_utf8_lossy(value).into_owned())
+            .collect();
+        assert_eq!(values, ["committed after"], "{committed:?}");
+        assert_eq!(committed.aborted_records_skipped, 2);
     }
 
     #[test]
