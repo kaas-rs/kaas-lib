@@ -32,7 +32,7 @@ discovered:
   with — is defence for the connection layer, not the mechanism keeping the
   log in order.
 
-**The consumer** — `kafka-consume`.
+**The consumer** — [`kafka-consume`](../code-tour/kafka-consume.md).
 
 | | |
 |---|---|
@@ -76,8 +76,6 @@ someone doing them.
   `Create`/`Renew`/`Expire`/`DescribeDelegationToken` do not.
 - **`OffsetForLeaderEpoch`, `UpdateFeatures`, `ListConfigResources`** — routing
   entries only, no user-facing surface.
-- **A code-tour page for `kafka-consume`**, which is the one published crate
-  the book does not walk through.
 
 ## Blocked upstream
 

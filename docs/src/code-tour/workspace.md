@@ -1,6 +1,7 @@
 # Workspace layout
 
-Seven crates in the workspace, plus one deliberately outside it.
+Ten crates in the workspace, plus one deliberately outside it. Six of them
+publish, in lockstep at a single version.
 
 | Crate | Lines | What it is |
 |---|---|---|
@@ -8,7 +9,10 @@ Seven crates in the workspace, plus one deliberately outside it.
 | [`kafka-meta`](kafka-meta.md) | 1,662 | metadata cache, routing, pool, retry |
 | [`kafka-admin`](kafka-admin.md) | 4,636 | 37 admin RPCs, per-item results |
 | [`kafka-read`](kafka-read.md) | 2,560 | forward scan, backward tail, tolerant decode |
+| [`kafka-produce`](kafka-produce.md) | 3,911 | batching, partitioning, idempotence, transactions |
+| [`kafka-consume`](kafka-consume.md) | 4,685 | fetch sessions, KIP-848 and classic group membership |
 | [`testkit`](testkit.md) | 1,424 | container fixtures; `publish = false` |
+| [`testkit-macros`](testkit.md) | 74 | `#[testkit::integration_test]`; `publish = false` |
 | [`livetest`](livetest.md) | 1,787 | run against real clusters; `publish = false` |
 | [`xtask`](xtask.md) | — | repo chores; `publish = false` |
 | `interop` | — | rdkafka cross-check; **outside the workspace** |
@@ -19,19 +23,32 @@ Seven crates in the workspace, plus one deliberately outside it.
 graph TD
     admin[kafka-admin] --> meta[kafka-meta]
     read[kafka-read] --> meta
+    produce[kafka-produce] --> meta
+    consume[kafka-consume] --> read
     meta --> conn[kafka-conn]
     conn --> kp[["kafka-protocol"]]
     live[livetest] --> admin
     live --> read
+    live --> produce
+    live --> consume
     live --> tk[testkit]
     admin -.dev.-> tk
     read -.dev.-> tk
     meta -.dev.-> tk
+    produce -.dev.-> tk
+    consume -.dev.-> tk
 ```
 
 Strictly layered, no cycles, no sideways edges. `kafka-admin` and
 `kafka-read` do not know about each other; both reach the wire only through
 `kafka-meta`.
+
+The one edge that is not straight down is `kafka-consume` → `kafka-read`, and
+it is a deliberate reuse rather than a layering slip: the consumer decodes
+record batches with the *same* tolerant decoder the scan path uses, so a
+batch that will not parse behaves identically on both. Duplicating that
+decoder to keep the graph tidier would mean two tolerant decoders drifting
+apart, which is the more expensive kind of tidiness.
 
 ## Why `interop` is outside the workspace
 

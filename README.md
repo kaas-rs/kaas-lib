@@ -24,9 +24,10 @@ assumes a kaas component on either end.
 
 ```toml
 [dependencies]
-kafka-admin   = "0.3"
-kafka-read    = "0.3"
-kafka-produce = "0.3"
+kafka-produce = "0.4"
+kafka-consume = "0.4"
+kafka-admin   = "0.4"
+kafka-read    = "0.4"
 ```
 
 The crates publish to crates.io in lockstep at a single version — they are one

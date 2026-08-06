@@ -2,16 +2,20 @@
 
 ## Adding the crates
 
-kaas-lib is not published to crates.io yet, so depend on it by git. Take only
-the layers you need — each one re-exports the types from the layers below it,
-so an admin-only consumer never names `kafka-conn` directly.
+Take only the layers you need — each one re-exports the types from the layers
+below it, so a producer never names `kafka-conn` directly — and pull them all
+at the **same version**. The crates publish to crates.io in lockstep because
+they are one library split along a layering boundary, so `kafka-admin` 0.4
+against `kafka-conn` 0.3 is not a combination anyone tests.
 
 ```toml
 [dependencies]
-kafka-admin = { git = "https://github.com/kaas-rs/kaas-lib" }
-kafka-read  = { git = "https://github.com/kaas-rs/kaas-lib" }
-tokio       = { version = "1", features = ["full"] }
-futures     = "0.3"
+kafka-produce = "0.4"   # writing records
+kafka-consume = "0.4"   # reading them back, with or without a group
+kafka-admin   = "0.4"   # topics, configs, acls, groups
+kafka-read    = "0.4"   # browse-shaped scans and tails, for a UI
+tokio         = { version = "1", features = ["full"] }
+futures       = "0.3"   # only for the scan stream
 ```
 
 The workspace targets Rust 1.97 and edition 2024.
@@ -80,12 +84,159 @@ admin
 # }
 ```
 
-## Reading records
+## Producing a record
 
-Two shapes, because a UI asks two different questions. `tail` answers "what
-just happened" and is the most-used view in any Kafka UI; `scan` answers
-"show me this topic from the beginning" and streams without ever
-materialising a `Vec`.
+`Producer::connect` takes bootstrap addresses of its own; `Producer::new`
+wraps a `Cluster` you already have — from `admin.cluster()`, say. A producer
+is cheap to clone, and every clone shares one accumulator, so two clones
+writing to the same partition fill the same batch rather than two.
+
+```rust,no_run
+use kafka_produce::{ClusterConfig, Producer, ProducerConfig, ProducerRecord};
+
+# async fn example() -> kafka_produce::Result<()> {
+let producer = Producer::connect(
+    ["localhost:9092"],
+    ClusterConfig::default(),
+    ProducerConfig::new(),
+)
+.await?;
+
+let meta = producer
+    .send(
+        ProducerRecord::new("orders")
+            .with_key("customer-7")
+            .with_value(r#"{"total":42}"#)
+            .with_header("content-type", "application/json"),
+    )
+    .await?;
+
+println!("landed at {}-{} offset {}", meta.topic, meta.partition, meta.offset);
+# Ok(())
+# }
+```
+
+That is one record, acknowledged by the full ISR, with the partition chosen
+by murmur2 over the key — the same hash a Java or C client uses, so a
+co-partitioned join still lines up. Records without a key go to a sticky
+partition instead of round-robin (KIP-480). Give
+`ProducerRecord::with_partition` an index to choose yourself.
+
+**Writing many records? Use `enqueue`, not a loop of `send`.** `send` waits
+for the broker, so awaiting it in a loop keeps exactly one record in flight
+and batches nothing. `enqueue` returns as soon as the record is buffered and
+hands back a `Delivery` to await later:
+
+```rust,no_run
+# use kafka_produce::{Producer, ProducerRecord};
+# async fn example(producer: &Producer) -> kafka_produce::Result<()> {
+let mut pending = Vec::new();
+for i in 0..10_000 {
+    pending.push(
+        producer
+            .enqueue(ProducerRecord::new("orders").with_value(format!("{i}")))
+            .await?,
+    );
+}
+
+for delivery in pending {
+    let meta = delivery.await?;   // where that record landed, or why it did not
+}
+# Ok(())
+# }
+```
+
+Idempotence is on by default, which is what makes a re-send after a timeout
+safe rather than a duplicate. There is no `acks=0`, deliberately. Both are in
+[Producing records](guide/producing.md), along with compression,
+transactions and the batching knobs.
+
+## Consuming records
+
+A `Consumer` reads an explicit set of partitions: nothing rebalances it,
+nothing heartbeats, and no broker knows it exists as a member of anything.
+That is the mode to pin a reader to a partition, and it is the engine the
+group protocols sit on.
+
+```rust,no_run
+use kafka_consume::{Consumer, ConsumerConfig, Position};
+
+# async fn example(cluster: kafka_consume::Cluster) -> kafka_consume::Result<()> {
+let mut consumer = Consumer::new(cluster, ConsumerConfig::new().group_id("reporting"));
+
+consumer
+    .assign(
+        [("orders".to_owned(), 0), ("orders".to_owned(), 1)],
+        Position::Earliest,
+    )
+    .await?;
+
+loop {
+    // Empty is a normal answer: a consumer at the log end is caught up, not
+    // broken.
+    for record in consumer.poll().await? {
+        println!(
+            "{}-{} @{}: {:?}",
+            record.topic, record.partition, record.offset, record.value
+        );
+    }
+
+    for ((topic, partition), result) in consumer.commit().await? {
+        if let Err(error) = result {
+            eprintln!("{topic}-{partition}: commit failed: {error}");
+        }
+    }
+}
+# }
+```
+
+Setting `group_id` on a manually-assigned consumer borrows that group's
+*offset storage* — `commit` and `committed` read and write under it using the
+non-member sentinel. Borrowing the storage is not joining the group. Note the
+commit result: one entry per partition, the same shape as every other
+multi-resource call here.
+
+### Joining a group
+
+`GroupConsumer` joins a KIP-848 group and lets the **broker** compute the
+assignment:
+
+```rust,no_run
+use kafka_consume::{ConsumerConfig, GroupConsumer};
+
+# async fn example(cluster: kafka_consume::Cluster) -> kafka_consume::Result<()> {
+let mut consumer =
+    GroupConsumer::subscribe(cluster, ConsumerConfig::new(), "billing", ["orders"]).await?;
+
+for _ in 0..100 {
+    for record in consumer.poll().await? {
+        println!("{}-{} @{}", record.topic, record.partition, record.offset);
+    }
+}
+
+consumer.leave().await?;
+# Ok(())
+# }
+```
+
+**`poll` is what heartbeats.** It beats when one is due, reconciles any new
+assignment and then reads, so a member that stops polling — because it is
+doing slow work between batches — is a member the coordinator evicts. Nothing
+is owned until the first heartbeat comes back with an assignment, so the
+first `poll` or two returning empty is normal.
+
+`ClassicConsumer` speaks the older `JoinGroup`/`SyncGroup`/`Heartbeat`
+protocol for pre-4.0 brokers and mixed groups. Which to use, offsets, the
+rebalance listener and the one hard constraint the classic path carries are
+all in [Consuming records](guide/consuming.md).
+
+## Browsing a topic
+
+`kafka-read` answers a different question from a consumer: not "keep
+delivering this topic to me" but "show me a page of it". Two shapes, because
+a UI asks two things. `tail` answers "what just happened" and is the
+most-used view in any Kafka UI; `scan` answers "show me this topic from the
+beginning" and streams without ever materialising a `Vec`.
 
 ```rust,no_run
 use futures::StreamExt;

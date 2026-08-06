@@ -137,8 +137,8 @@ Six library crates, layered strictly:
 [`kafka-admin`](code-tour/kafka-admin.md) (31 admin RPCs),
 [`kafka-read`](code-tour/kafka-read.md) (forward and backward scans),
 [`kafka-produce`](code-tour/kafka-produce.md) (the write path) and
-`kafka-consume` (fetch sessions and group membership), plus
-[`testkit`](code-tour/testkit.md) for container fixtures.
+[`kafka-consume`](code-tour/kafka-consume.md) (fetch sessions and group
+membership), plus [`testkit`](code-tour/testkit.md) for container fixtures.
 
 They publish in lockstep at one version: this is one library split along a
 layering boundary, not six independently useful things.
@@ -195,7 +195,8 @@ happens before the code does.
   fastest honest answer to "can I use this", then the
   [API support matrix](compat/api-matrix.md).
 - **Using it?** [Getting started](getting-started.md), then Part IV —
-  [connecting](guide/connecting.md), [admin](guide/admin.md),
+  [connecting](guide/connecting.md), [producing](guide/producing.md),
+  [consuming](guide/consuming.md), [admin](guide/admin.md),
   [reading](guide/reading.md).
 - **Working on it?** Part I in order from the
   [system overview](architecture/overview.md); Part III is the

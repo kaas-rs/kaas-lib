@@ -8,11 +8,15 @@ admin-first scope.
 
 | File | Lines | What |
 |---|---|---|
-| `producer.rs` | 462 | `Producer::send`, leader routing, **the retry classification** |
+| `accumulator.rs` | 1,016 | batching as an actor: open batches, bounded memory, one batch per partition on the wire |
+| `dispatch.rs` | 663 | one `Produce` round trip, **the retry classification**, a result per partition |
+| `transactions.rs` | 511 | `InitProducerId`, `AddPartitionsToTxn`, `EndTxn`, and the coordinator re-ask |
+| `config.rs` | 314 | `ProducerConfig`, `Acks`, `Compression` |
+| `producer.rs` | 313 | `Producer::send`/`enqueue`, partition resolution, the transaction surface |
 | `partition.rs` | 293 | murmur2 and the KIP-480 sticky partitioner |
-| `encode.rs` | 196 | v2 record batches, and the batch-splitting trap |
-| `config.rs` | 172 | `ProducerConfig`, `Acks`, `Compression` |
-| `record.rs` | 135 | `ProducerRecord`, `RecordMetadata` |
+| `record.rs` | 232 | `ProducerRecord`, `RecordMetadata` |
+| `encode.rs` | 209 | v2 record batches, and the batch-splitting trap |
+| `idempotence.rs` | 208 | producer id, epoch, and a sequence number per partition |
 
 ## Three decisions worth knowing before reading the code
 
@@ -85,10 +89,55 @@ That setting is explicit for a reason: librdkafka's *default* partitioner is
 not the Java-compatible one, so leaving it unset would compare our murmur2
 against a different hash entirely.
 
-## What is not here yet
+## The accumulator is an actor, and that is what makes cancellation tractable
 
-No accumulator, so a produce is one round trip per record. No idempotence, no
-transactions, no `InitProducerId`. See [Roadmap](../guide/roadmap.md).
+Every piece of batching state — the open batch per partition, the closed ones
+queued behind it, and which partitions have a request on the wire — lives in
+one task and is touched by nothing else. Callers reach it through a channel,
+so dropping a send future drops a `oneshot::Receiver` and nothing more: a
+cancelled caller cannot leave a half-updated batch behind for the next one to
+trip over. The record it already enqueued is still produced; only the result
+is discarded.
+
+**At most one batch per partition is on the wire at a time.** Different
+partitions proceed concurrently — ordering is a per-partition property — but
+within one partition the next batch waits for the previous answer. This is
+what makes retry safe: the moment a rejected batch is re-sent while a later
+batch for the same partition is already in flight, the log's order stops
+matching the caller's, with no error and no log line. Doing it per *partition*
+rather than per connection keeps the guarantee while still letting six
+partitions on one broker fill six batches concurrently.
+
+It also explains why `linger` defaults to zero and should usually stay there.
+Records arriving during a round trip accumulate into the next batch on their
+own, so batching scales with load rather than with the setting.
+
+## Idempotence is routed differently from transactions
+
+`kafka-meta`'s routing table sends `InitProducerId` to the transaction
+coordinator, which is right for a transactional producer and wrong for an
+idempotent-only one: it has **no transactional id**, and the coordinator is
+resolved *by* that id — there is nothing to look one up with. Java sends this
+to any broker, and so do we.
+
+The table is keyed on api key alone and cannot express "depends on whether a
+field is null", so this is a documented exception in `idempotence.rs` rather
+than a table change.
+
+Transactions add three rules that are each quiet when broken:
+`AddPartitionsToTxn` must precede the first produce to each partition; the
+client ceiling on it is v3, because v4 (KIP-890) replaced the flat request
+with a `transactions` array and the clamp lives on the `Rpc` impl so no call
+site has to remember it; and `PRODUCER_FENCED` is **terminal** — another
+producer sharing the transactional id has bumped the epoch, so retrying is an
+infinite loop.
+
+## What is not here
+
+`acks=0` — a decision with a reason above rather than a gap. Batching,
+idempotence and transactions all landed in phase 2; see
+[Roadmap](../guide/roadmap.md) for what is actually outstanding, and
+[Producing records](../guide/producing.md) for the user-facing surface.
 
 [`Acks`]: https://docs.rs/kafka-produce
 [`RetryPolicy`]: https://docs.rs/kafka-meta

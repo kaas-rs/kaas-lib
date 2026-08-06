@@ -35,6 +35,7 @@
   - [kafka-admin](code-tour/kafka-admin.md)
   - [kafka-read](code-tour/kafka-read.md)
   - [kafka-produce](code-tour/kafka-produce.md)
+  - [kafka-consume](code-tour/kafka-consume.md)
   - [testkit](code-tour/testkit.md)
   - [livetest](code-tour/livetest.md)
   - [xtask](code-tour/xtask.md)
@@ -43,6 +44,8 @@
 
 - [Connecting](guide/connecting.md)
 - [Admin operations](guide/admin.md)
+- [Producing records](guide/producing.md)
+- [Consuming records](guide/consuming.md)
 - [Reading records](guide/reading.md)
 - [Testing against a real cluster](guide/live-cluster.md)
 - [Roadmap](guide/roadmap.md)
