@@ -14,7 +14,7 @@
     clippy::indexing_slicing
 )]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use kafka_admin::{Admin, ClusterConfig, NewTopic};
@@ -118,8 +118,20 @@ async fn a_committed_transaction_is_visible_and_an_aborted_one_is_not() {
          Visibility::All must show them"
     );
 
-    // `CommittedOnly` is the consumer's question.
-    let committed = read(&cluster, TOPIC, Visibility::CommittedOnly).await;
+    // `CommittedOnly` is the consumer's question. It is answered up to the
+    // last stable offset, and the transaction markers that advance it are
+    // written by the coordinator *after* the EndTxn responses awaited above —
+    // so a single immediate read races the markers and can see nothing at
+    // all. Poll until the committed half is visible; the deadline turns a
+    // marker that never lands into a failure that says so.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let committed = loop {
+        let committed = read(&cluster, TOPIC, Visibility::CommittedOnly).await;
+        if committed.len() >= RECORDS || Instant::now() >= deadline {
+            break committed;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
     assert_eq!(
         committed.len(),
         RECORDS,

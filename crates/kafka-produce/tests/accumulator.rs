@@ -155,7 +155,16 @@ async fn fifty_thousand_records_arrive_in_under_five_hundred_requests() {
     const RECORDS: usize = 50_000;
 
     let (_fixture, cluster, _admin) = setup(TOPIC, PARTITIONS).await;
-    let producer = Producer::new(cluster.clone(), ProducerConfig::new());
+    // An explicit linger, because the default is zero and zero makes this
+    // measurement a scheduling race: with no linger, batch size depends on
+    // how many records the enqueue loop lands between two round trips, and a
+    // starved CI runner enqueues slowly enough to send hundreds of tiny
+    // batches. 25ms is invisible to the test's duration and makes "batching
+    // happened" a property of the accumulator rather than of the runner.
+    let producer = Producer::new(
+        cluster.clone(),
+        ProducerConfig::new().linger(Duration::from_millis(25)),
+    );
 
     // Captured once and reused for both ends of the measurement — see
     // `Traffic` for why re-reading the snapshot is a trap, and taken before

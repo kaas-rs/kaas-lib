@@ -409,10 +409,17 @@ impl Actor {
     /// async, and because a producer that is never used should not open a
     /// connection to claim an id it will not spend.
     ///
-    /// A failure leaves `identity` unset and the batches buffered: the next
-    /// tick tries again. That is deliberate — `InitProducerId` failing is
-    /// usually a broker that is not ready yet, and failing every buffered
-    /// record for it would turn a transient condition into data loss.
+    /// A *retriable* failure leaves `identity` unset and the batches
+    /// buffered: the next tick tries again. That is deliberate —
+    /// `InitProducerId` failing is usually a broker that is not ready yet,
+    /// and failing every buffered record for it would turn a transient
+    /// condition into data loss.
+    ///
+    /// A failure no retry can fix fails the buffered records instead. The
+    /// read-only gate is the concrete case: `InitProducerId` is itself a
+    /// mutating API, so an idempotent producer on a read-only cluster can
+    /// never claim an id — retrying every 500ms holds each awaited `send`
+    /// parked forever on an outcome that was already decided.
     async fn ensure_identity(&mut self) {
         // A transactional producer's id is claimed by `init_transactions`,
         // which the caller drives — claiming one here would race it and fence
@@ -443,8 +450,12 @@ impl Actor {
                 );
                 self.identity = Some(identity);
             }
-            Err(error) => {
+            Err(error) if error.retriable() => {
                 tracing::warn!(%error, "could not claim a producer id; retrying");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the producer id claim failed terminally");
+                fail_buffered(&mut self.partitions, &error);
             }
         }
     }
@@ -790,6 +801,23 @@ fn earliest_wake(
     [open, retry].into_iter().flatten().min()
 }
 
+/// Resolve every buffered record with `error` and drain the buffers.
+///
+/// The terminal half of `ensure_identity`'s failure handling, and — like
+/// [`earliest_wake`] — a free function so the case that hung can be asserted
+/// without a broker. Batches already on the wire are left alone: their
+/// completions settle on their own, and their records' fate belongs to the
+/// response, not to this claim.
+fn fail_buffered(partitions: &mut HashMap<(String, i32), PartitionState>, error: &Error) {
+    for state in partitions.values_mut() {
+        for batch in state.open.take().into_iter().chain(state.pending.drain(..)) {
+            for queued in batch.records {
+                queued.resolve(Err(error.clone()));
+            }
+        }
+    }
+}
+
 /// Wait until `deadline`, or forever when there is nothing to wait for.
 async fn sleep_until(deadline: Option<Instant>) {
     match deadline {
@@ -919,6 +947,43 @@ mod tests {
             earliest_wake(None, false, now),
             None,
             "with nothing blocked there is genuinely nothing to wait for"
+        );
+    }
+
+    /// The other half of the identity-failure handling: a claim no retry can
+    /// fix — the read-only gate refusing `InitProducerId` is the concrete
+    /// case — must resolve the records that were waiting on it. Leaving them
+    /// buffered turns every awaited `send` into a permanent hang, which is
+    /// how `a_read_only_client_cannot_produce` ran into its deadline.
+    #[test]
+    fn a_terminal_identity_failure_fails_the_buffered_records() {
+        let memory = Arc::new(Semaphore::new(10));
+        let (respond, mut receiver) = oneshot::channel();
+        let queued = Queued {
+            record: ProducerRecord::new("t"),
+            respond,
+            _permit: memory.try_acquire_owned().expect("permit"),
+        };
+        let mut batch = Batch::new(Instant::now());
+        batch.records.push(queued);
+        let mut state = PartitionState::default();
+        state.pending.push_back(batch);
+        let mut partitions = HashMap::from([(("t".to_owned(), 0), state)]);
+
+        let error = Error::ReadOnly {
+            api_key: kafka_conn::ApiKey::InitProducerId,
+        };
+        fail_buffered(&mut partitions, &error);
+
+        match receiver.try_recv() {
+            Ok(Err(Error::ReadOnly { .. })) => {}
+            other => panic!("the parked send must resolve with the claim error, got {other:?}"),
+        }
+        assert!(
+            partitions
+                .values()
+                .all(|state| state.open.is_none() && state.pending.is_empty()),
+            "failed batches must not stay buffered as work"
         );
     }
 

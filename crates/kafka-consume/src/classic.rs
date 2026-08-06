@@ -1065,20 +1065,28 @@ impl ClassicMembership {
             leader: false,
             protocol: RANGE.to_owned(),
             assignors: SUPPORTED.to_vec(),
-            // Both deliberately small, and in this order.
+            // Sized by two constraints, in this order.
             //
             // `JoinGroup` *blocks* on the coordinator until every member has
             // joined or the rebalance timeout expires — it is the one RPC in
             // the protocol whose normal behaviour is to sit there. So the
             // rebalance timeout has to fit inside the connection's own request
-            // timeout, or the socket gives up first and reports a timeout on a
-            // rebalance that was proceeding perfectly well.
+            // timeout (30s), with headroom, or the socket gives up first and
+            // reports a timeout on a rebalance that was proceeding perfectly
+            // well.
             //
             // And `rebalance >= session`, matching Java, which pairs
             // `max.poll.interval.ms` (300s) with `session.timeout.ms` (45s).
             // Inverting them is not a configuration Kafka is tested against.
-            session_timeout_ms: 6_000,
-            rebalance_timeout_ms: 12_000,
+            //
+            // The session timeout sits as close to Java's 45s as the ordering
+            // above allows. It was 6s once — and a member whose poll loop
+            // stalls for six seconds is not dead, it is a tenant on a busy CI
+            // runner. The coordinator evicted exactly such a member mid
+            // cooperative rebalance, and its next JoinGroup came back
+            // UNKNOWN_MEMBER_ID.
+            session_timeout_ms: 20_000,
+            rebalance_timeout_ms: 25_000,
         }
     }
 
