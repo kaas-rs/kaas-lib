@@ -8,6 +8,7 @@
 //! broker count instead of partition count.
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use bytes::Bytes;
 use kafka_conn::protocol::StrBytes;
@@ -83,12 +84,35 @@ impl Attempt {
     /// retrying is how a duplicate is written. With them it recognises the
     /// batch and answers with the original offsets, which is the entire point
     /// of M14 and the reason a leader election stops being a delivery failure.
-    fn retriable(&self, attempt: u32, policy: &RetryPolicy, idempotent: bool) -> bool {
+    ///
+    /// The budget depends on what failed. An error that says the *partition
+    /// leader moved* — `NOT_LEADER_OR_FOLLOWER`, a connection refused by a
+    /// broker that just died — is bounded by
+    /// [`RetryPolicy::coordinator_timeout`], not by the attempt count: an
+    /// election is a cluster-side event whose duration has nothing to do with
+    /// our backoff curve, and five attempts expire ~1.5s into one. That is
+    /// how "ride out a leader restart" lost 1,408 of 20,000 records on a
+    /// loaded runner — every retry dialled the old leader before the new one
+    /// existed, and the attempts ran out. Everything else stays
+    /// attempt-bounded.
+    fn retriable(
+        &self,
+        attempt: u32,
+        started: Instant,
+        policy: &RetryPolicy,
+        idempotent: bool,
+    ) -> bool {
+        let error = match self {
+            Attempt::Rejected(error) | Attempt::Ambiguous(error) => error,
+        };
+        let budget_left = if error.needs_metadata_refresh() {
+            started.elapsed() < policy.coordinator_timeout
+        } else {
+            policy.should_retry(attempt)
+        };
         match self {
-            Attempt::Rejected(error) => error.retriable() && policy.should_retry(attempt),
-            Attempt::Ambiguous(error) => {
-                idempotent && error.retriable() && policy.should_retry(attempt)
-            }
+            Attempt::Rejected(_) => error.retriable() && budget_left,
+            Attempt::Ambiguous(_) => idempotent && error.retriable() && budget_left,
         }
     }
 }
@@ -132,6 +156,7 @@ impl Dispatcher {
         let mut resolved: Vec<((String, i32), Result<Ack>)> = Vec::with_capacity(batches.len());
         let mut pending = batches;
         let mut attempt: u32 = 1;
+        let started = Instant::now();
 
         while !pending.is_empty() {
             let mut retry: Vec<Outbound> = Vec::new();
@@ -147,8 +172,12 @@ impl Dispatcher {
                         if error.needs_metadata_refresh() {
                             refresh = true;
                         }
-                        let may_retry =
-                            failure.retriable(attempt, &self.config.retry, self.config.idempotent);
+                        let may_retry = failure.retriable(
+                            attempt,
+                            started,
+                            &self.config.retry,
+                            self.config.idempotent,
+                        );
                         match (may_retry, outbound) {
                             (true, Some(outbound)) => retry.push(outbound),
                             (_, _) => resolved.push((key, Err(failure.into_error()))),
@@ -432,6 +461,8 @@ fn read_response(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn outbound(topic: &str, partition: i32) -> Outbound {
@@ -457,11 +488,11 @@ mod tests {
              must not route through that check"
         );
         assert!(
-            !Attempt::Ambiguous(timeout.clone()).retriable(1, &policy, false),
+            !Attempt::Ambiguous(timeout.clone()).retriable(1, Instant::now(), &policy, false),
             "without a producer id, re-sending an unknown outcome duplicates"
         );
         assert!(
-            Attempt::Ambiguous(timeout).retriable(1, &policy, true),
+            Attempt::Ambiguous(timeout).retriable(1, Instant::now(), &policy, true),
             "with one, the broker deduplicates the re-send — that is M14"
         );
     }
@@ -477,10 +508,53 @@ mod tests {
             let error = Error::from_code(code, None);
             assert!(error.needs_metadata_refresh(), "{code:?} must refresh");
             assert!(
-                Attempt::Rejected(error).retriable(1, &policy, false),
+                Attempt::Rejected(error).retriable(1, Instant::now(), &policy, false),
                 "{code:?}"
             );
         }
+    }
+
+    /// The regression from the leader-restart acceptance test: a leader
+    /// election outlives the attempt budget, so an error that a metadata
+    /// refresh would fix is bounded by *time*, not by attempts — and an
+    /// election still in progress at the deadline finally fails.
+    #[test]
+    fn a_leader_handover_is_bounded_by_time_not_attempts() {
+        let policy = RetryPolicy::default();
+        let refresh = Error::from_code(ErrorCode::NotLeaderOrFollower, None);
+        assert!(
+            Attempt::Rejected(refresh.clone()).retriable(
+                policy.max_attempts + 100,
+                Instant::now(),
+                &policy,
+                false
+            ),
+            "attempts must not expire a retry the coordinator_timeout still allows"
+        );
+        // A zeroed budget, rather than an `Instant` wound backwards — the
+        // subtraction panics on a machine that booted more recently than the
+        // budget is long, and CI runners are exactly such machines.
+        let expired = RetryPolicy {
+            coordinator_timeout: Duration::ZERO,
+            ..RetryPolicy::default()
+        };
+        assert!(
+            !Attempt::Rejected(refresh).retriable(1, Instant::now(), &expired, false),
+            "and the deadline is still a deadline"
+        );
+
+        // An attempt-bounded error stays attempt-bounded.
+        let plain = Error::from_code(ErrorCode::CorruptMessage, None);
+        assert!(!plain.needs_metadata_refresh());
+        assert!(
+            !Attempt::Rejected(plain).retriable(
+                policy.max_attempts,
+                Instant::now(),
+                &policy,
+                false
+            ),
+            "a non-handover error must not inherit the longer budget"
+        );
     }
 
     #[test]
@@ -493,7 +567,7 @@ mod tests {
         ] {
             let error = Error::from_code(code, None);
             assert!(
-                !Attempt::Rejected(error).retriable(1, &policy, true),
+                !Attempt::Rejected(error).retriable(1, Instant::now(), &policy, true),
                 "{code:?}"
             );
         }

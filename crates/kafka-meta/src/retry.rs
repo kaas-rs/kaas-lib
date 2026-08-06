@@ -19,22 +19,28 @@ pub struct RetryPolicy {
     pub max_delay: Duration,
     /// Fraction of the delay to randomise, `0.0..=1.0`.
     pub jitter: f64,
-    /// How long to keep retrying an error that says the coordinator moved or
-    /// has not finished loading — `NOT_COORDINATOR`,
-    /// `COORDINATOR_NOT_AVAILABLE`, `COORDINATOR_LOAD_IN_PROGRESS`.
+    /// How long to keep retrying an error that names a **cluster-side
+    /// handover**: a coordinator that moved or has not finished loading
+    /// (`NOT_COORDINATOR`, `COORDINATOR_NOT_AVAILABLE`,
+    /// `COORDINATOR_LOAD_IN_PROGRESS`), or a partition leader that is being
+    /// re-elected (`NOT_LEADER_OR_FOLLOWER`, `LEADER_NOT_AVAILABLE`, a
+    /// connection refused by a broker that just died — anything
+    /// [`needs_metadata_refresh`](kafka_conn::Error::needs_metadata_refresh)
+    /// on the produce path).
     ///
     /// A **deadline** rather than an attempt count, because this class of
     /// error is not "the request failed" but "ask again in a moment": the
-    /// group is being handed to a new coordinator, or `__consumer_offsets` is
-    /// still being read. How many attempts that takes is a function of the
-    /// backoff curve, not of the cluster; how long it takes is a property of
-    /// the cluster.
+    /// group is being handed to a new coordinator, or the partition to a new
+    /// leader. How many attempts that takes is a function of the backoff
+    /// curve, not of the cluster; how long it takes is a property of the
+    /// cluster.
     ///
     /// [`max_attempts`](Self::max_attempts) governs it otherwise, and five
     /// attempts is ~1.5s at the default curve — shorter than a routine
-    /// coordinator election, so a caller saw a raw `NOT_COORDINATOR` for
-    /// something that resolves itself. Java bounds the same case by
-    /// `default.api.timeout.ms`, 60s.
+    /// election, so a caller saw a raw `NOT_COORDINATOR` for something that
+    /// resolves itself, and an idempotent producer dropped records into a
+    /// leader restart it exists to ride out. Java bounds the same cases by
+    /// `default.api.timeout.ms` / `delivery.timeout.ms`, 60s and 120s.
     pub coordinator_timeout: Duration,
 }
 
