@@ -84,8 +84,11 @@ Skipping step 1 does not fail early. The gates are all green — they never
 contact the registry — and the run dies at the upload with the credential
 error, after the reviewer has already approved.
 
-> **0.3.0 is one of these releases.** `kafka-consume` is new, so the token
-> has to go back before the tag and come out after.
+> **0.4.0 is one of these releases.** `kafka-consume` is new, so the token
+> has to go back before the tag and come out after. (0.3.0 was tagged but
+> both its release runs were cancelled before anything uploaded — the
+> version was skipped rather than re-tagged, so crates.io goes straight
+> from 0.2.1 to 0.4.0.)
 
 ## Recommended: protect the environment
 
