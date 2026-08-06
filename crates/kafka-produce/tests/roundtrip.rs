@@ -61,10 +61,14 @@ const CODECS: [Compression; 5] = [
 #[test]
 fn null_and_empty_stay_distinct_through_every_codec() {
     let records = vec![
-        ProducerRecord::new("t").key("k1"),
-        ProducerRecord::new("t").key("k2").value(Bytes::new()),
-        ProducerRecord::new("t").value("no key"),
-        ProducerRecord::new("t").key(Bytes::new()).value("v"),
+        ProducerRecord::new("t").with_key("k1"),
+        ProducerRecord::new("t")
+            .with_key("k2")
+            .with_value(Bytes::new()),
+        ProducerRecord::new("t").with_value("no key"),
+        ProducerRecord::new("t")
+            .with_key(Bytes::new())
+            .with_value("v"),
     ];
 
     for codec in CODECS {
@@ -90,10 +94,10 @@ fn null_and_empty_stay_distinct_through_every_codec() {
 fn headers_keep_order_nulls_and_empty_names() {
     let records = vec![
         ProducerRecord::new("t")
-            .value("v")
-            .header("trace", "a")
-            .null_header("gone")
-            .header("", "empty name"),
+            .with_value("v")
+            .with_header("trace", "a")
+            .with_null_header("gone")
+            .with_header("", "empty name"),
     ];
 
     for codec in CODECS {
@@ -137,9 +141,9 @@ fn headers_keep_order_nulls_and_empty_names() {
 fn a_duplicate_header_name_is_dropped_and_that_is_an_upstream_limit() {
     let records = vec![
         ProducerRecord::new("t")
-            .value("v")
-            .header("trace", "first")
-            .header("trace", "second"),
+            .with_value("v")
+            .with_header("trace", "first")
+            .with_header("trace", "second"),
     ];
 
     let read = round_trip(&records, Compression::None);
@@ -162,8 +166,8 @@ fn batches_survive_the_varint_boundaries() {
         let records: Vec<ProducerRecord> = (0..count)
             .map(|i| {
                 ProducerRecord::new("t")
-                    .key(format!("k{i}"))
-                    .value(format!("v{i}"))
+                    .with_key(format!("k{i}"))
+                    .with_value(format!("v{i}"))
             })
             .collect();
 
@@ -193,9 +197,9 @@ fn arbitrary_bytes_survive_unchanged() {
     let nasty: Vec<u8> = (0u8..=255).collect();
     let records = vec![
         ProducerRecord::new("t")
-            .key(Bytes::from(nasty.clone()))
-            .value(Bytes::from(nasty.clone()))
-            .header("h", Bytes::from(nasty.clone())),
+            .with_key(Bytes::from(nasty.clone()))
+            .with_value(Bytes::from(nasty.clone()))
+            .with_header("h", Bytes::from(nasty.clone())),
     ];
 
     for codec in CODECS {
@@ -222,8 +226,8 @@ fn a_large_batch_compresses_and_returns_intact() {
     let records: Vec<ProducerRecord> = (0..8)
         .map(|i| {
             ProducerRecord::new("t")
-                .key(format!("k{i}"))
-                .value(big.clone())
+                .with_key(format!("k{i}"))
+                .with_value(big.clone())
         })
         .collect();
 

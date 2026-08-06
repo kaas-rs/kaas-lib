@@ -110,7 +110,7 @@ async fn twenty_thousand_records_survive_a_leader_restart_exactly_once_and_in_or
     // Send a first record so the producer has claimed its id and the pool has
     // a connection to the leader before anything is disturbed.
     producer
-        .send(ProducerRecord::new(TOPIC).partition(0).value("0"))
+        .send(ProducerRecord::new(TOPIC).with_partition(0).with_value("0"))
         .await
         .expect("first record");
 
@@ -125,8 +125,8 @@ async fn twenty_thousand_records_survive_a_leader_restart_exactly_once_and_in_or
             producer
                 .enqueue(
                     ProducerRecord::new(TOPIC)
-                        .partition(0)
-                        .value(format!("{i}")),
+                        .with_partition(0)
+                        .with_value(format!("{i}")),
                 )
                 .await
                 .expect("enqueued"),
@@ -237,7 +237,7 @@ async fn a_non_idempotent_producer_clamps_its_connections_to_one_in_flight() {
         .expect("topic");
     await_topic(&admin, TOPIC).await;
     lossy
-        .send(ProducerRecord::new(TOPIC).partition(0).value("v"))
+        .send(ProducerRecord::new(TOPIC).with_partition(0).with_value("v"))
         .await
         .expect("a clamped producer still produces");
 }
@@ -258,7 +258,7 @@ async fn the_producer_id_is_claimed_once_for_many_batches() {
     for i in 0..RECORDS {
         pending.push(
             producer
-                .enqueue(ProducerRecord::new(TOPIC).value(format!("v{i}")))
+                .enqueue(ProducerRecord::new(TOPIC).with_value(format!("v{i}")))
                 .await
                 .expect("enqueued"),
         );

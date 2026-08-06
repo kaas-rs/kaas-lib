@@ -1101,7 +1101,7 @@ dependencies = [
  "futures",
  "kafka-admin",
  "kafka-conn",
- "kafka-consumer",
+ "kafka-consume",
  "kafka-produce",
  "kafka-read",
  "rdkafka",
@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-admin"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-conn"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.0",
  "bytes",
@@ -1194,8 +1194,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "kafka-consumer"
-version = "0.2.1"
+name = "kafka-consume"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1211,7 +1211,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-meta"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -1226,7 +1226,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-produce"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-read"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2344,13 +2344,23 @@ dependencies = [
 
 [[package]]
 name = "testkit"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "futures",
  "testcontainers",
+ "testkit-macros",
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "testkit-macros"
+version = "0.3.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

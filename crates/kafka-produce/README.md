@@ -9,7 +9,7 @@ use kafka_produce::{Producer, ProducerConfig, ProducerRecord};
 
 let producer = Producer::new(cluster, ProducerConfig::new());
 let meta = producer
-    .send(ProducerRecord::new("orders").key("customer-7").value("hello"))
+    .send(ProducerRecord::new("orders").with_key("customer-7").with_value("hello"))
     .await?;
 println!("landed at {}:{}", meta.partition, meta.offset);
 ```

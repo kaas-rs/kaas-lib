@@ -76,7 +76,7 @@ async fn main() {
     let producer = Producer::new(admin.cluster().clone(), ProducerConfig::new());
     for i in 0..600 {
         producer
-            .send(ProducerRecord::new(&topic).value(format!("v{i}")))
+            .send(ProducerRecord::new(&topic).with_value(format!("v{i}")))
             .await
             .expect("seed");
     }

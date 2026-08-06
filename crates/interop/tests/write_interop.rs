@@ -104,9 +104,9 @@ async fn what_we_produce_rdkafka_can_consume_through_every_codec() {
                 producer
                     .enqueue(
                         ProducerRecord::new(topic)
-                            .partition(0)
-                            .key(format!("k{i}"))
-                            .value(format!("v{i}")),
+                            .with_partition(0)
+                            .with_key(format!("k{i}"))
+                            .with_value(format!("v{i}")),
                     )
                     .await
                     .expect("enqueued"),
@@ -145,15 +145,15 @@ async fn a_tombstone_we_write_is_a_tombstone_to_rdkafka() {
 
     let producer = Producer::new(cluster, ProducerConfig::new());
     producer
-        .send(ProducerRecord::new(TOPIC).partition(0).key("gone"))
+        .send(ProducerRecord::new(TOPIC).with_partition(0).with_key("gone"))
         .await
         .expect("tombstone");
     producer
         .send(
             ProducerRecord::new(TOPIC)
-                .partition(0)
-                .key("blank")
-                .value(bytes::Bytes::new()),
+                .with_partition(0)
+                .with_key("blank")
+                .with_value(bytes::Bytes::new()),
         )
         .await
         .expect("empty");
@@ -201,7 +201,7 @@ async fn our_murmur2_placement_is_where_rdkafka_looks() {
         );
         pending.push(
             producer
-                .enqueue(ProducerRecord::new(TOPIC).key(key).value("v"))
+                .enqueue(ProducerRecord::new(TOPIC).with_key(key).with_value("v"))
                 .await
                 .expect("enqueued"),
         );
@@ -239,11 +239,11 @@ async fn headers_we_write_reach_rdkafka_intact() {
     producer
         .send(
             ProducerRecord::new(TOPIC)
-                .partition(0)
-                .value("v")
-                .header("content-type", "application/json")
-                .null_header("tombstoned")
-                .header("trace", "abc"),
+                .with_partition(0)
+                .with_value("v")
+                .with_header("content-type", "application/json")
+                .with_null_header("tombstoned")
+                .with_header("trace", "abc"),
         )
         .await
         .expect("sent");

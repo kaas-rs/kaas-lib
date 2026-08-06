@@ -65,11 +65,11 @@ impl ProducerRecord {
     /// Write to an explicit partition, bypassing the partitioner.
     ///
     /// Takes an `i32` because naming a partition is a decision. A caller
-    /// *relaying* one it was handed wants [`maybe_partition`] instead.
+    /// *relaying* one it was handed wants [`with_maybe_partition`] instead.
     ///
-    /// [`maybe_partition`]: Self::maybe_partition
+    /// [`with_maybe_partition`]: Self::with_maybe_partition
     #[must_use]
-    pub fn partition(mut self, partition: i32) -> Self {
+    pub fn with_partition(mut self, partition: i32) -> Self {
         self.partition = Some(partition);
         self
     }
@@ -77,18 +77,19 @@ impl ProducerRecord {
     /// Set the partition from an `Option`, leaving the choice to the
     /// partitioner when there is none.
     ///
-    /// [`partition`] is the method for code that has decided on a partition.
-    /// This one is for code that is passing one through — from a `--partition`
-    /// flag, a config field, a request parameter — where "no partition" is a
-    /// value the caller holds rather than a branch it takes. Without it, such
-    /// a caller has to break the chain to apply what it was given:
+    /// [`with_partition`] is the method for code that has decided on a
+    /// partition. This one is for code that is passing one through — from a
+    /// `--partition` flag, a config field, a request parameter — where "no
+    /// partition" is a value the caller holds rather than a branch it takes.
+    /// Without it, such a caller has to break the chain to apply what it was
+    /// given:
     ///
     /// ```
     /// # use kafka_produce::ProducerRecord;
     /// # let configured: Option<i32> = Some(3);
-    /// let mut record = ProducerRecord::new("t").value("v");
+    /// let mut record = ProducerRecord::new("t").with_value("v");
     /// if let Some(partition) = configured {
-    ///     record = record.partition(partition);
+    ///     record = record.with_partition(partition);
     /// }
     /// # assert_eq!(record.partition, Some(3));
     /// ```
@@ -99,54 +100,57 @@ impl ProducerRecord {
     /// # use kafka_produce::ProducerRecord;
     /// # let configured: Option<i32> = Some(3);
     /// let record = ProducerRecord::new("t")
-    ///     .value("v")
-    ///     .maybe_partition(configured);
+    ///     .with_value("v")
+    ///     .with_maybe_partition(configured);
     /// # assert_eq!(record.partition, Some(3));
     /// ```
     ///
-    /// Assignment rather than a merge: `maybe_partition(None)` clears a
-    /// partition set earlier in the chain, the same way a second [`partition`]
-    /// call overwrites the first. Last call wins, which is the only rule that
-    /// does not require knowing what came before it.
+    /// Assignment rather than a merge: `with_maybe_partition(None)` clears a
+    /// partition set earlier in the chain, the same way a second
+    /// [`with_partition`] call overwrites the first. Last call wins, which is
+    /// the only rule that does not require knowing what came before it.
     ///
-    /// [`partition`]: Self::partition
+    /// [`with_partition`]: Self::with_partition
     #[must_use]
-    pub fn maybe_partition(mut self, partition: Option<i32>) -> Self {
+    pub fn with_maybe_partition(mut self, partition: Option<i32>) -> Self {
         self.partition = partition;
         self
     }
 
     /// Set the key.
     #[must_use]
-    pub fn key(mut self, key: impl Into<Bytes>) -> Self {
+    pub fn with_key(mut self, key: impl Into<Bytes>) -> Self {
         self.key = Some(key.into());
         self
     }
 
     /// Set the value.
+    ///
+    /// Leaving it unset is not the same as setting an empty one: a record with
+    /// no value is a tombstone. See the type documentation.
     #[must_use]
-    pub fn value(mut self, value: impl Into<Bytes>) -> Self {
+    pub fn with_value(mut self, value: impl Into<Bytes>) -> Self {
         self.value = Some(value.into());
         self
     }
 
     /// Append a header.
     #[must_use]
-    pub fn header(mut self, name: impl Into<String>, value: impl Into<Bytes>) -> Self {
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<Bytes>) -> Self {
         self.headers.push((name.into(), Some(value.into())));
         self
     }
 
     /// Append a header with a null value, which is distinct from an empty one.
     #[must_use]
-    pub fn null_header(mut self, name: impl Into<String>) -> Self {
+    pub fn with_null_header(mut self, name: impl Into<String>) -> Self {
         self.headers.push((name.into(), None));
         self
     }
 
     /// Set an explicit timestamp, in milliseconds since the epoch.
     #[must_use]
-    pub fn timestamp(mut self, timestamp: i64) -> Self {
+    pub fn with_timestamp(mut self, timestamp: i64) -> Self {
         self.timestamp = Some(timestamp);
         self
     }
@@ -176,8 +180,10 @@ mod tests {
 
     #[test]
     fn a_tombstone_is_not_an_empty_value() {
-        let tombstone = ProducerRecord::new("t").key("k");
-        let empty = ProducerRecord::new("t").key("k").value(Bytes::new());
+        let tombstone = ProducerRecord::new("t").with_key("k");
+        let empty = ProducerRecord::new("t")
+            .with_key("k")
+            .with_value(Bytes::new());
         assert_eq!(tombstone.value, None);
         assert_eq!(empty.value, Some(Bytes::new()));
         assert_ne!(tombstone, empty);
@@ -188,11 +194,13 @@ mod tests {
         // The point of the method: a caller holding `Option<i32>` builds the
         // record a caller holding `i32` builds, without leaving the chain.
         assert_eq!(
-            ProducerRecord::new("t").maybe_partition(Some(3)),
-            ProducerRecord::new("t").partition(3)
+            ProducerRecord::new("t").with_maybe_partition(Some(3)),
+            ProducerRecord::new("t").with_partition(3)
         );
         assert_eq!(
-            ProducerRecord::new("t").maybe_partition(None).partition,
+            ProducerRecord::new("t")
+                .with_maybe_partition(None)
+                .partition,
             None
         );
     }
@@ -203,16 +211,18 @@ mod tests {
         // `None` would make the last call in a chain conditional on the ones
         // before it, which is the kind of rule nobody remembers at the call
         // site.
-        let record = ProducerRecord::new("t").partition(3).maybe_partition(None);
+        let record = ProducerRecord::new("t")
+            .with_partition(3)
+            .with_maybe_partition(None);
         assert_eq!(record.partition, None);
     }
 
     #[test]
     fn headers_keep_their_order_and_their_duplicates() {
         let record = ProducerRecord::new("t")
-            .header("trace", "a")
-            .header("trace", "b")
-            .null_header("tombstoned");
+            .with_header("trace", "a")
+            .with_header("trace", "b")
+            .with_null_header("tombstoned");
 
         assert_eq!(record.headers.len(), 3);
         assert_eq!(record.headers[0], ("trace".to_owned(), Some("a".into())));

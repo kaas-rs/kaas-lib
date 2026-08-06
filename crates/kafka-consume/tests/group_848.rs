@@ -152,8 +152,8 @@ async fn a_departing_member_is_replaced_without_a_gap_or_a_duplicate() {
                     // partitions carry a position were testing the
                     // partitioner's batching luck, not the rebalance.
                     ProducerRecord::new(TOPIC)
-                        .partition(i32::try_from(i).expect("fits") % PARTITIONS)
-                        .value(format!("v{i}")),
+                        .with_partition(i32::try_from(i).expect("fits") % PARTITIONS)
+                        .with_value(format!("v{i}")),
                 )
                 .await
                 .expect("enqueued"),
@@ -249,8 +249,8 @@ async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
                     // partitions carry a position were testing the
                     // partitioner's batching luck, not the rebalance.
                     ProducerRecord::new(TOPIC)
-                        .partition(i32::try_from(i).expect("fits") % PARTITIONS)
-                        .value(format!("v{i}")),
+                        .with_partition(i32::try_from(i).expect("fits") % PARTITIONS)
+                        .with_value(format!("v{i}")),
                 )
                 .await
                 .expect("enqueued"),

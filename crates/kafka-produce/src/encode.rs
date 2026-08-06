@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn a_batch_carries_the_v2_magic_byte() {
-        let encoded = one(ProducerRecord::new("t").value("hello"));
+        let encoded = one(ProducerRecord::new("t").with_value("hello"));
         // base offset (8) + batch length (4) + leader epoch (4) = 16, then the
         // magic byte. Anything else means we wrote a message set, not a batch.
         assert_eq!(encoded.get(16), Some(&2_u8));
@@ -142,7 +142,7 @@ mod tests {
             Compression::Lz4,
             Compression::Zstd,
         ] {
-            let record = ProducerRecord::new("t").key("k").value("v");
+            let record = ProducerRecord::new("t").with_key("k").with_value("v");
             let encoded = encode_batch(&[record], compression, 1_700_000_000_000, None)
                 .expect("encode failed");
             assert!(
@@ -158,15 +158,17 @@ mod tests {
         // followed by nothing. They must not encode identically, or the
         // compaction semantics of every tombstone this library writes are
         // wrong.
-        let tombstone = one(ProducerRecord::new("t").key("k"));
-        let empty = one(ProducerRecord::new("t").key("k").value(Bytes::new()));
+        let tombstone = one(ProducerRecord::new("t").with_key("k"));
+        let empty = one(ProducerRecord::new("t")
+            .with_key("k")
+            .with_value(Bytes::new()));
         assert_ne!(tombstone, empty);
     }
 
     #[test]
     fn many_records_encode_as_one_batch_not_one_batch_each() {
         let records: Vec<ProducerRecord> = (0..3)
-            .map(|i| ProducerRecord::new("t").value(format!("v{i}")))
+            .map(|i| ProducerRecord::new("t").with_value(format!("v{i}")))
             .collect();
         let encoded = encode_batch(&records, Compression::None, 1_700_000_000_000, None).unwrap();
 
@@ -197,7 +199,7 @@ mod tests {
         // The split is driven by a *per-record* comparison, so a bug that
         // survives three records can still appear at a thousand.
         let records: Vec<ProducerRecord> = (0..1_000)
-            .map(|i| ProducerRecord::new("t").value(format!("v{i}")))
+            .map(|i| ProducerRecord::new("t").with_value(format!("v{i}")))
             .collect();
         let encoded = encode_batch(&records, Compression::None, 1_700_000_000_000, None).unwrap();
 

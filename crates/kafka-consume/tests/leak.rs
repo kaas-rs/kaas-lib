@@ -86,9 +86,13 @@ async fn a_thousand_producer_lifecycles_return_to_baseline() {
 
     // Warm the pool so the baseline is a steady state rather than zero.
     let warm = Producer::new(cluster.clone(), ProducerConfig::new());
-    warm.send(ProducerRecord::new(TOPIC).partition(0).value("warm"))
-        .await
-        .expect("warm");
+    warm.send(
+        ProducerRecord::new(TOPIC)
+            .with_partition(0)
+            .with_value("warm"),
+    )
+    .await
+    .expect("warm");
     drop(warm);
     let baseline = cluster.pool().live_connections().await;
 
@@ -96,8 +100,8 @@ async fn a_thousand_producer_lifecycles_return_to_baseline() {
         let producer = Producer::new(cluster.clone(), ProducerConfig::new());
         let send = producer.send(
             ProducerRecord::new(TOPIC)
-                .partition(i32::try_from(cycle).unwrap_or(0) % PARTITIONS)
-                .value(format!("v{cycle}")),
+                .with_partition(i32::try_from(cycle).unwrap_or(0) % PARTITIONS)
+                .with_value(format!("v{cycle}")),
         );
 
         // Cancel at a different point each time: before the request goes out,
@@ -130,7 +134,7 @@ async fn a_thousand_consumer_lifecycles_return_to_baseline() {
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
     for i in 0..200 {
         producer
-            .send(ProducerRecord::new(TOPIC).value(format!("v{i}")))
+            .send(ProducerRecord::new(TOPIC).with_value(format!("v{i}")))
             .await
             .expect("seed");
     }
@@ -182,7 +186,7 @@ async fn group_members_that_vanish_do_not_poison_the_group() {
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
     for i in 0..100 {
         producer
-            .send(ProducerRecord::new(TOPIC).value(format!("v{i}")))
+            .send(ProducerRecord::new(TOPIC).with_value(format!("v{i}")))
             .await
             .expect("seed");
     }

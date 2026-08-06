@@ -174,7 +174,11 @@ async fn fifty_thousand_records_arrive_in_under_five_hundred_requests() {
     // Warm the pool and the metadata cache before the mark, so the delta is
     // produce traffic rather than the first Metadata round trip per broker.
     producer
-        .send(ProducerRecord::new(TOPIC).partition(0).value("warmup"))
+        .send(
+            ProducerRecord::new(TOPIC)
+                .with_partition(0)
+                .with_value("warmup"),
+        )
         .await
         .expect("warmup");
 
@@ -186,8 +190,8 @@ async fn fifty_thousand_records_arrive_in_under_five_hundred_requests() {
     let mut pending = Vec::with_capacity(RECORDS);
     for i in 0..RECORDS {
         let record = ProducerRecord::new(TOPIC)
-            .key(format!("k{i}"))
-            .value(format!("v{i}"));
+            .with_key(format!("k{i}"))
+            .with_value(format!("v{i}"));
         pending.push(producer.enqueue(record).await.expect("enqueued"));
     }
 
@@ -255,7 +259,7 @@ async fn one_oversized_record_among_a_thousand_fails_alone() {
         } else {
             Bytes::from(format!("v{i}"))
         };
-        let record = ProducerRecord::new(TOPIC).value(value);
+        let record = ProducerRecord::new(TOPIC).with_value(value);
 
         // An enqueue-time refusal and a broker rejection are the same thing
         // from the caller's side: this record failed and no other did.
@@ -305,8 +309,8 @@ async fn codec_round_trips_a_whole_batch(codec: Compression, topic: &str) {
     let mut pending = Vec::with_capacity(RECORDS);
     for i in 0..RECORDS {
         let record = ProducerRecord::new(topic)
-            .key(format!("k{i}"))
-            .value(format!("value-{i}-{codec:?}"));
+            .with_key(format!("k{i}"))
+            .with_value(format!("value-{i}-{codec:?}"));
         pending.push(producer.enqueue(record).await.expect("enqueued"));
     }
     for delivery in pending {
@@ -369,7 +373,7 @@ async fn flush_waits_for_records_nobody_awaited() {
         // explicitly allows and which must not cancel the write.
         drop(
             producer
-                .enqueue(ProducerRecord::new(TOPIC).value(format!("v{i}")))
+                .enqueue(ProducerRecord::new(TOPIC).with_value(format!("v{i}")))
                 .await
                 .expect("enqueued"),
         );
@@ -404,7 +408,7 @@ async fn a_tiny_buffer_applies_backpressure_rather_than_dropping_records() {
     for i in 0..RECORDS {
         pending.push(
             producer
-                .enqueue(ProducerRecord::new(TOPIC).value(format!("value-number-{i}")))
+                .enqueue(ProducerRecord::new(TOPIC).with_value(format!("value-number-{i}")))
                 .await
                 .expect("enqueued"),
         );
@@ -434,8 +438,8 @@ async fn records_keep_their_order_within_a_partition() {
             producer
                 .enqueue(
                     ProducerRecord::new(TOPIC)
-                        .partition(0)
-                        .value(format!("{i}")),
+                        .with_partition(0)
+                        .with_value(format!("{i}")),
                 )
                 .await
                 .expect("enqueued"),

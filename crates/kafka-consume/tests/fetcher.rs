@@ -69,8 +69,8 @@ async fn produce(cluster: &Cluster, topic: &str, partitions: i32, count: usize) 
             producer
                 .enqueue(
                     ProducerRecord::new(topic)
-                        .partition(partition)
-                        .value(format!("{topic}-{i}")),
+                        .with_partition(partition)
+                        .with_value(format!("{topic}-{i}")),
                 )
                 .await
                 .expect("enqueued"),

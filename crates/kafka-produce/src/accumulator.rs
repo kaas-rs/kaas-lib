@@ -884,7 +884,7 @@ mod tests {
     use bytes::Bytes;
 
     fn record(value_len: usize) -> ProducerRecord {
-        ProducerRecord::new("t").value(Bytes::from(vec![b'x'; value_len]))
+        ProducerRecord::new("t").with_value(Bytes::from(vec![b'x'; value_len]))
     }
 
     #[test]
@@ -895,7 +895,7 @@ mod tests {
         let with_value = accounted_size(&record(100));
         assert_eq!(with_value, RECORD_OVERHEAD + 100);
 
-        let with_header = accounted_size(&ProducerRecord::new("t").header("k", "vv"));
+        let with_header = accounted_size(&ProducerRecord::new("t").with_header("k", "vv"));
         assert_eq!(with_header, RECORD_OVERHEAD + 1 + 2 + HEADER_OVERHEAD);
     }
 
@@ -903,10 +903,10 @@ mod tests {
     /// header value is charged only for its name.
     #[test]
     fn a_null_value_costs_nothing_to_buffer() {
-        let tombstone = accounted_size(&ProducerRecord::new("t").key("k"));
+        let tombstone = accounted_size(&ProducerRecord::new("t").with_key("k"));
         assert_eq!(tombstone, RECORD_OVERHEAD + 1);
 
-        let null_header = accounted_size(&ProducerRecord::new("t").null_header("h"));
+        let null_header = accounted_size(&ProducerRecord::new("t").with_null_header("h"));
         assert_eq!(null_header, RECORD_OVERHEAD + 1 + HEADER_OVERHEAD);
     }
 

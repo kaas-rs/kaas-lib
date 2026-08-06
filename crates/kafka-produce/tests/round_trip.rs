@@ -84,13 +84,13 @@ async fn a_record_survives_the_round_trip_exactly() {
     let metadata = producer
         .send(
             ProducerRecord::new("produced")
-                .partition(3)
-                .key("customer-7")
-                .value("{\"total\":42}")
-                .header("content-type", "application/json")
-                .header("trace-id", "abc123")
-                .null_header("tombstoned-header")
-                .timestamp(stamped),
+                .with_partition(3)
+                .with_key("customer-7")
+                .with_value("{\"total\":42}")
+                .with_header("content-type", "application/json")
+                .with_header("trace-id", "abc123")
+                .with_null_header("tombstoned-header")
+                .with_timestamp(stamped),
         )
         .await
         .expect("produce");
@@ -134,14 +134,14 @@ async fn a_tombstone_round_trips_as_null_and_not_as_empty() {
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
 
     producer
-        .send(ProducerRecord::new("tombstones").key("gone"))
+        .send(ProducerRecord::new("tombstones").with_key("gone"))
         .await
         .expect("tombstone");
     producer
         .send(
             ProducerRecord::new("tombstones")
-                .key("blank")
-                .value(Bytes::new()),
+                .with_key("blank")
+                .with_value(Bytes::new()),
         )
         .await
         .expect("empty value");
@@ -181,9 +181,9 @@ async fn every_codec_round_trips() {
         producer
             .send(
                 ProducerRecord::new("codecs")
-                    .partition(0)
-                    .key(format!("k{index}"))
-                    .value(format!("payload-{compression:?}")),
+                    .with_partition(0)
+                    .with_key(format!("k{index}"))
+                    .with_value(format!("payload-{compression:?}")),
             )
             .await
             .unwrap_or_else(|error| panic!("{compression:?} failed to produce: {error}"));
@@ -216,7 +216,11 @@ async fn a_keyed_record_lands_where_murmur2_says_it_should() {
     for i in 0..64 {
         let key = format!("key-{i}");
         let metadata = producer
-            .send(ProducerRecord::new("keyed").key(key.clone()).value("v"))
+            .send(
+                ProducerRecord::new("keyed")
+                    .with_key(key.clone())
+                    .with_value("v"),
+            )
             .await
             .expect("produce");
         assert_eq!(
@@ -246,7 +250,7 @@ async fn an_unkeyed_record_sticks_to_one_partition() {
     let mut partitions = HashSet::new();
     for i in 0..32 {
         let metadata = producer
-            .send(ProducerRecord::new("sticky").value(format!("v{i}")))
+            .send(ProducerRecord::new("sticky").with_value(format!("v{i}")))
             .await
             .expect("produce");
         partitions.insert(metadata.partition);
@@ -262,7 +266,7 @@ async fn an_unkeyed_record_sticks_to_one_partition() {
 
     producer.partitioner().rotate("sticky");
     let after = producer
-        .send(ProducerRecord::new("sticky").value("after"))
+        .send(ProducerRecord::new("sticky").with_value("after"))
         .await
         .expect("produce");
     assert!((0..6).contains(&after.partition));
@@ -274,7 +278,7 @@ async fn acks_leader_is_acknowledged_before_the_record_is_readable() {
     let producer = Producer::new(cluster.clone(), ProducerConfig::new().acks(Acks::Leader));
 
     let metadata = producer
-        .send(ProducerRecord::new("acked").value("v"))
+        .send(ProducerRecord::new("acked").with_value("v"))
         .await
         .expect("acks=1 should be acknowledged");
     assert_eq!(metadata.offset, 0);
@@ -318,7 +322,11 @@ async fn producing_to_a_partition_that_does_not_exist_is_refused_before_the_sock
     let producer = Producer::new(cluster.clone(), ProducerConfig::new());
 
     let error = producer
-        .send(ProducerRecord::new("narrow").partition(9).value("v"))
+        .send(
+            ProducerRecord::new("narrow")
+                .with_partition(9)
+                .with_value("v"),
+        )
         .await
         .expect_err("partition 9 of a 2-partition topic is not a thing");
 
@@ -349,7 +357,7 @@ async fn a_read_only_client_cannot_produce() {
     let producer = Producer::new(read_only.cluster().clone(), ProducerConfig::new());
 
     let error = producer
-        .send(ProducerRecord::new("guarded").value("v"))
+        .send(ProducerRecord::new("guarded").with_value("v"))
         .await
         .expect_err("a read-only client must not produce");
 

@@ -76,8 +76,8 @@ async fn write_transaction(producer: &Producer, topic: &str, prefix: &str, count
             producer
                 .enqueue(
                     ProducerRecord::new(topic)
-                        .partition(0)
-                        .value(format!("{prefix}-{i}")),
+                        .with_partition(0)
+                        .with_value(format!("{prefix}-{i}")),
                 )
                 .await
                 .expect("enqueued"),
@@ -166,7 +166,11 @@ async fn a_fenced_producer_fails_terminally_rather_than_retrying() {
 
     first.begin_transaction().expect("begin");
     let outcome = first
-        .send(ProducerRecord::new(TOPIC).partition(0).value("fenced"))
+        .send(
+            ProducerRecord::new(TOPIC)
+                .with_partition(0)
+                .with_value("fenced"),
+        )
         .await;
 
     let error = outcome.expect_err("the fenced producer must not succeed");
@@ -191,7 +195,11 @@ async fn a_fenced_producer_fails_terminally_rather_than_retrying() {
     // And the producer that won still works.
     second.begin_transaction().expect("begin");
     second
-        .send(ProducerRecord::new(TOPIC).partition(0).value("winner"))
+        .send(
+            ProducerRecord::new(TOPIC)
+                .with_partition(0)
+                .with_value("winner"),
+        )
         .await
         .expect("the fencing producer owns the id");
     second.commit_transaction().await.expect("commit");

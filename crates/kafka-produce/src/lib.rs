@@ -1,9 +1,10 @@
 //! The write path: encode a record batch, route it to the partition leader,
 //! and report where it landed.
 //!
-//! This is the first half of lifting kaas-lib past its admin-first scope. The
-//! read path answers "show me what is in this partition"; this one answers
-//! "put this there, and tell me the truth about whether it worked".
+//! This and `kafka-consume` are what make kaas-lib a general-purpose client
+//! rather than an admin one. The read path answers "show me what is in this
+//! partition"; this one answers "put this there, and tell me the truth about
+//! whether it worked".
 //!
 //! ```no_run
 //! # async fn example(cluster: kafka_meta::Cluster) -> kafka_produce::Result<()> {
@@ -13,9 +14,9 @@
 //! let meta = producer
 //!     .send(
 //!         ProducerRecord::new("orders")
-//!             .key("customer-7")
-//!             .value("{\"total\":42}")
-//!             .header("content-type", "application/json"),
+//!             .with_key("customer-7")
+//!             .with_value("{\"total\":42}")
+//!             .with_header("content-type", "application/json"),
 //!     )
 //!     .await?;
 //! println!("landed at {}:{}", meta.partition, meta.offset);
@@ -65,7 +66,7 @@
 //! # use kafka_produce::ProducerRecord;
 //! let mut pending = Vec::new();
 //! for i in 0..10_000 {
-//!     pending.push(producer.enqueue(ProducerRecord::new("t").value(format!("{i}"))).await?);
+//!     pending.push(producer.enqueue(ProducerRecord::new("t").with_value(format!("{i}"))).await?);
 //! }
 //! for delivery in pending {
 //!     delivery.await?;

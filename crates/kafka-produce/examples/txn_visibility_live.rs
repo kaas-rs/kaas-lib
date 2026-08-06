@@ -48,8 +48,8 @@ async fn write_transaction(producer: &Producer, topic: &str, prefix: &str, count
             producer
                 .enqueue(
                     ProducerRecord::new(topic)
-                        .partition(0)
-                        .value(format!("{prefix}-{i}")),
+                        .with_partition(0)
+                        .with_value(format!("{prefix}-{i}")),
                 )
                 .await
                 .expect("enqueued"),

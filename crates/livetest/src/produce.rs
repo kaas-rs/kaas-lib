@@ -160,12 +160,12 @@ async fn run(cluster: &Cluster, admin: &Admin, topic: &str, report: &mut Report)
     let metadata = producer
         .send(
             ProducerRecord::new(topic)
-                .partition(3)
-                .key("customer-7")
-                .value("{\"total\":42}")
-                .header("content-type", "application/json")
-                .null_header("tombstoned-header")
-                .timestamp(stamped),
+                .with_partition(3)
+                .with_key("customer-7")
+                .with_value("{\"total\":42}")
+                .with_header("content-type", "application/json")
+                .with_null_header("tombstoned-header")
+                .with_timestamp(stamped),
         )
         .await?;
     report.set("produce.one.partition", metadata.partition);
@@ -183,14 +183,18 @@ async fn run(cluster: &Cluster, admin: &Admin, topic: &str, report: &mut Report)
     // 2. A tombstone and an empty value, which must not collapse into each
     //    other. Same partition so one read checks both.
     producer
-        .send(ProducerRecord::new(topic).partition(3).key("gone"))
+        .send(
+            ProducerRecord::new(topic)
+                .with_partition(3)
+                .with_key("gone"),
+        )
         .await?;
     producer
         .send(
             ProducerRecord::new(topic)
-                .partition(3)
-                .key("blank")
-                .value(Bytes::new()),
+                .with_partition(3)
+                .with_key("blank")
+                .with_value(Bytes::new()),
         )
         .await?;
 
@@ -209,9 +213,9 @@ async fn run(cluster: &Cluster, admin: &Admin, topic: &str, report: &mut Report)
         codec_producer
             .send(
                 ProducerRecord::new(topic)
-                    .partition(3)
-                    .key(format!("codec-{compression:?}"))
-                    .value(format!("payload-{compression:?}")),
+                    .with_partition(3)
+                    .with_key(format!("codec-{compression:?}"))
+                    .with_value(format!("payload-{compression:?}")),
             )
             .await
             .map_err(|error| anyhow::anyhow!("{compression:?} was rejected: {error}"))?;
@@ -278,7 +282,11 @@ async fn run(cluster: &Cluster, admin: &Admin, topic: &str, report: &mut Report)
     for i in 0..48 {
         let key = format!("key-{i}");
         let placed = producer
-            .send(ProducerRecord::new(topic).key(key.clone()).value("v"))
+            .send(
+                ProducerRecord::new(topic)
+                    .with_key(key.clone())
+                    .with_value("v"),
+            )
             .await?;
         let ours = partition_for_key(key.as_bytes(), PARTITIONS);
         if placed.partition != ours {
@@ -561,8 +569,8 @@ async fn transactions(cluster: &Cluster, topic: &str, report: &mut Report) -> Re
                 producer
                     .enqueue(
                         ProducerRecord::new(topic)
-                            .partition(1)
-                            .value(format!("{marker}-{kind}-{i}")),
+                            .with_partition(1)
+                            .with_value(format!("{marker}-{kind}-{i}")),
                     )
                     .await?,
             );
@@ -671,8 +679,8 @@ async fn batching(cluster: &Cluster, topic: &str, report: &mut Report) -> Result
     producer
         .send(
             ProducerRecord::new(topic)
-                .partition(0)
-                .value(format!("{marker}-warmup")),
+                .with_partition(0)
+                .with_value(format!("{marker}-warmup")),
         )
         .await?;
 
@@ -687,8 +695,8 @@ async fn batching(cluster: &Cluster, topic: &str, report: &mut Report) -> Result
             producer
                 .enqueue(
                     ProducerRecord::new(topic)
-                        .partition(0)
-                        .value(format!("{marker}-{i}")),
+                        .with_partition(0)
+                        .with_value(format!("{marker}-{i}")),
                 )
                 .await?,
         );

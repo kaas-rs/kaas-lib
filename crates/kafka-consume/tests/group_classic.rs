@@ -48,7 +48,7 @@ async fn setup() -> KafkaCluster {
     let producer = Producer::new(admin.cluster().clone(), ProducerConfig::new());
     for i in 0..600 {
         producer
-            .send(ProducerRecord::new(TOPIC).value(format!("v{i}")))
+            .send(ProducerRecord::new(TOPIC).with_value(format!("v{i}")))
             .await
             .expect("seed");
     }
