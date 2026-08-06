@@ -97,7 +97,11 @@ When any of these blocks a milestone, that is an honest blocker (rule 3) — say
    - **Never `&mut self` setters, never `pub` mutable fields** for anything a caller is expected to set. There are currently zero `&mut self` setters in the workspace; keep it that way.
    - **The prefix is `with_`, without exception**, including boolean toggles (`with_read_only()`, not `read_only()`). One convention that reads slightly awkwardly in a few places beats two conventions that each read well, because a caller should never have to check which crate they are in to know what a setter is called.
 
+   `STYLE.md` is the full convention — `#[must_use]`, `with_maybe_*` for a relayed `Option`, additive setters, and where the pattern is the wrong tool. Read it before adding a builder; it is written to be portable, so it is also the file to copy into another project.
+
    Note this is *not* the `.with_*()` on `kafka_protocol` structs — those are upstream's generated builders, mandated by `#[non_exhaustive]` (see the traps below). Rule 7 is about our own owned types. The two happen to agree, which is convenient rather than meaningful.
+
+   **Rule 7 is not yet true of the whole workspace.** `ProducerRecord` conforms as of 0.4.0; **32 setters do not** — `ProducerConfig` (10), `ConsumerConfig` (10), `ScanSpec` (6), `TailSpec` (4), and one flag each on `ConnectionConfig` (`read_only`) and `SaslConfig` (`allow_plaintext_password`). Renaming them breaks callers again, so it wants one deliberate pass in a single minor rather than a trickle. Do not add new bare setters in the meantime.
 
 ## Protocol traps — read before writing wire code
 
