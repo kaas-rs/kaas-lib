@@ -458,6 +458,11 @@ async fn group(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<()
         kafka_meta::ClusterConfig::default(),
     )
     .await?;
+    // The library's default group timeouts, including the 300s rebalance budget
+    // a blocking JoinGroup can sit in. That is bounded here by structure rather
+    // than by config: both members are driven from tasks whose `select!` also
+    // watches the stop channel, so the 120s deadline below ends a join that is
+    // going nowhere instead of waiting out the member's own budget.
     let ca = ClassicConsumer::subscribe(cluster_a, config(), &classic_id, [topic]).await?;
     let cb = ClassicConsumer::subscribe(cluster_b, config(), &classic_id, [topic]).await?;
 

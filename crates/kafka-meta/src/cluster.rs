@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use kafka_conn::protocol::StrBytes;
@@ -299,12 +299,12 @@ impl Cluster {
 
     /// Send a request to any broker.
     pub async fn send_any<R: Rpc + Clone>(&self, request: R) -> Result<R::Response> {
-        self.dispatch(Target::Any, request).await
+        self.dispatch(Target::Any, request, None).await
     }
 
     /// Send a request to the controller.
     pub async fn send_to_controller<R: Rpc + Clone>(&self, request: R) -> Result<R::Response> {
-        self.dispatch(Target::Controller, request).await
+        self.dispatch(Target::Controller, request, None).await
     }
 
     /// Send a request to one named broker.
@@ -313,7 +313,7 @@ impl Cluster {
         node_id: i32,
         request: R,
     ) -> Result<R::Response> {
-        self.dispatch(Target::Node(node_id), request).await
+        self.dispatch(Target::Node(node_id), request, None).await
     }
 
     /// Send a request to a group or transaction coordinator.
@@ -323,8 +323,36 @@ impl Cluster {
         key: &str,
         request: R,
     ) -> Result<R::Response> {
-        self.dispatch(Target::Coordinator(kind, key.to_owned()), request)
+        self.dispatch(Target::Coordinator(kind, key.to_owned()), request, None)
             .await
+    }
+
+    /// Send a request to a coordinator with a caller-supplied deadline.
+    ///
+    /// The connection's own `request_timeout` bounds an ordinary send, and for
+    /// nearly every RPC that is the right answer: a broker that has not replied
+    /// in 30 seconds is not about to. `JoinGroup` and `SyncGroup` are the
+    /// exception — they sit in the coordinator's purgatory *by design* until
+    /// the group forms or the rebalance timeout expires, so a caller that
+    /// advertises a rebalance timeout larger than `request_timeout` must hand
+    /// down a matching deadline or the socket gives up on a rebalance that was
+    /// proceeding perfectly well.
+    ///
+    /// The deadline bounds the retry loop as well as each attempt, so a
+    /// coordinator that keeps moving cannot outlive it.
+    pub async fn send_to_coordinator_until<R: Rpc + Clone>(
+        &self,
+        kind: CoordinatorKind,
+        key: &str,
+        request: R,
+        deadline: Instant,
+    ) -> Result<R::Response> {
+        self.dispatch(
+            Target::Coordinator(kind, key.to_owned()),
+            request,
+            Some(deadline),
+        )
+        .await
     }
 
     /// Send a request to a partition's leader.
@@ -334,7 +362,7 @@ impl Cluster {
         partition: i32,
         request: R,
     ) -> Result<R::Response> {
-        self.dispatch(Target::Leader(topic.to_owned(), partition), request)
+        self.dispatch(Target::Leader(topic.to_owned(), partition), request, None)
             .await
     }
 
@@ -365,9 +393,17 @@ impl Cluster {
     }
 
     /// The retry loop: resolve a broker, send, and decide what a failure means.
-    async fn dispatch<R: Rpc + Clone>(&self, target: Target, request: R) -> Result<R::Response> {
+    ///
+    /// `deadline` is the caller's own budget, and it outranks both retry
+    /// bounds: whichever of the three expires first ends the loop.
+    async fn dispatch<R: Rpc + Clone>(
+        &self,
+        target: Target,
+        request: R,
+        deadline: Option<Instant>,
+    ) -> Result<R::Response> {
         let policy = self.inner.config.retry;
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let mut attempt = 1;
         loop {
             let delay = policy.delay(attempt);
@@ -375,7 +411,7 @@ impl Cluster {
                 tokio::time::sleep(delay).await;
             }
 
-            let outcome = self.attempt(&target, request.clone()).await;
+            let outcome = self.attempt(&target, request.clone(), deadline).await;
             let error = match outcome {
                 Ok(response) => return Ok(response),
                 Err(error) => error,
@@ -405,8 +441,12 @@ impl Cluster {
             } else {
                 policy.should_retry(attempt)
             };
+            // A caller-supplied deadline is a ceiling on the whole call, not on
+            // one attempt. Retrying past it would hand back a late answer to
+            // somebody who has already stopped waiting for it.
+            let within_deadline = deadline.is_none_or(|deadline| Instant::now() < deadline);
 
-            if !error.retriable() || !budget_left {
+            if !error.retriable() || !budget_left || !within_deadline {
                 return Err(error);
             }
             tracing::debug!(api = %R::API_KEY, attempt, %error, "retrying");
@@ -414,9 +454,17 @@ impl Cluster {
         }
     }
 
-    async fn attempt<R: Rpc + Clone>(&self, target: &Target, request: R) -> Result<R::Response> {
+    async fn attempt<R: Rpc + Clone>(
+        &self,
+        target: &Target,
+        request: R,
+        deadline: Option<Instant>,
+    ) -> Result<R::Response> {
         let connection = self.resolve(target).await?;
-        connection.send(request).await
+        match deadline {
+            Some(deadline) => connection.send_until(request, deadline).await,
+            None => connection.send(request).await,
+        }
     }
 
     async fn resolve(&self, target: &Target) -> Result<Connection> {

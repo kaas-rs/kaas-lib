@@ -22,10 +22,30 @@ use kafka_read::Visibility;
 
 const PARTITIONS: i32 = 12;
 
+/// The library's own group timeouts, deliberately: a probe that configures its
+/// way around a default is a probe that cannot see the default misbehave.
 fn config() -> ConsumerConfig {
     ConsumerConfig::new()
         .visibility(Visibility::All)
         .max_wait_ms(200)
+}
+
+/// How long one `poll` may block before this probe gives up on it.
+///
+/// `JoinGroup` blocks for up to the rebalance timeout, 300s by default, which
+/// is longer than anyone watching a live run will wait to learn the group is
+/// not forming. Bounding it here rather than shortening the config keeps the
+/// default under the probe. `poll` is cancel-safe, so dropping the future is
+/// legitimate.
+const POLL_BUDGET: Duration = Duration::from_secs(30);
+
+async fn poll(consumer: &mut ClassicConsumer, who: &str) {
+    match tokio::time::timeout(POLL_BUDGET, consumer.poll()).await {
+        Ok(result) => {
+            result.unwrap_or_else(|error| panic!("{who} failed to poll: {error}"));
+        }
+        Err(_) => panic!("{who} blocked in poll for {POLL_BUDGET:?} — the group is not forming"),
+    }
 }
 
 async fn cooperative(bootstrap: &str, group: &str, topic: &str) -> ClassicConsumer {
@@ -85,7 +105,7 @@ async fn main() {
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline && a.assignment().len() != usize::try_from(PARTITIONS).unwrap()
     {
-        a.poll().await.expect("a alone");
+        poll(&mut a, "a").await;
     }
     let alone: BTreeSet<(String, i32)> = a.assignment().into_iter().collect();
     assert_eq!(
@@ -105,8 +125,7 @@ async fn main() {
     let a_task = tokio::spawn(async move {
         loop {
             tokio::select! {
-                result = a.poll() => {
-                    result.expect("a");
+                () = poll(&mut a, "a") => {
                     let _ = assignment_tx.send(a.assignment());
                 }
                 _ = stop_rx.changed() => break,
@@ -118,7 +137,7 @@ async fn main() {
     let mut b = cooperative(&bootstrap, &group, &topic).await;
     let deadline = Instant::now() + Duration::from_secs(60);
     while Instant::now() < deadline {
-        b.poll().await.expect("b");
+        poll(&mut b, "b").await;
         let owned_a = assignment_rx.borrow().len();
         let owned_b = b.assignment().len();
         if owned_a + owned_b == usize::try_from(PARTITIONS).unwrap() && owned_a > 0 && owned_b > 0 {

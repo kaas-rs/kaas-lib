@@ -102,7 +102,8 @@
 //! loop only calls again once `b`'s poll returns. So `a` goes silent for as
 //! long as `b` blocks, its session lapses mid-rebalance, and the coordinator
 //! evicts it — observed live as the two members evicting each other in
-//! alternation, twenty seconds per generation, forever. Java papers over this
+//! alternation, one session timeout per generation, forever (twenty seconds
+//! apiece back when that was the hardcoded default). Java papers over this
 //! with the KIP-62 background heartbeat thread; this client is poll-driven by
 //! design, so the rule is: **poll each member from its own task** whenever
 //! another member of the same group may be mid-join. Members that join
@@ -110,6 +111,16 @@
 //! which is why only the staggered case bites.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
+
+/// Slack added to a blocking `JoinGroup` or `SyncGroup` deadline, on top of the
+/// rebalance timeout the coordinator itself honours.
+///
+/// Covers the request going out and the response coming back. Five seconds
+/// rather than one because the deadline it guards is a *last resort* — the
+/// coordinator answers on its own schedule long before this fires, and the only
+/// thing a tight margin buys is turning a formed group into a spurious timeout.
+const RENDEZVOUS_HEADROOM: Duration = Duration::from_secs(5);
 
 /// Java's `RangeAssignor`.
 pub(crate) const RANGE: &str = "range";
@@ -1067,10 +1078,33 @@ pub(crate) struct ClassicMembership {
 }
 
 impl ClassicMembership {
+    /// Both timeouts come from [`crate::ConsumerConfig`], which defaults them
+    /// to Java's 45s session and 300s rebalance.
+    ///
+    /// They were constants here until 0.5.0, sized by a constraint that no
+    /// longer binds: `JoinGroup` *blocks* on the coordinator until every member
+    /// has joined or the rebalance timeout expires — it is the one RPC in the
+    /// protocol whose normal behaviour is to sit there — so a rebalance timeout
+    /// above the connection's 30s `request_timeout` meant the socket gave up
+    /// first and reported a timeout on a rebalance that was proceeding
+    /// perfectly well. [`ClassicMembership::rendezvous_deadline`] now hands the
+    /// join its own budget, so the caller's number is the only one bounding it.
+    ///
+    /// What still holds is `rebalance >= session`, matching Java. Inverting
+    /// them is not a configuration Kafka is tested against, and
+    /// [`crate::ClassicConsumer::subscribe`] rejects it rather than sending it.
+    ///
+    /// The session timeout is also worth not shrinking below Java's default
+    /// without a reason. It was 6s once — and a member whose poll loop stalls
+    /// for six seconds is not dead, it is a tenant on a busy CI runner. The
+    /// coordinator evicted exactly such a member mid cooperative rebalance, and
+    /// its next JoinGroup came back UNKNOWN_MEMBER_ID.
     pub(crate) fn new(
         group_id: String,
         subscription: Vec<String>,
         instance_id: Option<String>,
+        session_timeout_ms: i32,
+        rebalance_timeout_ms: i32,
     ) -> Self {
         Self {
             group_id,
@@ -1081,29 +1115,21 @@ impl ClassicMembership {
             leader: false,
             protocol: RANGE.to_owned(),
             assignors: SUPPORTED.to_vec(),
-            // Sized by two constraints, in this order.
-            //
-            // `JoinGroup` *blocks* on the coordinator until every member has
-            // joined or the rebalance timeout expires — it is the one RPC in
-            // the protocol whose normal behaviour is to sit there. So the
-            // rebalance timeout has to fit inside the connection's own request
-            // timeout (30s), with headroom, or the socket gives up first and
-            // reports a timeout on a rebalance that was proceeding perfectly
-            // well.
-            //
-            // And `rebalance >= session`, matching Java, which pairs
-            // `max.poll.interval.ms` (300s) with `session.timeout.ms` (45s).
-            // Inverting them is not a configuration Kafka is tested against.
-            //
-            // The session timeout sits as close to Java's 45s as the ordering
-            // above allows. It was 6s once — and a member whose poll loop
-            // stalls for six seconds is not dead, it is a tenant on a busy CI
-            // runner. The coordinator evicted exactly such a member mid
-            // cooperative rebalance, and its next JoinGroup came back
-            // UNKNOWN_MEMBER_ID.
-            session_timeout_ms: 20_000,
-            rebalance_timeout_ms: 25_000,
+            session_timeout_ms,
+            rebalance_timeout_ms,
         }
+    }
+
+    /// The budget for one blocking rendezvous with the coordinator.
+    ///
+    /// `JoinGroup` and `SyncGroup` are answered when the *group* is ready, not
+    /// when this member is, so the coordinator may hold either for the whole
+    /// rebalance timeout. The headroom covers the round trip either side of
+    /// that: without it, a member whose group takes its full rebalance timeout
+    /// to form races its own socket deadline for the answer.
+    fn rendezvous_deadline(&self) -> Instant {
+        let budget = Duration::from_millis(self.rebalance_timeout_ms.max(0).unsigned_abs().into());
+        Instant::now() + budget + RENDEZVOUS_HEADROOM
     }
 
     pub(crate) fn group_id(&self) -> &str {
@@ -1171,11 +1197,15 @@ impl ClassicMembership {
             .await
     }
 
-    async fn join_group(
-        &mut self,
-        cluster: &Cluster,
-        owned: &[(String, i32)],
-    ) -> Result<Vec<MemberSubscription>> {
+    /// Build the `JoinGroup` this member would send.
+    ///
+    /// Separate from [`ClassicMembership::join_group`] so the two timeouts can
+    /// be asserted against the request itself. They are the whole reason a
+    /// caller sets them, and "the field we filled in is the field that goes out"
+    /// is not something a live rebalance would notice going wrong: the
+    /// coordinator takes the *maximum* across the group, so one member sending
+    /// a stale number is invisible until it is the only member.
+    fn join_request(&self, owned: &[(String, i32)]) -> Result<JoinGroupRequest> {
         let generation = self.generation_id;
         let protocols: Vec<JoinGroupRequestProtocol> = self
             .assignors
@@ -1201,23 +1231,34 @@ impl ClassicMembership {
             })
             .collect::<Result<_>>()?;
 
-        let request = JoinGroupRequest::default()
+        Ok(JoinGroupRequest::default()
             .with_group_id(GroupId(StrBytes::from_string(self.group_id.clone())))
             .with_session_timeout_ms(self.session_timeout_ms)
             .with_rebalance_timeout_ms(self.rebalance_timeout_ms)
             .with_member_id(StrBytes::from_string(self.member_id.clone()))
             .with_group_instance_id(self.instance_id.clone().map(StrBytes::from_string))
             .with_protocol_type(StrBytes::from_static_str("consumer"))
-            .with_protocols(protocols);
+            .with_protocols(protocols))
+    }
+
+    async fn join_group(
+        &mut self,
+        cluster: &Cluster,
+        owned: &[(String, i32)],
+    ) -> Result<Vec<MemberSubscription>> {
+        let request = self.join_request(owned)?;
 
         // `MEMBER_ID_REQUIRED` below is *not* a coordinator-class code, so the
         // KIP-394 handshake still returns on the first round trip rather than
         // being re-asked.
-        let response =
-            crate::coordinator::send_retrying(cluster, &self.group_id, request, |response| {
-                ErrorCode::from_code(response.error_code)
-            })
-            .await?;
+        let response = crate::coordinator::send_retrying_until(
+            cluster,
+            &self.group_id,
+            request,
+            Some(self.rendezvous_deadline()),
+            |response| ErrorCode::from_code(response.error_code),
+        )
+        .await?;
 
         if let Some(code) = ErrorCode::from_code(response.error_code) {
             // A first join is *expected* to be rejected with MEMBER_ID_REQUIRED
@@ -1289,11 +1330,18 @@ impl ClassicMembership {
             .with_protocol_name(Some(StrBytes::from_string(self.protocol.clone())))
             .with_assignments(assignments);
 
-        let response =
-            crate::coordinator::send_retrying(cluster, &self.group_id, request, |response| {
-                ErrorCode::from_code(response.error_code)
-            })
-            .await?;
+        // Blocking for the same reason `JoinGroup` is: a follower's SyncGroup
+        // waits in purgatory until the *leader* has computed and sent the
+        // assignment, which is bounded by the rebalance timeout and not by
+        // anything this member does.
+        let response = crate::coordinator::send_retrying_until(
+            cluster,
+            &self.group_id,
+            request,
+            Some(self.rendezvous_deadline()),
+            |response| ErrorCode::from_code(response.error_code),
+        )
+        .await?;
 
         if let Some(code) = ErrorCode::from_code(response.error_code) {
             return Err(Error::from_code(code, None));
@@ -1503,10 +1551,49 @@ mod wire_tests {
             "g".to_owned(),
             vec!["t".to_owned()],
             Some("instance-1".to_owned()),
+            45_000,
+            300_000,
         );
         assert!(statically.instance_id.is_some());
         // The assertion is in `leave`: a static member returns early. Sending
         // LeaveGroup would trigger exactly the rebalance that
         // `group.instance.id` exists to avoid across a restart.
+    }
+
+    /// The point of issue #11: a configured timeout that never reaches the
+    /// request is a setting that silently does nothing.
+    #[test]
+    fn both_configured_timeouts_reach_the_join_request() {
+        let member =
+            ClassicMembership::new("g".to_owned(), vec!["t".to_owned()], None, 7_000, 9_000);
+        let request = member.join_request(&[]).unwrap();
+        assert_eq!(request.session_timeout_ms, 7_000);
+        assert_eq!(request.rebalance_timeout_ms, 9_000);
+    }
+
+    /// A join must be allowed to outlast the connection's 30s `request_timeout`
+    /// — that ceiling is exactly what kept the rebalance timeout at 25s.
+    #[test]
+    fn the_rendezvous_deadline_follows_the_rebalance_timeout_past_the_request_timeout() {
+        let member =
+            ClassicMembership::new("g".to_owned(), vec!["t".to_owned()], None, 45_000, 300_000);
+        let budget = member.rendezvous_deadline() - Instant::now();
+        assert!(
+            budget > Duration::from_secs(300),
+            "a 300s rebalance timeout must buy more than 300s of socket, got {budget:?}"
+        );
+        assert!(
+            budget <= Duration::from_secs(300) + RENDEZVOUS_HEADROOM,
+            "and not arbitrarily more, got {budget:?}"
+        );
+    }
+
+    /// A negative timeout is a caller error the broker would reject, but it
+    /// must not panic on the way there (rule 2) — `Duration::from_millis`
+    /// takes a `u64`, so the conversion is where a naive cast would blow up.
+    #[test]
+    fn a_negative_rebalance_timeout_still_yields_a_deadline() {
+        let member = ClassicMembership::new("g".to_owned(), vec!["t".to_owned()], None, -1, -1);
+        assert!(member.rendezvous_deadline() > Instant::now());
     }
 }

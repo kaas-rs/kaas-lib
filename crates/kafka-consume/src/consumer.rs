@@ -21,6 +21,41 @@ use crate::offsets::{self, CommittedOffset};
 use crate::rebalance::{self, Listener, Pending, RebalanceListener, RevokedPartition};
 use crate::session::PartitionState;
 
+/// The rebalance budget a member advertises, matching Java's and librdkafka's
+/// `max.poll.interval.ms`.
+///
+/// Both send exactly this number in exactly this field — librdkafka passes
+/// `max_poll_interval_ms` straight into its `ConsumerGroupHeartbeat` builder —
+/// so a smaller default is not a conservative choice but a client-specific one,
+/// and it fences callers whose per-batch work is slower than ours happens to
+/// allow.
+const DEFAULT_REBALANCE_TIMEOUT_MS: i32 = 300_000;
+
+/// The session timeout a classic member advertises, matching Java's and
+/// librdkafka's `session.timeout.ms`.
+///
+/// It was 20s here for as long as `JoinGroup` had to answer inside the
+/// connection's 30s `request_timeout`; the join now carries its own deadline,
+/// so the constraint that shrank it is gone.
+const DEFAULT_SESSION_TIMEOUT_MS: i32 = 45_000;
+
+/// Reject a classic member whose session outlives its rebalance budget.
+///
+/// Java pairs a 300s `max.poll.interval.ms` with a 45s `session.timeout.ms` and
+/// is not tested the other way round. Inverted, a member that is legitimately
+/// mid-rebalance — heartbeats pause while `JoinGroup` blocks — outlives its own
+/// session and is evicted for being slow at something the coordinator asked it
+/// to be slow at.
+fn check_timeout_ordering(config: &ConsumerConfig) -> Result<()> {
+    if config.session_timeout_ms > config.rebalance_timeout_ms {
+        return Err(Error::InvalidRequest(format!(
+            "session_timeout_ms ({}) must not exceed rebalance_timeout_ms ({})",
+            config.session_timeout_ms, config.rebalance_timeout_ms
+        )));
+    }
+    Ok(())
+}
+
 /// How a [`Consumer`] behaves.
 #[derive(Debug, Clone)]
 pub struct ConsumerConfig {
@@ -39,6 +74,45 @@ pub struct ConsumerConfig {
     /// A manually-assigned consumer is **not a member** of this group; it only
     /// borrows the group's offset storage. See [`crate::offsets`].
     pub group_id: Option<String>,
+    /// How long a member may take to complete a rebalance before the
+    /// coordinator gives up on it.
+    ///
+    /// This is the group-membership counterpart of Java's
+    /// `max.poll.interval.ms`, and the same wire field: a member that has not
+    /// re-joined and acknowledged its new assignment within this budget is
+    /// dropped from the group. Since a rebalance only advances when `poll` is
+    /// called, it is in practice a ceiling on how long a caller may spend
+    /// between polls — writing each batch to a database, say — before the
+    /// group moves on without it.
+    ///
+    /// Defaults to Java's and librdkafka's 300s. Sent on both protocols:
+    /// `JoinGroup.rebalance_timeout_ms` on the classic one and
+    /// `ConsumerGroupHeartbeat.rebalance_timeout_ms` under KIP-848.
+    ///
+    /// On the classic protocol `JoinGroup` *blocks* for up to this long, so a
+    /// value above the connection's `request_timeout` is honoured by handing
+    /// the join its own deadline rather than by widening the timeout every
+    /// other RPC uses.
+    pub rebalance_timeout_ms: i32,
+    /// How long the coordinator waits for a heartbeat before evicting a member.
+    ///
+    /// For a static member (see `instance_id`) this is also how long its
+    /// `group.instance.id` stays claimed after the process dies, which is how
+    /// long a restart is refused with `UNRELEASED_INSTANCE_ID`.
+    ///
+    /// **Classic protocol only.** KIP-848 moved this to the broker: there is no
+    /// field for it in `ConsumerGroupHeartbeat`, and the coordinator applies
+    /// `group.consumer.session.timeout.ms` — 45s by default and floored at 45s
+    /// by `group.consumer.min.session.timeout.ms` on a stock 4.x broker,
+    /// alterable per group through `IncrementalAlterConfigs` on a `GROUP`
+    /// config resource. [`GroupConsumer`] therefore ignores this field, exactly
+    /// as librdkafka refuses `session.timeout.ms` under
+    /// `group.protocol=consumer`.
+    ///
+    /// Defaults to Java's and librdkafka's 45s. Must not exceed
+    /// [`ConsumerConfig::rebalance_timeout_ms`]; Kafka is not tested with the
+    /// two inverted, and [`ClassicConsumer::subscribe`] rejects it.
+    pub session_timeout_ms: i32,
 }
 
 impl ConsumerConfig {
@@ -51,6 +125,8 @@ impl ConsumerConfig {
             visibility: Visibility::CommittedOnly,
             max_decompressed_bytes: 64 * 1024 * 1024,
             group_id: None,
+            rebalance_timeout_ms: DEFAULT_REBALANCE_TIMEOUT_MS,
+            session_timeout_ms: DEFAULT_SESSION_TIMEOUT_MS,
         }
     }
 
@@ -72,6 +148,27 @@ impl ConsumerConfig {
     #[must_use]
     pub fn max_wait_ms(mut self, ms: i32) -> Self {
         self.max_wait_ms = ms;
+        self
+    }
+
+    /// How long a member may take to complete a rebalance.
+    ///
+    /// See [`ConsumerConfig::rebalance_timeout_ms`]. Raise it when a caller
+    /// does slow work per batch; lower it to have the group notice a departed
+    /// member sooner.
+    #[must_use]
+    pub fn with_rebalance_timeout_ms(mut self, ms: i32) -> Self {
+        self.rebalance_timeout_ms = ms;
+        self
+    }
+
+    /// How long the coordinator waits for a heartbeat before evicting a member.
+    ///
+    /// Classic protocol only — see [`ConsumerConfig::session_timeout_ms`] for
+    /// why KIP-848 has no client-side equivalent.
+    #[must_use]
+    pub fn with_session_timeout_ms(mut self, ms: i32) -> Self {
+        self.session_timeout_ms = ms;
         self
     }
 }
@@ -676,6 +773,7 @@ impl GroupConsumer {
         let subscription: Vec<String> = topics.into_iter().map(Into::into).collect();
         config.group_id = Some(group_id.clone());
 
+        let rebalance_timeout_ms = config.rebalance_timeout_ms;
         let mut inner = Consumer::new(cluster, config);
         // Resolve topic ids up front: the broker's assignment names topics by
         // uuid, and an assignment we cannot name is an assignment we cannot
@@ -684,7 +782,12 @@ impl GroupConsumer {
 
         Ok(Self {
             inner,
-            membership: crate::group::Membership::new(group_id, subscription, None, 30_000),
+            membership: crate::group::Membership::new(
+                group_id,
+                subscription,
+                None,
+                rebalance_timeout_ms,
+            ),
             auto_commit: true,
             listener: None,
             pending: None,
@@ -943,6 +1046,14 @@ impl ClassicConsumer {
     /// group sharing a connection deadlock and present as a plain timeout.
     ///
     /// [`GroupConsumer`] has no such constraint.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a [`ConsumerConfig`] whose `session_timeout_ms` exceeds its
+    /// `rebalance_timeout_ms`. The coordinator would accept the pair and then
+    /// evict a member that is doing exactly what it was told to — waiting out a
+    /// rebalance it still has budget for — so this is caught here rather than
+    /// diagnosed from an eviction later.
     pub async fn subscribe(
         cluster: Cluster,
         mut config: ConsumerConfig,
@@ -952,6 +1063,9 @@ impl ClassicConsumer {
         let group_id = group_id.into();
         let subscription: Vec<String> = topics.into_iter().map(Into::into).collect();
         config.group_id = Some(group_id.clone());
+        check_timeout_ordering(&config)?;
+        let (session_timeout_ms, rebalance_timeout_ms) =
+            (config.session_timeout_ms, config.rebalance_timeout_ms);
 
         let mut inner = Consumer::new(cluster, config);
         inner.learn_topics(&subscription).await?;
@@ -962,6 +1076,8 @@ impl ClassicConsumer {
                 group_id,
                 subscription.clone(),
                 None,
+                session_timeout_ms,
+                rebalance_timeout_ms,
             ),
             subscription,
             auto_commit: true,
@@ -994,6 +1110,11 @@ impl ClassicConsumer {
 
     /// Join as a **static** member (KIP-345), so a restart inside the session
     /// timeout does not trigger a rebalance.
+    ///
+    /// [`ConsumerConfig::session_timeout_ms`] is therefore also how long this
+    /// `instance_id` stays claimed after the process dies: a restart inside
+    /// that window is refused with `UNRELEASED_INSTANCE_ID` until the previous
+    /// session lapses.
     #[must_use]
     pub fn instance_id(mut self, instance_id: impl Into<String>) -> Self {
         let assignors = self.membership.assignors().to_vec();
@@ -1001,6 +1122,8 @@ impl ClassicConsumer {
             self.membership.group_id().to_owned(),
             self.subscription.clone(),
             Some(instance_id.into()),
+            self.inner.config.session_timeout_ms,
+            self.inner.config.rebalance_timeout_ms,
         );
         self.membership.set_assignors(assignors);
         self
@@ -1313,5 +1436,49 @@ impl ClassicConsumer {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Matching Java and librdkafka is the point: these are the same numbers in
+    /// the same fields, and a client-specific default is a client-specific
+    /// eviction.
+    #[test]
+    fn the_group_timeouts_default_to_javas() {
+        let config = ConsumerConfig::new();
+        assert_eq!(config.rebalance_timeout_ms, 300_000);
+        assert_eq!(config.session_timeout_ms, 45_000);
+    }
+
+    #[test]
+    fn the_group_timeouts_are_settable() {
+        let config = ConsumerConfig::new()
+            .with_rebalance_timeout_ms(60_000)
+            .with_session_timeout_ms(10_000);
+        assert_eq!(config.rebalance_timeout_ms, 60_000);
+        assert_eq!(config.session_timeout_ms, 10_000);
+    }
+
+    /// `rebalance >= session`, matching Java. Equal is allowed; inverted is the
+    /// pair that gets a member evicted mid-rebalance.
+    #[test]
+    fn a_session_outliving_its_rebalance_budget_is_rejected() {
+        let inverted = ConsumerConfig::new()
+            .with_rebalance_timeout_ms(10_000)
+            .with_session_timeout_ms(45_000);
+        let error = check_timeout_ordering(&inverted).unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidRequest(ref message) if message.contains("45000")),
+            "the message must name the offending pair, got {error}"
+        );
+
+        let equal = ConsumerConfig::new()
+            .with_rebalance_timeout_ms(45_000)
+            .with_session_timeout_ms(45_000);
+        assert!(check_timeout_ordering(&equal).is_ok());
+        assert!(check_timeout_ordering(&ConsumerConfig::new()).is_ok());
     }
 }

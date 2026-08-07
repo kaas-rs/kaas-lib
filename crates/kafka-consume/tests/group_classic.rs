@@ -55,10 +55,44 @@ async fn setup() -> KafkaCluster {
     fixture
 }
 
+/// Deliberately the library's own group timeouts — 300s rebalance, 45s session.
+///
+/// Shrinking them here would be testing a configuration no caller runs. What
+/// the shorter numbers bought was a bounded failure, and [`poll`] buys that
+/// instead, at the layer that owns the test's patience.
 fn config() -> ConsumerConfig {
     ConsumerConfig::new()
         .visibility(Visibility::All)
         .max_wait_ms(200)
+}
+
+/// How long a single `poll` may block before the test calls it a failure.
+///
+/// `JoinGroup` blocks on the coordinator by design, for up to the rebalance
+/// timeout — 300s by default, which outlives the fixture's two-minute cap on
+/// the whole test. Left unbounded, a group that never forms is reported as
+/// "the test ran out of time" rather than as the assertion that was waiting,
+/// which is the least useful way any of these could fail. Thirty seconds is
+/// far more than a rebalance needs on a loaded runner (the live cluster settles
+/// in six) and far less than the cap.
+const POLL_BUDGET: Duration = Duration::from_secs(30);
+
+/// `ClassicConsumer::poll`, bounded by [`POLL_BUDGET`].
+///
+/// Dropping the future at the timeout is legitimate rather than a leak:
+/// `poll` is cancel-safe, so this exercises that guarantee on every call as a
+/// side effect.
+async fn poll(consumer: &mut ClassicConsumer, who: &str) {
+    match tokio::time::timeout(POLL_BUDGET, consumer.poll()).await {
+        Ok(result) => {
+            result.unwrap_or_else(|error| panic!("{who} failed to poll: {error}"));
+        }
+        Err(_) => panic!(
+            "{who} blocked in poll for {POLL_BUDGET:?} — a classic JoinGroup that \
+             does not return means the group is not forming; check that every \
+             member has its own Cluster and its own task"
+        ),
+    }
 }
 
 /// Each member needs its own cluster handle — `JoinGroup` blocks and the broker
@@ -89,8 +123,7 @@ fn drive(
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                result = consumer.poll() => {
-                    result.expect("poll");
+                () = poll(&mut consumer, "driven member") => {
                     let _ = assignment.send(consumer.assignment());
                 }
                 _ = stop.changed() => break,
@@ -211,7 +244,7 @@ org.apache.kafka.clients.consumer.RangeAssignor \
     let mut ours = member(&fixture, group).await;
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && ours.assignment().is_empty() {
-        ours.poll().await.expect("poll");
+        poll(&mut ours, "the member").await;
     }
 
     let owned: BTreeSet<(String, i32)> = ours.assignment().into_iter().collect();
@@ -298,7 +331,7 @@ org.apache.kafka.clients.consumer.CooperativeStickyAssignor \
 
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && ours.assignment().is_empty() {
-        ours.poll().await.expect("poll");
+        poll(&mut ours, "the member").await;
     }
 
     let owned: BTreeSet<(String, i32)> = ours.assignment().into_iter().collect();
@@ -345,7 +378,7 @@ async fn a_cooperative_rebalance_keeps_what_it_can() {
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && a.assignment().len() != usize::try_from(PARTITIONS).unwrap()
     {
-        a.poll().await.expect("a");
+        poll(&mut a, "a").await;
     }
     let alone: BTreeSet<(String, i32)> = a.assignment().into_iter().collect();
     assert_eq!(alone.len(), usize::try_from(PARTITIONS).unwrap());
@@ -362,8 +395,7 @@ async fn a_cooperative_rebalance_keeps_what_it_can() {
     let a_task = tokio::spawn(async move {
         loop {
             tokio::select! {
-                result = a.poll() => {
-                    result.expect("a");
+                () = poll(&mut a, "a") => {
                     let _ = assignment_tx.send(a.assignment());
                 }
                 _ = stop_rx.changed() => break,
@@ -377,7 +409,7 @@ async fn a_cooperative_rebalance_keeps_what_it_can() {
     let mut b = cooperative(&fixture, group).await;
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
-        b.poll().await.expect("b");
+        poll(&mut b, "b").await;
         let owned_a = assignment_rx.borrow().len();
         let owned_b = b.assignment().len();
         if owned_a + owned_b == usize::try_from(PARTITIONS).unwrap() && owned_a > 0 && owned_b > 0 {
@@ -436,7 +468,7 @@ async fn a_static_member_does_not_trigger_a_rebalance_on_restart() {
 
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && first.assignment().is_empty() {
-        first.poll().await.expect("poll");
+        poll(&mut first, "the first member").await;
     }
     let before: BTreeSet<(String, i32)> = first.assignment().into_iter().collect();
     assert!(!before.is_empty());
@@ -462,7 +494,7 @@ async fn a_static_member_does_not_trigger_a_rebalance_on_restart() {
 
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && restarted.assignment().is_empty() {
-        restarted.poll().await.expect("poll");
+        poll(&mut restarted, "the restarted member").await;
     }
     let after: BTreeSet<(String, i32)> = restarted.assignment().into_iter().collect();
 

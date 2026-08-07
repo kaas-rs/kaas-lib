@@ -210,6 +210,19 @@ doing slow work between batches, or because its task was descheduled — is a
 member the coordinator eventually evicts, and the partitions go to somebody
 else. Keep the loop tight and do slow work elsewhere.
 
+How long "eventually" is, is `ConsumerConfig::with_rebalance_timeout_ms`: the
+budget a member has to complete a rebalance, which in a poll-driven client is
+in practice the longest a caller may spend between polls. It defaults to 300s,
+matching Java's `max.poll.interval.ms` and librdkafka's — the same number in
+the same wire field on both group protocols. Raise it if each batch does slow
+work; lower it to have the group notice a departed member sooner.
+
+```rust,ignore
+ConsumerConfig::new()
+    .with_rebalance_timeout_ms(600_000)   // a slow write per batch
+    .with_session_timeout_ms(45_000)      // classic protocol only
+```
+
 Nothing is owned until the first heartbeat comes back with an assignment, so
 the first `poll` or two returning empty is expected rather than a symptom.
 `assignment()` says what is owned right now, and `member_id()` is the id this
@@ -220,6 +233,20 @@ where the broker issues it.
 `session.timeout.ms` parks the assignment rather than triggering a rebalance,
 which is the difference between a rolling deploy that shuffles every
 partition and one that does not.
+
+That same window is how long the instance id stays *claimed*: a restart inside
+it is refused with `UNRELEASED_INSTANCE_ID` until the previous session lapses,
+which is correct on both sides and worth building an exponential reconnect
+backoff against rather than a fixed sleep. Under KIP-848 the length of that
+window is not a client setting at all — `ConsumerGroupHeartbeat` has no session
+timeout field, and the coordinator applies `group.consumer.session.timeout.ms`
+(45s by default, floored at 45s by `group.consumer.min.session.timeout.ms`).
+librdkafka refuses `session.timeout.ms` outright under
+`group.protocol=consumer` for the same reason. To shorten it, alter the group's
+own config — `IncrementalAlterConfigs` on a `GROUP` config resource, which
+`kafka-admin` exposes as `ConfigResource::group(..)` — after an operator has
+lowered the broker's floor. `ConsumerConfig::with_session_timeout_ms` applies
+to [classic groups](#classic-groups) only.
 
 `leave()` releases the assignment — or parks it, for a static member — after
 running the rebalance listener and committing. Dropping the consumer without
@@ -319,6 +346,14 @@ and a Kafka broker will not read a second request from a socket until it has
 answered the first — so two members of one group sharing a connection
 deadlock, and it presents as a plain timeout with nothing in any log to
 explain it. `GroupConsumer` has no such constraint.
+
+Because `JoinGroup` blocks, this is also the path where
+`with_session_timeout_ms` means something: it is a real field of the request,
+defaulting to Java's 45s, and it must not exceed the rebalance timeout —
+`subscribe` returns `InvalidRequest` rather than sending an inverted pair. The
+join is given its own deadline derived from the rebalance timeout, so a
+rebalance budget larger than the connection's `request_timeout` is honoured
+without widening the timeout every other RPC uses.
 
 | `Assignor` | Rebalancing | Notes |
 |---|---|---|
