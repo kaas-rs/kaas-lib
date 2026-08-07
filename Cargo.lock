@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-admin"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1094,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-conn"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.23.0",
  "bytes",
@@ -1121,7 +1121,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-consume"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1141,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-meta"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -1158,7 +1158,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-produce"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-read"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1244,7 +1244,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "livetest"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2229,7 +2229,7 @@ dependencies = [
 
 [[package]]
 name = "testkit"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "futures",
  "testcontainers",
@@ -2241,7 +2241,7 @@ dependencies = [
 
 [[package]]
 name = "testkit-macros"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
