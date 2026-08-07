@@ -55,5 +55,5 @@ pub use offsets::CommittedOffset;
 pub use rebalance::{RebalanceListener, RevokedPartition};
 
 pub use kafka_conn::{Error, Result};
-pub use kafka_meta::{Cluster, ClusterConfig};
+pub use kafka_meta::{Cluster, ClusterConfig, ConsumerGroupMetadata};
 pub use kafka_read::{Record, RecordOutcome, Visibility};

@@ -1164,6 +1164,7 @@ dependencies = [
  "futures",
  "kafka-admin",
  "kafka-conn",
+ "kafka-consume",
  "kafka-meta",
  "kafka-protocol",
  "kafka-read",

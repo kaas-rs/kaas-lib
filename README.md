@@ -89,7 +89,9 @@ accumulator, Java-compatible murmur2 partitioning, KIP-480 sticky
 partitioning for unkeyed records, every compression codec, idempotence and
 transactions. `kafka-consume` reads them back over incremental fetch
 sessions (KIP-227), as a manually-assigned consumer or as a member of a
-KIP-848 or classic group.
+KIP-848 or classic group. A consume-process-produce loop is exactly-once end
+to end: `send_offsets_to_transaction` (KIP-447) commits the consumer's offsets
+inside the producer's transaction, so an abort takes them with it.
 
 Two deliberate omissions, both stated where you would hit them:
 

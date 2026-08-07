@@ -16,7 +16,7 @@ Each KIP is searchable by number on the
 | KIP-345 | Static consumer membership | ✅ both protocols |
 | KIP-368 | SASL re-authentication | ✅ |
 | KIP-405 | Tiered storage | ⚠️ `-4` sentinel surfaced |
-| KIP-447 | Exactly-once v2 | ⚠️ no `sendOffsetsToTransaction` ([#10]) |
+| KIP-447 | Exactly-once v2 | ✅ `Producer::send_offsets_to_transaction` |
 | KIP-480 | Sticky partitioner | ✅ |
 | KIP-482 | Flexible versions / tagged fields | ✅ via the codec |
 | KIP-516 | Topic IDs | ✅ `Fetch` v13+ |
@@ -80,7 +80,7 @@ session would make each scan depend on the last for no benefit.
 The split is the point: the same KIP is right for one crate and wrong for the
 other, which is why they are separate crates.
 
-### KIP-98 — exactly-once ✅ · KIP-447 — exactly-once v2 ⚠️
+### KIP-98 — exactly-once ✅ · KIP-447 — exactly-once v2 ✅
 
 Both halves of KIP-98 are here. On the read side,
 `Visibility::CommittedOnly` sets `read_committed` and the client filters
@@ -92,17 +92,33 @@ producer id, tracks per-partition sequences, and drives
 including the epoch bump KIP-890 hides inside `EndTxn`. `DescribeTransactions`,
 `ListTransactions` and `DescribeProducers` inspect the resulting state.
 
-**KIP-447 is the gap.** There is no `sendOffsetsToTransaction`: a consumer's
-offsets cannot be committed *inside* a producer transaction, so the
-consume-process-produce loop cannot be made exactly-once end to end. Both
-`AddOffsetsToTxn` and `TxnOffsetCommit` are already typed and routed in
-`kafka-conn`, so what is missing is the producer-side method, a
-group-metadata type to carry `member_id`/generation across the crate
-boundary, and an acceptance test — not wire support.
+**KIP-447 closes the loop.** `Producer::send_offsets_to_transaction` commits a
+consumer's offsets *inside* the producer's transaction, which is what makes a
+consume-process-produce cycle exactly-once end to end. Two hops in one
+transaction, and the order is not optional: `AddOffsetsToTxn` to the
+**transaction** coordinator enrols the `__consumer_offsets` partition backing
+the group, then `TxnOffsetCommit` to the **group** coordinator stores the
+offsets pending the marker.
 
-Tracked in [#10].
+The consumer supplies its own identity — `Consumer::group_metadata`,
+`GroupConsumer::group_metadata`, `ClassicConsumer::group_metadata` — as
+[`ConsumerGroupMetadata`], which lives in `kafka-meta` because it is the one
+value that travels from a consumer to a *producer* and `kafka-produce` does
+not depend on `kafka-consume`. It carries one `generation` field for both
+group kinds, because the classic `generation_id` and KIP-848's `member_epoch`
+are the same wire field.
+
+What proves it is the **aborted** case, not the committed one: an offset
+commit that merely runs alongside a transaction passes a commit-only test and
+fails the moment an abort is supposed to take the offsets with it. Both halves
+run in `crates/kafka-produce/tests/transactions.rs` and against a real cluster
+in `crates/livetest/src/produce.rs`, where the two coordinators are genuinely
+different machines.
+
+Closed by [#10].
 
 [#10]: https://github.com/kaas-rs/kaas-lib/issues/10
+[`ConsumerGroupMetadata`]: https://docs.rs/kafka-meta
 
 ### KIP-699 — batched `FindCoordinator` ⚠️
 

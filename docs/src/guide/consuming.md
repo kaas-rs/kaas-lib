@@ -150,6 +150,36 @@ Three things about this that bite if you assume otherwise:
 Do not read `__consumer_offsets` yourself. `committed` uses `OffsetFetch`;
 the internal topic format is not a stable interface.
 
+### Handing offsets to a transaction
+
+For a consume-process-produce loop, the offsets should not be committed by the
+consumer at all — they belong inside the producer's transaction, so that a
+crash cannot land the records and the offsets separately. Every consumer kind
+exposes the two things that needs:
+
+| Method | What it gives you |
+|---|---|
+| `positions()` | the next offset to read per partition, which is what a commit stores |
+| `group_metadata()` | this consumer's identity — group, member id, generation or member epoch, instance id |
+
+```rust,no_run
+# use kafka_consume::GroupConsumer;
+# async fn example(
+#     consumer: &mut GroupConsumer,
+#     producer: &kafka_produce::Producer,
+# ) -> kafka_consume::Result<()> {
+producer
+    .send_offsets_to_transaction(consumer.positions(), &consumer.group_metadata()?)
+    .await?;
+# Ok(())
+# }
+```
+
+Turn `auto_commit` off when you do this — the transaction owns the offsets,
+and an auto-commit would write them outside it. The full loop, and the four
+ways to get it subtly wrong, are in
+[Producing records](producing.md#exactly-once-consume-process-produce).
+
 ## Group membership (KIP-848)
 
 ```rust,no_run

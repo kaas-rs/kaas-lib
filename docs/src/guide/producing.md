@@ -283,6 +283,66 @@ match producer.commit_transaction().await {
 # }
 ```
 
+### Exactly-once: consume, process, produce
+
+A transaction around the *writes* is only half of it. If the consumer's
+offsets are committed separately, a crash between the two either re-processes
+records or skips them — which is the thing transactions were supposed to fix.
+`send_offsets_to_transaction` (KIP-447) puts the offsets inside the same
+transaction:
+
+```rust,no_run
+# use kafka_consume::GroupConsumer;
+# use kafka_produce::{Producer, ProducerRecord};
+# fn enrich(record: &kafka_consume::Record) -> bytes::Bytes { record.value.clone().unwrap_or_default() }
+# async fn example(
+#     consumer: &mut GroupConsumer,
+#     producer: &Producer,
+# ) -> kafka_produce::Result<()> {
+loop {
+    let batch = consumer.poll().await?;
+    if batch.is_empty() {
+        continue;
+    }
+
+    producer.begin_transaction()?;
+    for record in &batch {
+        producer
+            .send(ProducerRecord::new("orders-enriched").with_value(enrich(record)))
+            .await?;
+    }
+
+    // The offsets travel with the records, under this consumer's identity.
+    producer
+        .send_offsets_to_transaction(consumer.positions(), &consumer.group_metadata()?)
+        .await?;
+
+    producer.commit_transaction().await?;
+}
+# }
+```
+
+Four things this depends on, each of which is a silent bug if you get it
+wrong:
+
+- **Turn auto-commit off** (`GroupConsumer::auto_commit(false)`). The
+  transaction owns the offsets now; an auto-commit writes them *outside* it,
+  which is exactly the split this API removes.
+- **`positions()` is the next offset to read**, which is what a committed
+  offset means. Committing the last record's offset re-delivers one record per
+  partition per transaction.
+- **Read `group_metadata()` fresh each time.** It carries the member epoch or
+  generation, which moves with every rebalance. A stale one is refused with
+  `STALE_MEMBER_EPOCH` or `ILLEGAL_GENERATION` — the coordinator correctly
+  stopping a member from committing partitions it no longer owns. Abort, poll
+  again, and let the rebalance settle.
+- **An error means abort, not retry.** The call is all-or-nothing rather than
+  per partition, because these offsets are one atomic unit with the records:
+  "eleven of twelve" leaves nothing to do but abort.
+
+Downstream, the reader has to be `Visibility::CommittedOnly` — which is a
+consumer's default here — or it will see the records the aborted cycles wrote.
+
 Things worth knowing before you rely on it:
 
 - **`begin_transaction` is local.** The protocol has no "begin" request; the

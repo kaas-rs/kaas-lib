@@ -36,6 +36,12 @@ safe rather than a duplicate: a rejected batch is always retriable, an
 machinery — set `ProducerConfig::transactional_id`, then
 `init_transactions`, `begin_transaction`, `commit_transaction`.
 
+For a consume-process-produce loop, `send_offsets_to_transaction` (KIP-447)
+puts the consumer's offsets *inside* the transaction, so the records and the
+progress commit or roll back together — which is what "exactly-once" means in
+practice. Take the arguments from the consumer: `positions()` and
+`group_metadata()`.
+
 `acks=0` is deliberately not offered. It is a request the broker never
 answers, and a correlation-based client reports every successful write as a
 timeout; see the crate documentation for the full argument and for what

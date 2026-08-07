@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 
 use kafka_conn::{Error, Result};
-use kafka_meta::{Cluster, TopicId};
+use kafka_meta::{Cluster, ConsumerGroupMetadata, TopicId};
 use kafka_read::{DecodeOptions, Record, RecordOutcome, Visibility};
 
 use crate::classic::Assignor;
@@ -339,6 +339,31 @@ impl Consumer {
         self.assignment
             .get(&(topic.to_owned(), partition))
             .is_some_and(|assigned| assigned.paused)
+    }
+
+    /// Every assigned partition's read position, in the shape a transactional
+    /// offset commit wants.
+    ///
+    /// Hand this straight to `Producer::send_offsets_to_transaction`. The
+    /// values are the offset of the **next** record to read, which is what a
+    /// committed offset means — not the offset of the last record `poll`
+    /// returned.
+    pub fn positions(&self) -> Vec<((String, i32), i64)> {
+        self.assignment
+            .iter()
+            .map(|(key, assigned)| (key.clone(), assigned.position))
+            .collect()
+    }
+
+    /// This consumer's identity for a transactional offset commit (KIP-447).
+    ///
+    /// A manually-assigned consumer is not a member of anything, so this is the
+    /// non-member form: an empty member id and the `-1` sentinel, honoured by
+    /// the coordinator only while the group has no members. It still needs a
+    /// group id, because there is no such thing as committing an offset outside
+    /// a group.
+    pub fn group_metadata(&self) -> Result<ConsumerGroupMetadata> {
+        Ok(ConsumerGroupMetadata::new(self.group()?))
     }
 
     /// The offset of the next record this consumer will read.
@@ -810,6 +835,35 @@ impl GroupConsumer {
         self.inner.lag(topic, partition)
     }
 
+    /// Every owned partition's read position, for a transactional commit.
+    pub fn positions(&self) -> Vec<((String, i32), i64)> {
+        self.inner.positions()
+    }
+
+    /// The group's committed positions for the partitions this member owns.
+    ///
+    /// The read half of [`GroupConsumer::commit`], and the way to see what a
+    /// transactional commit stored: offsets written inside a transaction stay
+    /// invisible here until that transaction commits.
+    pub async fn committed(&self) -> Result<HashMap<(String, i32), CommittedOffset>> {
+        self.inner.committed().await
+    }
+
+    /// This member's identity for a transactional offset commit (KIP-447).
+    ///
+    /// Carries the member id and the **member epoch** the coordinator knows us
+    /// by, exactly as [`GroupConsumer::commit`] does — a live group refuses the
+    /// non-member form. Read it fresh for each transaction rather than caching
+    /// it: the epoch moves with every rebalance, and a stale one is refused
+    /// with `STALE_MEMBER_EPOCH`, which is the coordinator correctly stopping a
+    /// member from committing partitions it no longer owns.
+    pub fn group_metadata(&self) -> Result<ConsumerGroupMetadata> {
+        Ok(ConsumerGroupMetadata::new(self.inner.group()?)
+            .with_member_id(self.membership.member_id())
+            .with_generation(self.membership.member_epoch())
+            .with_maybe_instance_id(self.membership.instance_id().map(str::to_owned)))
+    }
+
     /// Leave the group, releasing the assignment — or parking it, for a static
     /// member.
     ///
@@ -994,6 +1048,31 @@ impl ClassicConsumer {
     /// assignment for everyone.
     pub fn is_leader(&self) -> bool {
         self.membership.is_leader()
+    }
+
+    /// Every owned partition's read position, for a transactional commit.
+    pub fn positions(&self) -> Vec<((String, i32), i64)> {
+        self.inner.positions()
+    }
+
+    /// The group's committed positions for the partitions this member owns.
+    pub async fn committed(&self) -> Result<HashMap<(String, i32), CommittedOffset>> {
+        self.inner.committed().await
+    }
+
+    /// This member's identity for a transactional offset commit (KIP-447).
+    ///
+    /// The classic protocol's `generation_id` fills the same field KIP-848
+    /// calls `member_epoch`, so this is the same type
+    /// [`GroupConsumer::group_metadata`] returns rather than a parallel one —
+    /// see [`ConsumerGroupMetadata`] for why that is not flattening the group
+    /// kinds. Read it fresh for each transaction: a generation that has moved
+    /// on is refused with `ILLEGAL_GENERATION`.
+    pub fn group_metadata(&self) -> Result<ConsumerGroupMetadata> {
+        Ok(ConsumerGroupMetadata::new(self.inner.group()?)
+            .with_member_id(self.membership.member_id())
+            .with_generation(self.membership.generation_id())
+            .with_maybe_instance_id(self.membership.instance_id().map(str::to_owned)))
     }
 
     /// The underlying cluster handle.

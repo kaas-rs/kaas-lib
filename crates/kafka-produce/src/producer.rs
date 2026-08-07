@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use kafka_conn::{Error, ErrorCode, Result};
+use kafka_meta::ConsumerGroupMetadata;
 use tokio::sync::{OnceCell, oneshot};
 
 use crate::accumulator::Accumulator;
@@ -201,6 +202,63 @@ impl Producer {
     /// learns of the transaction when the producer enrols a partition in it.
     pub fn begin_transaction(&self) -> Result<()> {
         self.transactional()?.begin()
+    }
+
+    /// Commit a consumer's offsets **inside this transaction** (KIP-447).
+    ///
+    /// This is what makes a consume-process-produce loop exactly-once. Without
+    /// it you can write transactionally and you can commit offsets, but not as
+    /// one unit — so a crash between the two either re-processes records or
+    /// skips them, which is the whole thing transactions were supposed to fix.
+    ///
+    /// `offsets` are the position of the **next** record to read for each
+    /// partition, not the offset of the last one handled — the same convention
+    /// a consumer's own `commit` uses, and `Consumer::positions` hands you
+    /// exactly that. Off by one here re-delivers or skips one record per
+    /// partition per transaction, silently.
+    ///
+    /// ```no_run
+    /// # async fn example(
+    /// #     producer: &kafka_produce::Producer,
+    /// #     positions: Vec<((String, i32), i64)>,
+    /// #     group: &kafka_produce::ConsumerGroupMetadata,
+    /// # ) -> kafka_produce::Result<()> {
+    /// producer.begin_transaction()?;
+    /// // …produce the results of what was consumed…
+    /// producer.send_offsets_to_transaction(positions, group).await?;
+    /// producer.commit_transaction().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Failure is all-or-nothing, deliberately
+    ///
+    /// Unlike the admin surface, this returns `Result<()>` rather than a result
+    /// per partition. Rule 4 exists so a caller can act on partial success, and
+    /// here there is no such action: these offsets are one atomic unit with the
+    /// records this transaction wrote, so "eleven of twelve" leaves nothing to
+    /// do but abort. An error names the partition that refused; the correct
+    /// response to it is [`Producer::abort_transaction`].
+    ///
+    /// A stale membership is the error to expect — `ILLEGAL_GENERATION`,
+    /// `UNKNOWN_MEMBER_ID`, `STALE_MEMBER_EPOCH`, `FENCED_INSTANCE_ID`. All
+    /// four mean the same thing: the consumer was rebalanced away from these
+    /// partitions and must not commit them. Abort, poll again, and let the
+    /// rebalance settle.
+    ///
+    /// Sending no offsets is a no-op rather than an empty transaction hop.
+    pub async fn send_offsets_to_transaction(
+        &self,
+        offsets: impl IntoIterator<Item = ((String, i32), i64)>,
+        group: &ConsumerGroupMetadata,
+    ) -> Result<()> {
+        let offsets: Vec<((String, i32), i64)> = offsets.into_iter().collect();
+        if offsets.is_empty() {
+            return Ok(());
+        }
+        self.transactional()?
+            .send_offsets(&self.cluster, group, &offsets)
+            .await
     }
 
     /// Make every record written since [`Producer::begin_transaction`] visible

@@ -47,12 +47,14 @@
 )]
 
 mod cluster;
+mod group;
 mod pool;
 mod retry;
 mod routing;
 mod snapshot;
 
 pub use cluster::{Cluster, ClusterConfig};
+pub use group::ConsumerGroupMetadata;
 pub use pool::{BrokerPool, Endpoint};
 pub use retry::RetryPolicy;
 pub use routing::{BrokerSelector, CoordinatorKind, Routing, routing};

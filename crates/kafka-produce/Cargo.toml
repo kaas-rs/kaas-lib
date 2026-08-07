@@ -31,6 +31,12 @@ rand           = { workspace = true }
 testkit            = { path = "../testkit" }
 kafka-admin        = { path = "../kafka-admin" }
 kafka-read         = { path = "../kafka-read" }
+# KIP-447's acceptance test needs a real consumer to take offsets from, and the
+# issue's acceptance command names this crate's test. Cargo permits the
+# dev-dependency cycle with `kafka-consume` (which dev-depends on this crate to
+# get records to read), and both edges are path-only, so `cargo publish` strips
+# them rather than trying to resolve a cycle.
+kafka-consume      = { path = "../kafka-consume" }
 futures            = { workspace = true }
 tokio              = { workspace = true }
 tracing-subscriber = { workspace = true }

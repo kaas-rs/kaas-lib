@@ -23,11 +23,15 @@ use std::time::Duration;
 
 use kafka_conn::protocol::StrBytes;
 use kafka_conn::protocol::messages::add_partitions_to_txn_request::AddPartitionsToTxnTopic;
+use kafka_conn::protocol::messages::txn_offset_commit_request::{
+    TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+};
 use kafka_conn::protocol::messages::{
-    AddPartitionsToTxnRequest, EndTxnRequest, InitProducerIdRequest, TopicName, TransactionalId,
+    AddOffsetsToTxnRequest, AddPartitionsToTxnRequest, EndTxnRequest, GroupId,
+    InitProducerIdRequest, TopicName, TransactionalId, TxnOffsetCommitRequest,
 };
 use kafka_conn::{Error, ErrorCode, Result};
-use kafka_meta::{Cluster, CoordinatorKind};
+use kafka_meta::{Cluster, ConsumerGroupMetadata, CoordinatorKind};
 
 use crate::idempotence::ProducerIdentity;
 
@@ -150,7 +154,7 @@ impl Transactions {
         }
     }
 
-    /// One coordinator round trip, re-asked while the coordinator is not ready.
+    /// One transaction-coordinator round trip, re-asked while it is not ready.
     ///
     /// `code_of` pulls the decisive error code out of the response, because
     /// where it lives differs per api — `AddPartitionsToTxn` v3 reports per
@@ -160,14 +164,39 @@ impl Transactions {
         R: kafka_conn::Rpc + Clone,
         F: Fn(&R::Response) -> i16,
     {
+        self.call_coordinator(
+            cluster,
+            CoordinatorKind::Transaction,
+            &self.transactional_id.clone(),
+            request,
+            code_of,
+        )
+        .await
+    }
+
+    /// The same round trip against whichever coordinator owns the request.
+    ///
+    /// Split out for KIP-447, which is the one operation that touches *both*:
+    /// `AddOffsetsToTxn` goes to the transaction coordinator and
+    /// `TxnOffsetCommit` to the group's, inside one transaction. Both hops want
+    /// the same re-ask, because "the coordinator moved" is the same answer from
+    /// either.
+    async fn call_coordinator<R, F>(
+        &self,
+        cluster: &Cluster,
+        kind: CoordinatorKind,
+        key: &str,
+        request: R,
+        code_of: F,
+    ) -> Result<R::Response>
+    where
+        R: kafka_conn::Rpc + Clone,
+        F: Fn(&R::Response) -> i16,
+    {
         let mut attempt = 1;
         loop {
             let response = cluster
-                .send_to_coordinator(
-                    CoordinatorKind::Transaction,
-                    &self.transactional_id,
-                    request.clone(),
-                )
+                .send_to_coordinator(kind, key, request.clone())
                 .await?;
 
             let Some(code) = ErrorCode::from_code(code_of(&response)) else {
@@ -180,15 +209,13 @@ impl Transactions {
                 // broker, which is merely busy; re-resolving it would throw
                 // away a correct answer and ask the same node again anyway.
                 if code != ErrorCode::ConcurrentTransactions {
-                    cluster.invalidate_coordinator(
-                        CoordinatorKind::Transaction,
-                        &self.transactional_id,
-                    );
+                    cluster.invalidate_coordinator(kind, key);
                 }
                 tracing::debug!(
                     %code,
                     attempt,
-                    "the transaction coordinator is not ready; re-asking"
+                    ?kind,
+                    "the coordinator is not ready; re-asking"
                 );
                 tokio::time::sleep(COORDINATOR_BACKOFF).await;
                 attempt += 1;
@@ -355,6 +382,139 @@ impl Transactions {
         for key in partitions {
             state.enrolled.insert(key.clone());
         }
+        Ok(())
+    }
+
+    /// KIP-447: put a consumer's offsets inside this transaction.
+    ///
+    /// Two hops, two coordinators, in this order and no other:
+    ///
+    /// 1. **`AddOffsetsToTxn`** to the *transaction* coordinator, which enrols
+    ///    the `__consumer_offsets` partition backing this group in the
+    ///    transaction. Without it the coordinator does not know to write a
+    ///    marker there, and the offsets commit outside the transaction — which
+    ///    looks like it worked and abandons exactly-once at the first abort.
+    /// 2. **`TxnOffsetCommit`** to the *group* coordinator, which stores the
+    ///    offsets pending that marker. They stay invisible to an ordinary
+    ///    `OffsetFetch` until the transaction commits.
+    ///
+    /// The offsets are the position of the *next* record to read, which is what
+    /// [`crate::Producer::send_offsets_to_transaction`] is documented to take
+    /// and what a consumer's own `commit` stores.
+    pub(crate) async fn send_offsets(
+        &self,
+        cluster: &Cluster,
+        group: &ConsumerGroupMetadata,
+        offsets: &[((String, i32), i64)],
+    ) -> Result<()> {
+        let identity = {
+            let state = self.lock()?;
+            Self::check_live(&state)?;
+            if !state.open {
+                return Err(Error::InvalidRequest(
+                    "no transaction is open; offsets can only be sent inside one".to_owned(),
+                ));
+            }
+            state.identity.ok_or_else(|| {
+                Error::InvalidRequest("no transactional producer id has been claimed".to_owned())
+            })?
+        };
+
+        let group_id = GroupId(StrBytes::from_string(group.group_id.clone()));
+
+        let add = AddOffsetsToTxnRequest::default()
+            .with_transactional_id(TransactionalId(StrBytes::from_string(
+                self.transactional_id.clone(),
+            )))
+            .with_producer_id(kafka_conn::protocol::messages::ProducerId(
+                identity.producer_id,
+            ))
+            .with_producer_epoch(identity.producer_epoch)
+            .with_group_id(group_id.clone());
+        self.call(cluster, add, |response| response.error_code)
+            .await?;
+
+        let mut by_topic: std::collections::HashMap<String, Vec<TxnOffsetCommitRequestPartition>> =
+            std::collections::HashMap::new();
+        for ((topic, partition), offset) in offsets {
+            by_topic.entry(topic.clone()).or_default().push(
+                TxnOffsetCommitRequestPartition::default()
+                    .with_partition_index(*partition)
+                    .with_committed_offset(*offset),
+            );
+        }
+
+        // `member_id`, `generation_id` and `group_instance_id` encode only at
+        // v3+; below that the codec refuses anything but their defaults, which
+        // is precisely the non-member form. So a standalone consumer's commit
+        // encodes at any version and a member's needs a broker from 2.5 on.
+        let commit = TxnOffsetCommitRequest::default()
+            .with_transactional_id(TransactionalId(StrBytes::from_string(
+                self.transactional_id.clone(),
+            )))
+            .with_group_id(group_id)
+            .with_producer_id(kafka_conn::protocol::messages::ProducerId(
+                identity.producer_id,
+            ))
+            .with_producer_epoch(identity.producer_epoch)
+            .with_generation_id(group.generation)
+            .with_member_id(StrBytes::from_string(group.member_id.clone()))
+            .with_group_instance_id(group.instance_id.clone().map(StrBytes::from_string))
+            .with_topics(
+                by_topic
+                    .into_iter()
+                    .map(|(topic, partitions)| {
+                        TxnOffsetCommitRequestTopic::default()
+                            .with_name(TopicName(StrBytes::from_string(topic)))
+                            .with_partitions(partitions)
+                    })
+                    .collect(),
+            );
+
+        let response = self
+            .call_coordinator(
+                cluster,
+                CoordinatorKind::Group,
+                &group.group_id,
+                commit,
+                |response| {
+                    // Per partition, like `AddPartitionsToTxn` v3: there is no
+                    // top-level code to read.
+                    response
+                        .topics
+                        .iter()
+                        .flat_map(|topic| &topic.partitions)
+                        .map(|partition| partition.error_code)
+                        .find(|code| *code != 0)
+                        .unwrap_or(0)
+                },
+            )
+            .await?;
+
+        // Rule 4 says a multi-resource call reports per resource. This one
+        // deliberately does not, and the reason is what the API is for: these
+        // offsets are one *atomic* unit with the records this transaction
+        // wrote. A caller handed "eleven of twelve committed" has no useful
+        // move — committing publishes a split state, and the only correct
+        // response is the abort it would have to work out for itself. So a
+        // single partition's refusal fails the call, naming the partition.
+        for topic in &response.topics {
+            for partition in &topic.partitions {
+                if let Some(code) = ErrorCode::from_code(partition.error_code) {
+                    let error = Error::from_code(
+                        code,
+                        Some(format!(
+                            "{}-{}: offset could not be committed in the transaction; \
+                             abort it rather than committing a partial one",
+                            topic.name.0, partition.partition_index
+                        )),
+                    );
+                    self.note(&error);
+                    return Err(error);
+                }
+            }
+        }
+
         Ok(())
     }
 

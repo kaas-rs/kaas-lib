@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use kafka_admin::{Admin, ClusterConfig, NewTopic};
+use kafka_consume::{ConsumerConfig, GroupConsumer};
 use kafka_produce::{Producer, ProducerConfig, ProducerRecord};
 use kafka_read::{Cluster, ScanEvent, ScanSpec, StartPosition, Visibility};
 use testkit::{Cluster as _, KafkaCluster};
@@ -144,6 +145,164 @@ async fn a_committed_transaction_is_visible_and_an_aborted_one_is_not() {
             .all(|value| value.starts_with(b"committed-")),
         "an aborted record leaked into the committed view"
     );
+}
+
+/// **KIP-447**: a consume-process-produce cycle where the offsets move only if
+/// the transaction commits.
+///
+/// The aborted half is the one that proves anything. A commit-only test passes
+/// even when the offset commit is an ordinary non-transactional write happening
+/// to run next to a transaction — it is the abort that separates "inside the
+/// transaction" from "alongside it", because only an offset genuinely enrolled
+/// in the transaction is discarded with it.
+#[testkit::integration_test]
+async fn consumed_offsets_move_with_the_transaction_and_only_with_it() {
+    const INPUT: &str = "txn-eos-input";
+    const OUTPUT: &str = "txn-eos-output";
+    const GROUP: &str = "txn-eos-group";
+    const RECORDS: usize = 20;
+
+    let (_fixture, cluster, admin) = setup(INPUT).await;
+    admin
+        .create_topics([NewTopic::new(OUTPUT, 1, 3)])
+        .await
+        .expect("output topic");
+    await_topic(&admin, OUTPUT).await;
+
+    // Seed the input topic.
+    let seeder = Producer::new(cluster.clone(), ProducerConfig::new());
+    for i in 0..RECORDS {
+        seeder
+            .send(
+                ProducerRecord::new(INPUT)
+                    .with_partition(0)
+                    .with_value(format!("in-{i}")),
+            )
+            .await
+            .expect("seed");
+    }
+
+    // A real group member, so the commit carries a member id and an epoch —
+    // the path a non-member commit would not exercise at all.
+    let mut consumer = GroupConsumer::subscribe(
+        cluster.clone(),
+        ConsumerConfig::new()
+            .visibility(Visibility::All)
+            .max_wait_ms(200),
+        GROUP,
+        [INPUT],
+    )
+    .await
+    .expect("subscribe")
+    // The transaction owns these offsets now. Auto-commit would write them
+    // outside it, which is the bug this test exists to catch.
+    .auto_commit(false);
+
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut consumed = Vec::new();
+    while consumed.len() < RECORDS && Instant::now() < deadline {
+        consumed.extend(consumer.poll().await.expect("poll"));
+    }
+    assert_eq!(
+        consumed.len(),
+        RECORDS,
+        "the group never delivered the input"
+    );
+
+    let producer = Producer::new(
+        cluster.clone(),
+        ProducerConfig::new().transactional_id("txn-eos-writer"),
+    );
+    producer.init_transactions().await.expect("init");
+
+    // The processed positions, which is what both halves below send.
+    let positions = consumer.positions();
+    assert_eq!(
+        positions.iter().map(|(_, offset)| *offset).sum::<i64>(),
+        i64::try_from(RECORDS).unwrap(),
+        "a committed offset is the next record to read, not the last one handled"
+    );
+
+    // 1. The aborted cycle.
+    producer.begin_transaction().expect("begin");
+    for record in &consumed {
+        producer
+            .send(
+                ProducerRecord::new(OUTPUT)
+                    .with_partition(0)
+                    .with_value(format!("aborted-{}", record.offset)),
+            )
+            .await
+            .expect("produce");
+    }
+    producer
+        .send_offsets_to_transaction(
+            positions.clone(),
+            &consumer.group_metadata().expect("group"),
+        )
+        .await
+        .expect("send offsets");
+    producer.abort_transaction().await.expect("abort");
+
+    assert!(
+        consumer.committed().await.expect("committed").is_empty(),
+        "an aborted transaction moved the group's offset, so the offsets were \
+         never really inside it"
+    );
+
+    // 2. The committed cycle.
+    producer.begin_transaction().expect("begin");
+    for record in &consumed {
+        producer
+            .send(
+                ProducerRecord::new(OUTPUT)
+                    .with_partition(0)
+                    .with_value(format!("committed-{}", record.offset)),
+            )
+            .await
+            .expect("produce");
+    }
+    producer
+        .send_offsets_to_transaction(
+            positions.clone(),
+            &consumer.group_metadata().expect("group"),
+        )
+        .await
+        .expect("send offsets");
+    producer.commit_transaction().await.expect("commit");
+
+    // The markers the coordinator writes after `EndTxn` answers are what make
+    // both halves visible, so poll rather than reading once — same race the
+    // visibility test above documents.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let stored = loop {
+        let stored = consumer.committed().await.expect("committed");
+        if !stored.is_empty() || Instant::now() >= deadline {
+            break stored;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert_eq!(
+        stored.get(&(INPUT.to_owned(), 0)).map(|entry| entry.offset),
+        Some(i64::try_from(RECORDS).unwrap()),
+        "a committed transaction must advance the group's offset"
+    );
+
+    let written = read(&cluster, OUTPUT, Visibility::CommittedOnly).await;
+    assert_eq!(
+        written.len(),
+        RECORDS,
+        "the output holds exactly the committed cycle's records"
+    );
+    assert!(
+        written
+            .iter()
+            .filter_map(|record| record.value.as_ref())
+            .all(|value| value.starts_with(b"committed-")),
+        "the aborted cycle's records leaked into the committed view"
+    );
+
+    consumer.leave().await.expect("leave");
 }
 
 /// Fencing: a second producer sharing the transactional id wins, and the first

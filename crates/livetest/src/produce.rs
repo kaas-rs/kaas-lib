@@ -314,6 +314,15 @@ async fn run(cluster: &Cluster, admin: &Admin, topic: &str, report: &mut Report)
     // 8. KIP-848 group membership (M17), against a real group coordinator.
     group(cluster, topic, report).await?;
 
+    // 9. Exactly-once end to end (KIP-447), which is the only section that
+    //    touches the transaction *and* group coordinators inside one
+    //    transaction — usually two different machines here.
+    exactly_once(cluster, topic, report).await?;
+
+    // 10. The same, committed as a group member: the only path that puts a real
+    //     member id and epoch on the wire, both gated behind TxnOffsetCommit v3.
+    exactly_once_as_member(cluster, topic, report).await?;
+
     Ok(())
 }
 
@@ -692,6 +701,245 @@ async fn transactions(cluster: &Cluster, topic: &str, report: &mut Report) -> Re
     }
     report.set("txn.filter_holds", true);
 
+    Ok(())
+}
+
+/// How many records the exactly-once section moves through the cycle.
+const EOS_RECORDS: usize = 25;
+
+/// KIP-447: a consume-process-produce cycle whose offsets move only when the
+/// transaction commits.
+///
+/// Worth running here rather than only in a container because the two hops go
+/// to **different coordinators** — `AddOffsetsToTxn` to the transaction
+/// coordinator, `TxnOffsetCommit` to the group's — and on a real cluster those
+/// are usually different machines, neither of them the partition leader. A
+/// single-broker fixture makes all three the same process and proves nothing
+/// about the routing.
+///
+/// The aborted half is the assertion that matters. An offset commit that merely
+/// runs *next to* a transaction passes a commit-only check and fails this one.
+async fn exactly_once(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<()> {
+    let token = run_token();
+    let group = format!("kaaslib-live-eos-{token}");
+    let marker = format!("kip447-{token}");
+
+    // Seed a partition of its own, so the cycle reads records this section
+    // wrote rather than whatever the earlier sections left behind.
+    let seeder = Producer::new(cluster.clone(), ProducerConfig::new());
+    for i in 0..EOS_RECORDS {
+        seeder
+            .send(
+                ProducerRecord::new(topic)
+                    .with_partition(2)
+                    .with_value(format!("{marker}-in-{i}")),
+            )
+            .await?;
+    }
+
+    let mut consumer = Consumer::new(
+        cluster.clone(),
+        ConsumerConfig::new()
+            .group_id(&group)
+            .visibility(Visibility::All)
+            .max_wait_ms(200),
+    );
+    consumer
+        .assign([(topic.to_owned(), 2)], Position::Latest)
+        .await?;
+    // Latest, then step back over exactly what we seeded: the partition is
+    // shared with other sections and a full drain would read their records too.
+    let start = consumer
+        .position(topic, 2)
+        .unwrap_or(0)
+        .saturating_sub(i64::try_from(EOS_RECORDS).unwrap_or(0));
+    consumer.seek(topic, 2, start)?;
+
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    let mut consumed = 0usize;
+    while consumed < EOS_RECORDS && Instant::now() < deadline {
+        consumed += consumer.poll().await?.len();
+    }
+    if consumed < EOS_RECORDS {
+        bail!("the cycle only read {consumed} of {EOS_RECORDS} seeded records");
+    }
+    let positions = consumer.positions();
+    report.set("eos.consumed", consumed);
+
+    let producer = Producer::new(
+        cluster.clone(),
+        ProducerConfig::new().transactional_id(format!("kaaslib-live-eos-{token}")),
+    );
+    producer.init_transactions().await?;
+
+    let cycle = async |kind: &str, commit: bool| -> Result<()> {
+        producer.begin_transaction()?;
+        for i in 0..EOS_RECORDS {
+            producer
+                .send(
+                    ProducerRecord::new(topic)
+                        .with_partition(3)
+                        .with_value(format!("{marker}-{kind}-{i}")),
+                )
+                .await?;
+        }
+        producer
+            .send_offsets_to_transaction(positions.clone(), &consumer.group_metadata()?)
+            .await?;
+        if commit {
+            producer.commit_transaction().await?;
+        } else {
+            producer.abort_transaction().await?;
+        }
+        Ok(())
+    };
+
+    // 1. Aborted: the offsets must go with it.
+    cycle("aborted", false).await?;
+    let after_abort = consumer.committed().await?;
+    report.set("eos.committed_after_abort", after_abort.len());
+    if !after_abort.is_empty() {
+        bail!(
+            "an aborted transaction moved the group's offset to {:?}, so the \
+             offsets were never inside it",
+            after_abort.get(&(topic.to_owned(), 2)).map(|e| e.offset)
+        );
+    }
+
+    // 2. Committed: the offsets must arrive with the records.
+    cycle("committed", true).await?;
+    let settle = Instant::now() + SETTLE_TIMEOUT;
+    let stored = loop {
+        let stored = consumer.committed().await?;
+        if !stored.is_empty() || Instant::now() >= settle {
+            break stored;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+
+    let expected = positions
+        .iter()
+        .find(|(key, _)| key == &(topic.to_owned(), 2))
+        .map(|(_, offset)| *offset);
+    let actual = stored.get(&(topic.to_owned(), 2)).map(|entry| entry.offset);
+    report.set_opt("eos.committed_offset", actual);
+    if actual.is_none() || actual != expected {
+        bail!("a committed transaction stored {actual:?}, not the consumed position {expected:?}");
+    }
+    report.set("eos.offsets_move_with_the_transaction", true);
+
+    Ok(())
+}
+
+/// The same cycle, but committed **as a group member**.
+///
+/// Not a duplicate of the section above, and the difference is the whole point:
+/// a standalone consumer commits with `member_id = ""` and `generation = -1`,
+/// which are `TxnOffsetCommit`'s defaults and encode at *any* version. A member
+/// sends a real member id and epoch, which the schema gates behind v3+ and the
+/// coordinator checks against the group's current generation. Only this half
+/// exercises either.
+async fn exactly_once_as_member(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<()> {
+    let token = run_token();
+    let group = format!("kaaslib-live-eos-member-{token}");
+    let marker = format!("kip447m-{token}");
+
+    let mut consumer = GroupConsumer::subscribe(
+        cluster.clone(),
+        ConsumerConfig::new()
+            .visibility(Visibility::All)
+            .max_wait_ms(200),
+        &group,
+        [topic],
+    )
+    .await?
+    // The transaction owns these offsets; an auto-commit would write them
+    // outside it, which is the split KIP-447 exists to remove.
+    .auto_commit(false);
+
+    // A fresh group has nothing committed, so the member starts at the earliest
+    // retained offset and reads what the earlier sections wrote.
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    let mut consumed = 0usize;
+    while (consumer.assignment().is_empty() || consumed == 0) && Instant::now() < deadline {
+        consumed += consumer.poll().await?.len();
+    }
+    if consumed == 0 {
+        bail!("the member never read anything to commit");
+    }
+
+    let metadata = consumer.group_metadata()?;
+    report.set("eos.member.consumed", consumed);
+    report.set("eos.member.epoch", metadata.generation);
+    report.set("eos.member.id_issued", !metadata.member_id.is_empty());
+    report.set("eos.member.is_member", metadata.is_member());
+    let positions = consumer.positions();
+
+    let producer = Producer::new(
+        cluster.clone(),
+        ProducerConfig::new().transactional_id(format!("kaaslib-live-eos-member-{token}")),
+    );
+    producer.init_transactions().await?;
+
+    // Each cycle is short on purpose: a classic-free KIP-848 member still only
+    // heartbeats when polled, and the whole cycle has to fit inside the session
+    // timeout.
+    let cycle = async |kind: &str, commit: bool| -> Result<()> {
+        producer.begin_transaction()?;
+        producer
+            .send(
+                ProducerRecord::new(topic)
+                    .with_partition(4)
+                    .with_value(format!("{marker}-{kind}")),
+            )
+            .await?;
+        producer
+            .send_offsets_to_transaction(positions.clone(), &consumer.group_metadata()?)
+            .await?;
+        if commit {
+            producer.commit_transaction().await?;
+        } else {
+            producer.abort_transaction().await?;
+        }
+        Ok(())
+    };
+
+    cycle("aborted", false).await?;
+    let after_abort = consumer.committed().await?;
+    report.set("eos.member.committed_after_abort", after_abort.len());
+    if !after_abort.is_empty() {
+        bail!("an aborted transaction moved a group member's offsets");
+    }
+
+    cycle("committed", true).await?;
+    let settle = Instant::now() + SETTLE_TIMEOUT;
+    let stored = loop {
+        let stored = consumer.committed().await?;
+        if stored.len() >= positions.len() || Instant::now() >= settle {
+            break stored;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+
+    report.set("eos.member.committed_partitions", stored.len());
+    let mismatched: Vec<String> = positions
+        .iter()
+        .filter(|(key, offset)| stored.get(key).map(|entry| entry.offset) != Some(*offset))
+        .map(|(key, offset)| {
+            format!(
+                "{}-{} wanted {offset}, stored {:?}",
+                key.0,
+                key.1,
+                stored.get(key).map(|entry| entry.offset)
+            )
+        })
+        .collect();
+    if !mismatched.is_empty() {
+        bail!("a member's transactional commit stored the wrong offsets: {mismatched:?}");
+    }
+    report.set("eos.member.offsets_move_with_the_transaction", true);
+
+    consumer.leave().await?;
     Ok(())
 }
 
