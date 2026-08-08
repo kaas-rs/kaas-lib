@@ -46,6 +46,7 @@ pub mod harness;
 mod error;
 mod image;
 mod kafka;
+mod token;
 
 pub use config::{
     BrokerConfig, DEFAULT_IMAGE, DEFAULT_TAG, INTERNAL_BOOTSTRAP, SaslMechanism, SaslUser, Security,
@@ -60,3 +61,4 @@ pub use kafka::{KafkaCluster, cluster, cluster_with, single_broker, single_broke
 /// integration job — which is what makes the deadline a property of the job
 /// rather than a convention.
 pub use testkit_macros::integration_test;
+pub use token::unsecured_jws;

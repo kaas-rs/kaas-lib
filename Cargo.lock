@@ -830,6 +830,7 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
+ "log",
  "rustls",
  "tokio",
  "tokio-rustls",
@@ -1098,8 +1099,13 @@ version = "0.5.0"
 dependencies = [
  "base64 0.23.0",
  "bytes",
+ "form_urlencoded",
  "futures",
  "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
  "kafka-protocol",
  "metrics",
  "pbkdf2",
@@ -1107,6 +1113,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",
+ "serde_json",
  "sha2",
  "stringprep",
  "subtle",
@@ -2231,6 +2238,7 @@ dependencies = [
 name = "testkit"
 version = "0.5.0"
 dependencies = [
+ "base64 0.23.0",
  "futures",
  "testcontainers",
  "testkit-macros",

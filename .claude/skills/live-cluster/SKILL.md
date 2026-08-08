@@ -41,8 +41,15 @@ conclusion is that `kaas` is incomplete, not that kaas-lib is broken. Check the
 version table before assuming otherwise — `kaas` advertises about half the api
 keys Strimzi does.
 
-Listeners: `strimzi` has `plain` (9092, no auth) and `tls` (9093, server-auth
-TLS). `kaas` has `plain` (9092), `authed` (9095) and `tls` (9093).
+Listeners: `strimzi` has `plain` (9092, no auth), `tls` (9093, server-auth TLS)
+and `internal` (9094, **SASL_SSL/OAUTHBEARER** validated against a real Entra
+ID tenant's JWKS, with `authorization.type: simple` enforcing ACLs). `kaas` has
+`plain` (9092), `authed` (9095) and `tls` (9093).
+
+`resolve-target.sh strimzi internal` resolves the OAuth listener, including the
+CA — it reads each listener's `tls` field from the CR rather than keying off the
+listener's name — and reminds you on stderr that the credentials are yours to
+supply.
 
 ## Running it
 
@@ -61,6 +68,14 @@ It never resolves credentials. A run that needs SASL sets
 `KAAS_TEST_SASL_MECHANISM` / `_USERNAME` / `_PASSWORD` itself, so an
 unauthenticated run cannot silently pick up someone's credentials from a secret
 it happened to be able to read.
+
+For the `internal` listener that means `KAAS_TEST_SASL_MECHANISM=OAUTHBEARER`
+plus either `KAAS_TEST_OAUTH_TOKEN` (a token you fetched yourself) or
+`KAAS_TEST_OAUTH_TOKEN_ENDPOINT` + `_CLIENT_ID` + `_CLIENT_SECRET` + `_SCOPE`,
+which has the library run `client_credentials` and refresh on its own. The
+Entra app registration for `kaas-ui` is in Vault at `dex/entra-oauth`; the
+principal Kafka sees is the service principal's **object** id, not the client
+id, because the listener takes it from the token's `sub`.
 
 ### The four commands
 

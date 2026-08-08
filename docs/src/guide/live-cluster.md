@@ -40,8 +40,12 @@ Everything comes from the environment:
 | `KAAS_TEST_READ_ONLY` | `1` to refuse every mutating api key |
 | `KAAS_TEST_CA_PEM` / `KAAS_TEST_CA_FILE` | PEM bundle to trust |
 | `KAAS_TEST_TLS_SERVER_NAME` | name to verify the broker certificate against |
-| `KAAS_TEST_SASL_MECHANISM` | `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` |
+| `KAAS_TEST_SASL_MECHANISM` | `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`, `OAUTHBEARER` |
 | `KAAS_TEST_SASL_USERNAME` / `KAAS_TEST_SASL_PASSWORD` | credentials |
+| `KAAS_TEST_OAUTH_TOKEN` | `OAUTHBEARER`: a token you already have |
+| `KAAS_TEST_OAUTH_TOKEN_ENDPOINT` | `OAUTHBEARER`: fetch one instead, via `client_credentials` |
+| `KAAS_TEST_OAUTH_CLIENT_ID` / `KAAS_TEST_OAUTH_CLIENT_SECRET` | credentials for that fetch |
+| `KAAS_TEST_OAUTH_SCOPE` / `KAAS_TEST_OAUTH_AUDIENCE` | whichever your issuer wants |
 
 ## The `live-cluster` skill
 

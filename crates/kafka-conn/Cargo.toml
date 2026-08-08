@@ -35,6 +35,33 @@ base64     = { workspace = true }
 subtle     = { workspace = true }
 rand       = { workspace = true }
 
+# SASL/OAUTHBEARER speaks JSON in exactly one place — RFC 7628's failure
+# challenge, which is the only thing that says *why* a token was refused. A
+# hand-rolled reader for a flat object is 30 lines and gets string escapes
+# wrong; this is the dependency that exists so we do not write that.
+serde_json = { workspace = true }
+
+# The `oidc` feature only. An HTTP client is a real addition to the dependency
+# tree of the crate every other crate here sits on, so a caller who supplies
+# its own OAUTHBEARER tokens — or uses none — does not pay for it.
+hyper            = { workspace = true, optional = true }
+hyper-util       = { workspace = true, optional = true }
+hyper-rustls     = { workspace = true, optional = true }
+http-body-util   = { workspace = true, optional = true }
+form_urlencoded  = { workspace = true, optional = true }
+
+[features]
+# KIP-768: fetch and refresh OAUTHBEARER tokens from an OIDC token endpoint.
+# Off by default — see the dependency block above. Everything else about
+# OAUTHBEARER, including the mechanism itself, works without it.
+oidc = [
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:hyper-rustls",
+    "dep:http-body-util",
+    "dep:form_urlencoded",
+]
+
 [dev-dependencies]
 testkit            = { path = "../testkit" }
 tokio              = { workspace = true }

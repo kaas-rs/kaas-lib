@@ -122,6 +122,18 @@ pub enum SaslMechanism {
     ScramSha256,
     /// `SCRAM-SHA-512` — credentials stored in the metadata log.
     ScramSha512,
+    /// `OAUTHBEARER`, validated by Kafka's **unsecured** JWS handler.
+    ///
+    /// No OAuth server, no signature: Kafka ships
+    /// `OAuthBearerUnsecuredValidatorCallbackHandler` for development and
+    /// testing, and it accepts a JWS with `alg: none` and an empty signature so
+    /// long as the claims check out. That is what makes an OAUTHBEARER fixture
+    /// possible without either mocking a broker or booting Keycloak — mint a
+    /// token with [`unsecured_jws`](crate::unsecured_jws).
+    ///
+    /// The principal the broker sees is the token's `sub` claim, so
+    /// [`BrokerConfig::with_user`] has nothing to do here.
+    OauthBearer,
 }
 
 impl SaslMechanism {
@@ -131,6 +143,7 @@ impl SaslMechanism {
             SaslMechanism::Plain => "PLAIN",
             SaslMechanism::ScramSha256 => "SCRAM-SHA-256",
             SaslMechanism::ScramSha512 => "SCRAM-SHA-512",
+            SaslMechanism::OauthBearer => "OAUTHBEARER",
         }
     }
 
@@ -140,6 +153,7 @@ impl SaslMechanism {
             SaslMechanism::Plain => "plain",
             SaslMechanism::ScramSha256 => "scram-sha-256",
             SaslMechanism::ScramSha512 => "scram-sha-512",
+            SaslMechanism::OauthBearer => "oauthbearer",
         }
     }
 
@@ -148,6 +162,15 @@ impl SaslMechanism {
             self,
             SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512
         )
+    }
+
+    /// Whether the mechanism authenticates against a username and password.
+    ///
+    /// `OAUTHBEARER` does not: the principal comes out of the token, so a
+    /// fixture using it has no users to configure and requiring one would be a
+    /// fixture that cannot be built.
+    fn needs_users(self) -> bool {
+        !matches!(self, SaslMechanism::OauthBearer)
     }
 }
 
@@ -344,7 +367,10 @@ impl BrokerConfig {
                 "SASL security was requested but no mechanism was enabled",
             ));
         }
-        if self.security.needs_sasl() && self.users.is_empty() {
+        if self.security.needs_sasl()
+            && self.users.is_empty()
+            && self.mechanisms.iter().any(|m| m.needs_users())
+        {
             return Err(Error::config(
                 "SASL security was requested but no user was configured",
             ));
@@ -514,6 +540,20 @@ impl BrokerConfig {
                     ),
                     self.jaas_config(*mechanism),
                 );
+                // PLAIN and SCRAM have broker-side handlers by default;
+                // OAUTHBEARER's default handler wants a JWKS endpoint and an
+                // issuer, so a fixture with no OAuth server has to name the
+                // unsecured one explicitly. Note the property is per listener
+                // *and* per mechanism — `listener.name.<l>.<m>.sasl.…` — which
+                // is what lets one listener offer OAUTHBEARER beside SCRAM.
+                if matches!(mechanism, SaslMechanism::OauthBearer) {
+                    set(
+                        "listener.name.external.oauthbearer.sasl.server.callback.handler.class",
+                        "org.apache.kafka.common.security.oauthbearer.internals.unsecured\
+                         .OAuthBearerUnsecuredValidatorCallbackHandler"
+                            .to_owned(),
+                    );
+                }
             }
         }
 
@@ -549,6 +589,17 @@ impl BrokerConfig {
             // SCRAM reads from the metadata log, seeded by `--add-scram`.
             SaslMechanism::ScramSha256 | SaslMechanism::ScramSha512 => {
                 "org.apache.kafka.common.security.scram.ScramLoginModule required;".to_owned()
+            }
+            // A JAAS entry is mandatory for every enabled mechanism even when
+            // the broker never *logs in* with it — the entry is where the
+            // server callback handler reads its options from. The unsecured
+            // validator's defaults are what we want (any `sub`, no required
+            // scope), so this only has to exist, and the login claim is the
+            // stub that makes the login module accept its own configuration.
+            SaslMechanism::OauthBearer => {
+                "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required \
+                 unsecuredLoginStringClaim_sub=\"kaas-testkit\";"
+                    .to_owned()
             }
         }
     }
@@ -643,6 +694,47 @@ mod tests {
         let rendered = props(&cfg);
         let last = rendered.lines().rfind(|l| l.starts_with("num.partitions="));
         assert_eq!(last, Some("num.partitions=6"));
+    }
+
+    #[test]
+    fn oauthbearer_names_the_unsecured_validator_and_needs_no_users() {
+        let cfg = BrokerConfig::new()
+            .with_security(Security::SaslSsl)
+            .with_mechanism(SaslMechanism::OauthBearer);
+        // No `with_user`: the principal is the token's `sub` claim, so there is
+        // nothing for the broker to store.
+        cfg.validate()
+            .expect("an OAUTHBEARER fixture needs no user");
+
+        let rendered = props(&cfg);
+        assert!(rendered.contains("sasl.enabled.mechanisms=OAUTHBEARER"));
+        assert!(rendered.contains(
+            "listener.name.external.oauthbearer.sasl.server.callback.handler.class=\
+             org.apache.kafka.common.security.oauthbearer.internals.unsecured\
+             .OAuthBearerUnsecuredValidatorCallbackHandler"
+        ));
+        assert!(
+            rendered.contains(
+                "listener.name.external.oauthbearer.sasl.jaas.config=\
+                 org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule"
+            ),
+            "{rendered}"
+        );
+        // The default handler would want these; naming the unsecured one is
+        // precisely what makes a fixture with no OAuth server possible.
+        assert!(!rendered.contains("jwks.endpoint"), "{rendered}");
+    }
+
+    #[test]
+    fn a_mechanism_that_does_need_users_still_says_so() {
+        let cfg = BrokerConfig::new()
+            .with_security(Security::SaslSsl)
+            .with_mechanism(SaslMechanism::OauthBearer)
+            .with_mechanism(SaslMechanism::ScramSha512);
+        assert!(
+            cfg.validate().is_err(),
+            "SCRAM beside OAUTHBEARER still has no credentials"
+        );
     }
 
     #[test]

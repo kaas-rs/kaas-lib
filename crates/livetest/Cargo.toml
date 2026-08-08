@@ -12,7 +12,10 @@ name = "livetest"
 path = "src/main.rs"
 
 [dependencies]
-kafka-conn  = { path = "../kafka-conn" }
+# `oidc` on: this crate exists to point the library at real clusters, and an
+# OAuth-secured listener needs a real issuer. Not published, so the feature
+# costs a downstream nothing.
+kafka-conn  = { path = "../kafka-conn", features = ["oidc"] }
 kafka-meta  = { path = "../kafka-meta" }
 kafka-admin = { path = "../kafka-admin" }
 kafka-read  = { path = "../kafka-read" }

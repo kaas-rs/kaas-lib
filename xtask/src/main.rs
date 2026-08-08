@@ -89,6 +89,11 @@ fn enforce_test_deadline() -> Result<()> {
 }
 
 /// fmt + clippy + unit tests. No Docker required.
+///
+/// `--all-features` because a feature that is off by default is a feature CI
+/// does not compile: `kafka-conn`'s `oidc` gate carries an HTTP client and a
+/// `TokenProvider` implementation, and without this flag none of it is linted
+/// or unit-tested until someone turns it on.
 fn ci() -> Result<()> {
     enforce_test_deadline()?;
     run("cargo", &["fmt", "--check"])?;
@@ -98,12 +103,13 @@ fn ci() -> Result<()> {
             "clippy",
             "--workspace",
             "--all-targets",
+            "--all-features",
             "--",
             "-D",
             "warnings",
         ],
     )?;
-    run("cargo", &["test", "--workspace"])?;
+    run("cargo", &["test", "--workspace", "--all-features"])?;
     Ok(())
 }
 

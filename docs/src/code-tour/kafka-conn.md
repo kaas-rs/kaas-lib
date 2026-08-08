@@ -7,18 +7,20 @@ actor — everything between a TCP socket and a typed Kafka request.
 
 | File | Lines | What |
 |---|---|---|
-| `error_code.rs` | 1,318 | the broker error-code table, derived from `ResponseError` |
-| `conn.rs` | 1,004 | the connection actor |
-| `api_key.rs` | 647 | `ApiKey`, header versions, `is_mutating` |
-| `rpc.rs` | 464 | the `Rpc` trait — request/response pairing and version ranges |
-| `scram.rs` | 457 | SCRAM-SHA-256/512, RFC 5802 |
-| `sasl.rs` | 294 | mechanisms, the exchange, KIP-368 re-auth |
+| `error_code.rs` | 1,340 | the broker error-code table, derived from `ResponseError` |
+| `conn.rs` | 1,131 | the connection actor |
+| `api_key.rs` | 733 | `ApiKey`, header versions, `is_mutating` |
+| `oidc.rs` | 703 | KIP-768 `client_credentials` token fetch — `oidc` feature only |
+| `sasl.rs` | 576 | mechanisms, the exchange, KIP-368 re-auth |
+| `scram.rs` | 501 | SCRAM-SHA-256/512, RFC 5802 |
+| `rpc.rs` | 488 | the `Rpc` trait — request/response pairing and version ranges |
+| `oauth.rs` | 395 | SASL/OAUTHBEARER, RFC 7628, and the `TokenProvider` trait |
+| `error.rs` | 324 | the `Error` enum |
 | `versions.rs` | 253 | `ApiVersions`, `VersionRange`, `our_range` |
-| `tls.rs` | 239 | rustls config: roots, client certs, SNI |
+| `tls.rs` | 248 | rustls config: roots, client certs, SNI |
 | `codec.rs` | 239 | length-delimited framing, header versions |
-| `error.rs` | 234 | the `Error` enum |
+| `config.rs` | 139 | `ConnectionConfig` |
 | `stats.rs` | 137 | per-connection byte and request counters |
-| `config.rs` | 132 | `ConnectionConfig` |
 | `transport.rs` | 104 | plaintext or TLS, behind one type |
 
 **What this crate owns that everything else borrows**: `ApiKey` and
@@ -55,6 +57,12 @@ not licence to expose it in a signature.
   `_ => true`. The direction is the whole security property.
 - `scram.rs` — real SASLprep via `stringprep`, and a constant-time server
   signature check.
+- `oauth.rs` — the `%x01` separators are the message format, and a *rejected*
+  token needs a second round trip the happy path does not. Both are asserted
+  on exact bytes, because KAFKA-7182 is what a client and a broker agreeing
+  with each other and with nobody else looks like.
+- `oidc.rs` — the only file behind a cargo feature. It is where the HTTP client
+  lives, which is the whole reason the feature exists.
 
 **Where the boundary sits**: this crate knows nothing about clusters. Give it
 an address and it gives you request/response against that one broker.

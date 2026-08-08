@@ -37,6 +37,12 @@ There is a second, stronger reason to keep the codecs separate: **kaas-lib is th
 - Rust stable, edition 2024, tokio
 - `tokio-util` (LengthDelimitedCodec), `tokio-rustls`, `bytes`, `thiserror`, `tracing`
 - Tests: `testcontainers` against `apache/kafka:4.3.1`
+- One cargo feature in the workspace: `kafka-conn/oidc`, off by default, which
+  adds `hyper` + `hyper-rustls` for KIP-768's OAUTHBEARER token fetch. It is a
+  feature because an HTTP client in the crate every other crate sits on is a
+  real cost to a caller who supplies its own tokens. `hyper-rustls` stays on
+  `ring` for the reason the TLS note below gives, and `cargo xtask ci` passes
+  `--all-features` so an off-by-default feature is still linted and tested.
 
 ```toml
 kafka-protocol = { version = "0.17", default-features = false,

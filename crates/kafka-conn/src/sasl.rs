@@ -13,8 +13,10 @@
 //! look exactly like a network fault and nothing like an auth problem.
 
 use std::fmt;
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
+use crate::oauth::{self, StaticToken, TokenProvider};
 use crate::scram::{ScramClient, ScramHash, random_nonce};
 
 /// A SASL mechanism this client can speak.
@@ -26,6 +28,14 @@ pub enum SaslMechanism {
     ScramSha256,
     /// `SCRAM-SHA-512`.
     ScramSha512,
+    /// `OAUTHBEARER` — an OAuth 2 bearer token, RFC 7628.
+    ///
+    /// Needs a token source rather than a username and a password, so build
+    /// the configuration with [`SaslConfig::oauth_bearer`] or
+    /// [`SaslConfig::oauth_bearer_token`]; selecting this mechanism through
+    /// [`SaslConfig::new`] leaves nothing to authenticate with and fails before
+    /// anything is sent.
+    OauthBearer,
 }
 
 impl SaslMechanism {
@@ -35,12 +45,18 @@ impl SaslMechanism {
             SaslMechanism::Plain => "PLAIN",
             SaslMechanism::ScramSha256 => "SCRAM-SHA-256",
             SaslMechanism::ScramSha512 => "SCRAM-SHA-512",
+            SaslMechanism::OauthBearer => "OAUTHBEARER",
         }
     }
 
-    /// Whether the mechanism sends a recoverable password over the wire.
-    const fn sends_cleartext_password(self) -> bool {
-        matches!(self, SaslMechanism::Plain)
+    /// Whether the mechanism puts a directly reusable credential on the wire.
+    ///
+    /// True for `PLAIN`, which sends the password, and for `OAUTHBEARER`, which
+    /// sends a bearer token — bearer-grade by definition, so whoever reads it
+    /// off the wire can use it until it expires. SCRAM sends proofs instead and
+    /// is safe on an unencrypted socket.
+    const fn sends_reusable_credential(self) -> bool {
+        matches!(self, SaslMechanism::Plain | SaslMechanism::OauthBearer)
     }
 }
 
@@ -55,16 +71,24 @@ impl fmt::Display for SaslMechanism {
 pub struct SaslConfig {
     /// Which mechanism to negotiate.
     pub mechanism: SaslMechanism,
-    /// Username.
+    /// Username. Empty for `OAUTHBEARER`, whose principal comes from the token.
     pub username: String,
-    /// Password.
+    /// Password. Empty for `OAUTHBEARER`.
     pub password: String,
-    /// Permit `PLAIN` over an unencrypted socket.
+    /// Permit a mechanism that sends a reusable credential — `PLAIN`'s password
+    /// or `OAUTHBEARER`'s token — over an unencrypted socket.
     ///
-    /// Off by default: `SASL_PLAINTEXT` with `PLAIN` puts a recoverable
-    /// password on the wire, and the failure mode of getting this wrong is
-    /// silent. SCRAM over plaintext is fine and is not gated.
+    /// Off by default, because the failure mode of getting this wrong is
+    /// silent: everything works, and the credential is readable by anything on
+    /// the path. SCRAM over plaintext is fine and is not gated.
     pub allow_plaintext_password: bool,
+    /// Where `OAUTHBEARER` gets its token, asked again on every
+    /// re-authentication. `None` for every other mechanism.
+    pub token_provider: Option<Arc<dyn TokenProvider>>,
+    /// RFC 7628 `SaslExtensions`: extra `key=value` pairs in the initial client
+    /// response, which some managed clusters use to select a logical cluster or
+    /// an identity pool. Empty unless [`SaslConfig::with_extension`] added one.
+    pub extensions: Vec<(String, String)>,
 }
 
 impl fmt::Debug for SaslConfig {
@@ -74,12 +98,24 @@ impl fmt::Debug for SaslConfig {
             .field("username", &self.username)
             .field("password", &"<redacted>")
             .field("allow_plaintext_password", &self.allow_plaintext_password)
+            // A token provider is a credential source; even its type name can
+            // name a secret store. The interesting fact is whether there is
+            // one, which is what a misconfiguration turns on.
+            .field(
+                "token_provider",
+                match &self.token_provider {
+                    Some(_) => &"<set>",
+                    None => &"<unset>",
+                },
+            )
+            .field("extensions", &self.extensions)
             .finish()
     }
 }
 
 impl SaslConfig {
-    /// Build a configuration.
+    /// Build a configuration for a mechanism that authenticates with a username
+    /// and a password: `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512`.
     pub fn new(
         mechanism: SaslMechanism,
         username: impl Into<String>,
@@ -90,23 +126,71 @@ impl SaslConfig {
             username: username.into(),
             password: password.into(),
             allow_plaintext_password: false,
+            token_provider: None,
+            extensions: Vec::new(),
         }
     }
 
-    /// Permit `PLAIN` without TLS.
+    /// Authenticate with `OAUTHBEARER`, taking a token from `provider`.
+    ///
+    /// The provider is asked once per SASL exchange — at connect, and again on
+    /// every KIP-368 re-authentication, which happens on a timer this crate
+    /// owns and can fire hours later. That is why this takes a source rather
+    /// than a string: a token captured once has expired by the second call, and
+    /// the symptom is a connection that dies mid-afternoon for no visible
+    /// reason.
+    ///
+    /// Any `Fn() -> impl Future<Output = Result<String>>` is a
+    /// [`TokenProvider`]. For the `client_credentials` flow against an OIDC
+    /// issuer, [`OidcTokenProvider`](crate::OidcTokenProvider) is one already.
+    pub fn oauth_bearer(provider: impl TokenProvider) -> Self {
+        Self {
+            mechanism: SaslMechanism::OauthBearer,
+            username: String::new(),
+            password: String::new(),
+            allow_plaintext_password: false,
+            token_provider: Some(Arc::new(provider)),
+            extensions: Vec::new(),
+        }
+    }
+
+    /// Authenticate with `OAUTHBEARER` using one token, fixed now.
+    ///
+    /// Right for a short-lived process — a CLI run, a one-shot job — and wrong
+    /// for anything long-lived: a re-authentication hours later will present
+    /// this same expired token and the broker will close the connection. Use
+    /// [`SaslConfig::oauth_bearer`] there.
+    pub fn oauth_bearer_token(token: impl Into<String>) -> Self {
+        Self::oauth_bearer(StaticToken::new(token.into()))
+    }
+
+    /// Add an RFC 7628 `SaslExtensions` pair to the initial client response.
+    ///
+    /// Appends: two calls send two pairs. Keys are ASCII letters and `auth` is
+    /// refused, since that is the token's own key.
+    #[must_use]
+    pub fn with_extension(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extensions.push((key.into(), value.into()));
+        self
+    }
+
+    /// Permit a reusable credential — `PLAIN`'s password, `OAUTHBEARER`'s
+    /// token — on an unencrypted socket.
     #[must_use]
     pub fn allow_plaintext_password(mut self) -> Self {
         self.allow_plaintext_password = true;
         self
     }
 
-    /// Reject a combination that would leak the password.
+    /// Reject a combination that would leak the credential.
     pub(crate) fn check_encryption(&self, encrypted: bool) -> Result<()> {
-        if self.mechanism.sends_cleartext_password() && !encrypted && !self.allow_plaintext_password
+        if self.mechanism.sends_reusable_credential()
+            && !encrypted
+            && !self.allow_plaintext_password
         {
             return Err(Error::Authentication(format!(
-                "{} over an unencrypted connection would send the password in the clear; \
-                 use TLS or opt in with SaslConfig::allow_plaintext_password",
+                "{} over an unencrypted connection would send a reusable credential in the \
+                 clear; use TLS or opt in with SaslConfig::allow_plaintext_password",
                 self.mechanism
             )));
         }
@@ -133,6 +217,16 @@ pub(crate) trait SaslTransport {
 
     /// Send `SaslAuthenticate` with a client token.
     async fn authenticate(&mut self, token: Vec<u8>) -> Result<AuthOutcome>;
+
+    /// How long one step of the exchange may take.
+    ///
+    /// The round trips are already bounded by whichever timeout the transport
+    /// was built with. This exists for the step that is *not* a round trip:
+    /// asking a caller-supplied [`TokenProvider`] for a token. Awaiting that
+    /// unbounded inside `Connection::connect` would let one stuck token source
+    /// hang a connection attempt for ever, which is the failure this codebase
+    /// spends most of its error handling avoiding.
+    fn step_timeout(&self) -> std::time::Duration;
 }
 
 /// Run a complete SASL exchange. Returns the session lifetime in milliseconds.
@@ -175,7 +269,74 @@ pub(crate) async fn authenticate<T: SaslTransport>(
             client.verify_server_final(&server_final.auth_bytes)?;
             Ok(server_final.session_lifetime_ms)
         }
+        SaslMechanism::OauthBearer => oauth_bearer_exchange(config, transport).await,
     }
+}
+
+/// The OAUTHBEARER half of [`authenticate`], RFC 7628.
+///
+/// One round trip when the token is good, two when it is not — and the second
+/// one is not optional. See [`crate::oauth`].
+async fn oauth_bearer_exchange<T: SaslTransport>(
+    config: &SaslConfig,
+    transport: &mut T,
+) -> Result<i64> {
+    let Some(provider) = config.token_provider.clone() else {
+        return Err(Error::InvalidRequest(
+            "OAUTHBEARER needs a token source; build the configuration with \
+             SaslConfig::oauth_bearer or SaslConfig::oauth_bearer_token"
+                .to_owned(),
+        ));
+    };
+
+    // Asked here rather than at construction, so a re-authentication three
+    // hours in presents a current token instead of the expired one.
+    let step = transport.step_timeout();
+    let started = std::time::Instant::now();
+    let token = match tokio::time::timeout(step, provider.token()).await {
+        Ok(token) => token?,
+        Err(_) => {
+            // Typed as a timeout, so the pool treats it as retriable, and
+            // logged so the line names the thing that is actually stuck — the
+            // error variant has nowhere to say "token source".
+            tracing::warn!(
+                ?step,
+                "the OAUTHBEARER token source did not answer in time; abandoning the exchange"
+            );
+            return Err(Error::Timeout {
+                api_key: crate::api_key::ApiKey::SaslAuthenticate,
+                elapsed: started.elapsed(),
+            });
+        }
+    };
+    let initial = oauth::initial_client_response(&token, &config.extensions)?;
+    let outcome = transport.authenticate(initial).await?;
+    if outcome.auth_bytes.is_empty() {
+        return Ok(outcome.session_lifetime_ms);
+    }
+
+    // A non-empty challenge on a mechanism with one round trip means the token
+    // was refused: the broker has answered with the RFC 7628 JSON failure and
+    // is now waiting for a single %x01 before it will complete the exchange.
+    // Sending it is what turns a hung handshake into an authentication error.
+    let rejection = oauth::TokenRejection::parse(&outcome.auth_bytes);
+    let broker_message = match transport.authenticate(vec![oauth::KVSEP]).await {
+        // The expected path: the broker fails the exchange, which arrives here
+        // as SASL_AUTHENTICATION_FAILED.
+        Err(Error::Authentication(message)) => Some(message),
+        // Anything else — a dead socket, a timeout — is its own problem and
+        // says more about what happened than the challenge does.
+        Err(other) => return Err(other),
+        // A broker that accepts the dummy response has not followed the RFC.
+        // The challenge said the token was rejected, so treat it as rejected.
+        Ok(_) => None,
+    };
+
+    let mut message = format!("broker rejected the OAUTHBEARER token: {rejection}");
+    if let Some(broker) = broker_message.filter(|m| !m.is_empty()) {
+        message.push_str(&format!("; broker said: {broker}"));
+    }
+    Err(Error::Authentication(message))
 }
 
 /// When to re-authenticate, given a session lifetime.
@@ -204,10 +365,48 @@ mod tests {
     struct Fake {
         handshake_mechanisms: Vec<String>,
         tokens_sent: Vec<Vec<u8>>,
-        replies: Vec<AuthOutcome>,
+        replies: Vec<Result<AuthOutcome>>,
+        step_timeout: std::time::Duration,
+    }
+
+    impl Fake {
+        /// A transport offering `mechanism` and nothing queued to say back.
+        fn offering(mechanism: &str) -> Self {
+            Self {
+                handshake_mechanisms: vec![mechanism.to_owned()],
+                tokens_sent: Vec::new(),
+                replies: Vec::new(),
+                step_timeout: std::time::Duration::from_secs(10),
+            }
+        }
+
+        /// Shorten the per-step budget.
+        fn with_step_timeout(mut self, timeout: std::time::Duration) -> Self {
+            self.step_timeout = timeout;
+            self
+        }
+
+        /// Queue a successful reply.
+        fn then_ok(mut self, auth_bytes: &[u8], session_lifetime_ms: i64) -> Self {
+            self.replies.push(Ok(AuthOutcome {
+                auth_bytes: auth_bytes.to_vec(),
+                session_lifetime_ms,
+            }));
+            self
+        }
+
+        /// Queue a failure — what the broker's error code arrives here as.
+        fn then_err(mut self, error: Error) -> Self {
+            self.replies.push(Err(error));
+            self
+        }
     }
 
     impl SaslTransport for Fake {
+        fn step_timeout(&self) -> std::time::Duration {
+            self.step_timeout
+        }
+
         async fn handshake(&mut self, _mechanism: &str) -> Result<Vec<String>> {
             Ok(self.handshake_mechanisms.clone())
         }
@@ -217,20 +416,13 @@ mod tests {
             if self.replies.is_empty() {
                 panic!("more authenticate calls than canned replies");
             }
-            Ok(self.replies.remove(0))
+            self.replies.remove(0)
         }
     }
 
     #[tokio::test]
     async fn plain_sends_the_rfc4616_token_in_one_round_trip() {
-        let mut fake = Fake {
-            handshake_mechanisms: vec!["PLAIN".to_owned()],
-            tokens_sent: Vec::new(),
-            replies: vec![AuthOutcome {
-                auth_bytes: Vec::new(),
-                session_lifetime_ms: 0,
-            }],
-        };
+        let mut fake = Fake::offering("PLAIN").then_ok(&[], 0);
         let cfg = SaslConfig::new(SaslMechanism::Plain, "alice", "s3cret");
         let lifetime = authenticate(&cfg, &mut fake).await.unwrap();
         assert_eq!(lifetime, 0);
@@ -240,11 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_mechanism_the_broker_does_not_offer_fails_before_any_token_is_sent() {
-        let mut fake = Fake {
-            handshake_mechanisms: vec!["SCRAM-SHA-512".to_owned()],
-            tokens_sent: Vec::new(),
-            replies: Vec::new(),
-        };
+        let mut fake = Fake::offering("SCRAM-SHA-512");
         let cfg = SaslConfig::new(SaslMechanism::Plain, "alice", "s3cret");
         let err = authenticate(&cfg, &mut fake).await.unwrap_err();
         assert!(matches!(err, Error::Authentication(_)), "{err:?}");
@@ -274,6 +462,153 @@ mod tests {
     fn config_debug_never_prints_the_password() {
         let cfg = SaslConfig::new(SaslMechanism::Plain, "alice", "hunter2");
         assert!(!format!("{cfg:?}").contains("hunter2"));
+    }
+
+    #[tokio::test]
+    async fn oauth_bearer_authenticates_in_one_round_trip() {
+        let mut fake = Fake::offering("OAUTHBEARER").then_ok(&[], 30_000);
+        let cfg = SaslConfig::oauth_bearer_token("tok.en");
+        let lifetime = authenticate(&cfg, &mut fake).await.unwrap();
+        assert_eq!(lifetime, 30_000);
+        assert_eq!(fake.tokens_sent.len(), 1);
+        assert_eq!(fake.tokens_sent[0], b"n,,\x01auth=Bearer tok.en\x01\x01");
+    }
+
+    #[tokio::test]
+    async fn extensions_ride_along_in_the_initial_response() {
+        let mut fake = Fake::offering("OAUTHBEARER").then_ok(&[], 0);
+        let cfg = SaslConfig::oauth_bearer_token("tok").with_extension("logicalCluster", "lkc-1");
+        authenticate(&cfg, &mut fake).await.unwrap();
+        assert_eq!(
+            fake.tokens_sent[0],
+            b"n,,\x01auth=Bearer tok\x01logicalCluster=lkc-1\x01\x01"
+        );
+    }
+
+    /// The part that gets missed: without the second message the broker never
+    /// answers, and the handshake fails by connect timeout instead of by
+    /// rejection — which a UI renders as "cluster unreachable".
+    #[tokio::test]
+    async fn a_rejected_token_completes_the_x01_exchange_and_reports_the_status() {
+        let challenge = br#"{"status":"invalid_token","scope":"kafka"}"#;
+        let mut fake = Fake::offering("OAUTHBEARER")
+            .then_ok(challenge, 0)
+            .then_err(Error::Authentication("Authentication failed".to_owned()));
+
+        let cfg = SaslConfig::oauth_bearer_token("expired");
+        let err = authenticate(&cfg, &mut fake).await.unwrap_err();
+
+        assert_eq!(fake.tokens_sent.len(), 2, "the %x01 message must be sent");
+        assert_eq!(fake.tokens_sent[1], vec![0x01]);
+        let Error::Authentication(message) = err else {
+            panic!("expected an authentication error, got {err:?}");
+        };
+        assert!(message.contains("status=invalid_token"), "{message}");
+        assert!(message.contains("Authentication failed"), "{message}");
+    }
+
+    /// A dead socket during the failure round trip is a transport problem, and
+    /// dressing it up as "your token is bad" sends the operator to the wrong
+    /// place entirely.
+    #[tokio::test]
+    async fn a_socket_that_dies_mid_rejection_keeps_its_own_error() {
+        let mut fake = Fake::offering("OAUTHBEARER")
+            .then_ok(br#"{"status":"invalid_token"}"#, 0)
+            .then_err(Error::ConnectionClosed {
+                peer: "broker:9093".to_owned(),
+            });
+        let cfg = SaslConfig::oauth_bearer_token("expired");
+        let err = authenticate(&cfg, &mut fake).await.unwrap_err();
+        assert!(matches!(err, Error::ConnectionClosed { .. }), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn every_exchange_asks_the_token_source_again() {
+        // The KIP-368 property, at the level where it is decidable without a
+        // broker: re-authentication runs this same function again, so what
+        // matters is that the token comes from the provider each time rather
+        // than being captured once.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cfg = SaslConfig::oauth_bearer({
+            let calls = calls.clone();
+            move || {
+                let calls = calls.clone();
+                async move { Ok(format!("token-{}", calls.fetch_add(1, Ordering::SeqCst))) }
+            }
+        });
+
+        let mut fake = Fake::offering("OAUTHBEARER")
+            .then_ok(&[], 0)
+            .then_ok(&[], 0);
+        authenticate(&cfg, &mut fake).await.unwrap();
+        authenticate(&cfg, &mut fake).await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fake.tokens_sent[0], b"n,,\x01auth=Bearer token-0\x01\x01");
+        assert_eq!(fake.tokens_sent[1], b"n,,\x01auth=Bearer token-1\x01\x01");
+    }
+
+    #[tokio::test]
+    async fn a_token_source_failure_is_not_reported_as_a_broker_problem() {
+        let cfg = SaslConfig::oauth_bearer(|| async {
+            Err(Error::Unsupported("no token today".to_owned()))
+        });
+        let mut fake = Fake::offering("OAUTHBEARER");
+        let err = authenticate(&cfg, &mut fake).await.unwrap_err();
+        assert!(matches!(err, Error::Unsupported(_)), "{err:?}");
+        assert!(fake.tokens_sent.is_empty());
+    }
+
+    /// A token source that never answers must not hang `Connection::connect`.
+    #[tokio::test]
+    async fn a_token_source_that_never_answers_times_out_rather_than_hanging() {
+        let cfg =
+            SaslConfig::oauth_bearer(|| async { std::future::pending::<Result<String>>().await });
+        // Real time rather than a paused clock: `tokio`'s `test-util` feature
+        // is not in `full`, and 50ms is not worth a dependency change.
+        let mut fake =
+            Fake::offering("OAUTHBEARER").with_step_timeout(std::time::Duration::from_millis(50));
+        let err = authenticate(&cfg, &mut fake).await.unwrap_err();
+        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+        assert!(err.retriable(), "the next attempt may find a live source");
+        assert!(fake.tokens_sent.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oauth_bearer_without_a_token_source_fails_before_the_socket() {
+        // Reachable through `SaslConfig::new`, which has no token to give.
+        let cfg = SaslConfig::new(SaslMechanism::OauthBearer, "", "");
+        let mut fake = Fake::offering("OAUTHBEARER");
+        let err = authenticate(&cfg, &mut fake).await.unwrap_err();
+        assert!(matches!(err, Error::InvalidRequest(_)), "{err:?}");
+        assert!(fake.tokens_sent.is_empty());
+    }
+
+    #[test]
+    fn a_bearer_token_is_gated_on_plaintext_exactly_like_a_password() {
+        let cfg = SaslConfig::oauth_bearer_token("tok");
+        assert!(
+            cfg.check_encryption(false).is_err(),
+            "a token read off the wire is usable until it expires"
+        );
+        assert!(cfg.check_encryption(true).is_ok());
+        assert!(
+            cfg.clone()
+                .allow_plaintext_password()
+                .check_encryption(false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn config_debug_never_prints_the_token_or_its_source() {
+        let cfg = SaslConfig::oauth_bearer_token("eyJhbGciOiJub25lIn0.secret.");
+        let rendered = format!("{cfg:?}");
+        assert!(!rendered.contains("secret"), "{rendered}");
+        assert!(rendered.contains("token_provider: \"<set>\""), "{rendered}");
     }
 
     #[test]

@@ -772,6 +772,11 @@ fn peek_error_code(body: &Bytes) -> Result<i16> {
 }
 
 impl SaslTransport for RawConn<'_> {
+    fn step_timeout(&self) -> Duration {
+        // The handshake budget: this transport only exists during connect.
+        self.config.connect_timeout
+    }
+
     async fn handshake(&mut self, mechanism: &str) -> Result<Vec<String>> {
         let version = version_for::<SaslHandshakeRequest>(&self.versions)?;
         if version < 1 {
@@ -821,6 +826,13 @@ struct ReauthTransport<'a> {
 }
 
 impl SaslTransport for ReauthTransport<'_> {
+    fn step_timeout(&self) -> Duration {
+        // A re-authentication runs alongside live traffic on an established
+        // connection, so it is bounded like a request rather than like a
+        // connect.
+        self.connection.inner.config.request_timeout
+    }
+
     async fn handshake(&mut self, mechanism: &str) -> Result<Vec<String>> {
         let request = SaslHandshakeRequest::default()
             .with_mechanism(StrBytes::from_string(mechanism.to_owned()));

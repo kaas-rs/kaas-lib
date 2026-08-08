@@ -93,5 +93,15 @@ The same argument applies to `cluster(3)`. Retrofitting multi-broker fixtures
 after the fact is painful, and leader spread, log dirs and reassignment are
 not observable on one broker.
 
+It paid off again for `OAUTHBEARER`, which arrived long after: a mechanism,
+one JAAS entry naming
+`OAuthBearerUnsecuredValidatorCallbackHandler`, and `unsecured_jws` to mint
+tokens. That handler is what makes the fixture possible at all — Kafka ships it
+so a broker can validate OAUTHBEARER with no identity provider anywhere, which
+takes the *issuer* out of the picture without taking the broker out of it.
+Note also that OAUTHBEARER is the first mechanism with no users: the principal
+is the token's `sub` claim, so `validate()` now asks whether any *enabled
+mechanism* needs credentials rather than assuming SASL means users.
+
 **Start reading at** `harness.rs` — it is short, and its module docs state
 the conformance-harness argument in full.

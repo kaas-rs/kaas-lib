@@ -9,7 +9,9 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use kafka_conn::{ConnectionConfig, SaslConfig, SaslMechanism, TlsConfig};
+use kafka_conn::{
+    ConnectionConfig, OidcConfig, OidcTokenProvider, SaslConfig, SaslMechanism, TlsConfig,
+};
 use kafka_meta::{ClusterConfig, RetryPolicy};
 
 /// Environment variable holding comma-separated bootstrap addresses.
@@ -25,12 +27,24 @@ pub const CA_PEM_ENV: &str = "KAAS_TEST_CA_PEM";
 pub const CA_FILE_ENV: &str = "KAAS_TEST_CA_FILE";
 /// Name to verify the broker certificate against, overriding the host.
 pub const TLS_SERVER_NAME_ENV: &str = "KAAS_TEST_TLS_SERVER_NAME";
-/// SASL mechanism: `PLAIN`, `SCRAM-SHA-256` or `SCRAM-SHA-512`.
+/// SASL mechanism: `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` or `OAUTHBEARER`.
 pub const SASL_MECHANISM_ENV: &str = "KAAS_TEST_SASL_MECHANISM";
 /// SASL username.
 pub const SASL_USERNAME_ENV: &str = "KAAS_TEST_SASL_USERNAME";
 /// SASL password.
 pub const SASL_PASSWORD_ENV: &str = "KAAS_TEST_SASL_PASSWORD";
+/// `OAUTHBEARER`: a bearer token the caller has already obtained.
+pub const OAUTH_TOKEN_ENV: &str = "KAAS_TEST_OAUTH_TOKEN";
+/// `OAUTHBEARER`: an OIDC token endpoint to fetch tokens from instead.
+pub const OAUTH_TOKEN_ENDPOINT_ENV: &str = "KAAS_TEST_OAUTH_TOKEN_ENDPOINT";
+/// `OAUTHBEARER`: the OAuth client id.
+pub const OAUTH_CLIENT_ID_ENV: &str = "KAAS_TEST_OAUTH_CLIENT_ID";
+/// `OAUTHBEARER`: the OAuth client secret.
+pub const OAUTH_CLIENT_SECRET_ENV: &str = "KAAS_TEST_OAUTH_CLIENT_SECRET";
+/// `OAUTHBEARER`: the scope to request, if the issuer wants one.
+pub const OAUTH_SCOPE_ENV: &str = "KAAS_TEST_OAUTH_SCOPE";
+/// `OAUTHBEARER`: the audience to request, if the issuer wants one.
+pub const OAUTH_AUDIENCE_ENV: &str = "KAAS_TEST_OAUTH_AUDIENCE";
 /// Set to `1` to refuse every mutating api key.
 pub const READ_ONLY_ENV: &str = "KAAS_TEST_READ_ONLY";
 /// Prefix for topics and groups this tool creates.
@@ -208,6 +222,7 @@ fn sasl_from_env() -> Result<Option<SaslConfig>> {
         "PLAIN" => SaslMechanism::Plain,
         "SCRAM-SHA-256" | "SCRAM_SHA_256" => SaslMechanism::ScramSha256,
         "SCRAM-SHA-512" | "SCRAM_SHA_512" => SaslMechanism::ScramSha512,
+        "OAUTHBEARER" => return oauth_bearer_from_env().map(Some),
         other => bail!("unknown {SASL_MECHANISM_ENV}: {other}"),
     };
     let username = std::env::var(SASL_USERNAME_ENV)
@@ -229,6 +244,59 @@ fn sasl_from_env() -> Result<Option<SaslConfig>> {
         config
     };
     Ok(Some(config))
+}
+
+/// `OAUTHBEARER`: either a token the caller already has, or the
+/// `client_credentials` flow against a real issuer.
+///
+/// Both are worth having here. A pre-fetched token is the cheapest way to point
+/// a live run at an OAuth-secured listener; the issuer path is the only way to
+/// exercise the refresh, which is the half that fails hours in rather than at
+/// connect.
+fn oauth_bearer_from_env() -> Result<SaslConfig> {
+    let plaintext = std::env::var(CA_PEM_ENV).is_err() && std::env::var(CA_FILE_ENV).is_err();
+
+    if let Ok(token) = std::env::var(OAUTH_TOKEN_ENV)
+        && !token.trim().is_empty()
+    {
+        let config = SaslConfig::oauth_bearer_token(token.trim());
+        return Ok(if plaintext {
+            config.allow_plaintext_password()
+        } else {
+            config
+        });
+    }
+
+    let endpoint = std::env::var(OAUTH_TOKEN_ENDPOINT_ENV).with_context(|| {
+        format!(
+            "{SASL_MECHANISM_ENV}=OAUTHBEARER needs either {OAUTH_TOKEN_ENV} or \
+             {OAUTH_TOKEN_ENDPOINT_ENV} + {OAUTH_CLIENT_ID_ENV} + {OAUTH_CLIENT_SECRET_ENV}"
+        )
+    })?;
+    let client_id = std::env::var(OAUTH_CLIENT_ID_ENV).with_context(|| {
+        format!("{OAUTH_TOKEN_ENDPOINT_ENV} is set, so {OAUTH_CLIENT_ID_ENV} must be")
+    })?;
+    let client_secret = std::env::var(OAUTH_CLIENT_SECRET_ENV).with_context(|| {
+        format!("{OAUTH_TOKEN_ENDPOINT_ENV} is set, so {OAUTH_CLIENT_SECRET_ENV} must be")
+    })?;
+
+    let oidc = OidcConfig::new(endpoint, client_id, client_secret)
+        .with_maybe_scope(
+            std::env::var(OAUTH_SCOPE_ENV)
+                .ok()
+                .filter(|s| !s.is_empty()),
+        )
+        .with_maybe_audience(
+            std::env::var(OAUTH_AUDIENCE_ENV)
+                .ok()
+                .filter(|s| !s.is_empty()),
+        );
+    let config = SaslConfig::oauth_bearer(OidcTokenProvider::new(oidc)?);
+    Ok(if plaintext {
+        config.allow_plaintext_password()
+    } else {
+        config
+    })
 }
 
 /// Whether `name` was created by a run using `prefix`.

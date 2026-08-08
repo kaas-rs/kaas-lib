@@ -118,19 +118,87 @@ let connection = ConnectionConfig::new()
 # }
 ```
 
-`PLAIN`, `SCRAM-SHA-256` and `SCRAM-SHA-512`.
+`PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` and `OAUTHBEARER`.
 
 **`PLAIN` over a plaintext transport sends a recoverable password in the
 clear**, and the library knows it — that combination requires
 `allow_plaintext_password()` to be called explicitly rather than being
 silently permitted. If you find yourself reaching for it outside a test
-fixture, reach for TLS instead.
+fixture, reach for TLS instead. `OAUTHBEARER` is gated the same way, for the
+same reason: a bearer token read off the wire is usable until it expires.
 
 Re-authentication is automatic. On any cluster with
 `connections.max.reauth.ms` set, the connection re-issues `SaslAuthenticate`
 before the session expires; without that the broker kills the connection and
 the symptom looks like a network fault. See
 [TLS, SASL and re-authentication](../architecture/security.md).
+
+## OAUTHBEARER
+
+A token source, not a token — because re-authentication asks again, on a timer
+this library owns, long after the token you started with has expired:
+
+```rust,no_run
+use kafka_conn::{ConnectionConfig, Result, SaslConfig, TlsConfig};
+
+# async fn fetch_from_your_own_token_service() -> Result<String> { Ok(String::new()) }
+# fn example() {
+let sasl = SaslConfig::oauth_bearer(|| async { fetch_from_your_own_token_service().await });
+
+let connection = ConnectionConfig::new()
+    .with_tls(TlsConfig::system())
+    .with_sasl(sasl);
+# }
+```
+
+Any `Fn() -> impl Future<Output = Result<String>>` will do. Managed clusters
+that select a logical cluster or identity pool through RFC 7628 extensions get
+them with `with_extension("logicalCluster", "lkc-42")`.
+
+`SaslConfig::oauth_bearer_token("eyJ…")` takes one fixed token instead. That is
+right for a CLI run and wrong for a service: the first re-authentication will
+present the same expired token and the broker will close the connection.
+
+### Fetching tokens for yourself
+
+With the `oidc` feature, the library runs `client_credentials` against your
+issuer and refreshes ahead of expiry:
+
+```toml
+kafka-conn = { version = "0.5", features = ["oidc"] }
+```
+
+```rust,no_run
+# #[cfg(feature = "oidc")]
+# fn example() -> kafka_conn::Result<()> {
+use kafka_conn::{ConnectionConfig, OidcConfig, OidcTokenProvider, SaslConfig, TlsConfig};
+
+let provider = OidcTokenProvider::new(
+    OidcConfig::new(
+        "https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token",
+        "<client-id>",
+        std::env::var("OAUTH_CLIENT_SECRET").unwrap_or_default(),
+    )
+    // Entra wants the scope; Keycloak usually wants nothing; Auth0 wants an
+    // audience. All three are optional and none is guessed for you.
+    .with_scope("<client-id>/.default"),
+)?;
+
+let connection = ConnectionConfig::new()
+    .with_tls(TlsConfig::system())
+    .with_sasl(SaslConfig::oauth_bearer(provider));
+# Ok(())
+# }
+```
+
+Share **one** provider across a cluster: it is what keeps every connection on
+one token and one fetch. Handing the same `SaslConfig` to `ClusterConfig` does
+that already.
+
+Two failures worth recognising, because they belong to different systems:
+`Error::TokenEndpoint` means your identity provider would not issue a token,
+and carries its `error_description`; `Error::Authentication` means the broker
+would not accept the one it issued, and carries the RFC 7628 `status`.
 
 ## Read-only clients
 

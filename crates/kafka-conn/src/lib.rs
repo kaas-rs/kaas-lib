@@ -50,6 +50,9 @@ mod config;
 mod conn;
 mod error;
 mod error_code;
+mod oauth;
+#[cfg(feature = "oidc")]
+mod oidc;
 mod rpc;
 mod sasl;
 mod scram;
@@ -64,6 +67,9 @@ pub use config::ConnectionConfig;
 pub use conn::Connection;
 pub use error::{Error, Result};
 pub use error_code::{ErrorCode, KNOWN_ERROR_CODES};
+pub use oauth::{TokenFuture, TokenProvider};
+#[cfg(feature = "oidc")]
+pub use oidc::{OidcConfig, OidcTokenProvider};
 pub use rpc::Rpc;
 pub use sasl::{SaslConfig, SaslMechanism};
 pub use scram::{ScramHash, random_salt, salted_password};

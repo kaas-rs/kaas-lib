@@ -108,29 +108,37 @@ impl TlsConfig {
     }
 
     /// Build a connector.
+    pub fn connector(&self) -> Result<TlsConnector> {
+        Ok(TlsConnector::from(Arc::new(self.rustls_config()?)))
+    }
+
+    /// The underlying rustls configuration.
+    ///
+    /// Separate from [`TlsConfig::connector`] because the OIDC token fetch needs
+    /// the same trust settings for an HTTPS client that is not a Kafka
+    /// connection — one place that decides what this process trusts, rather than
+    /// two that drift.
     ///
     /// The crypto provider is named explicitly rather than left to
     /// `ClientConfig::builder()`, which resolves a process-wide default and can
     /// fail at runtime depending on what else in the binary installed one.
-    pub fn connector(&self) -> Result<TlsConnector> {
+    pub(crate) fn rustls_config(&self) -> Result<RustlsConfig> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let builder = RustlsConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .map_err(|e| Error::Unsupported(format!("rustls protocol versions: {e}")))?
             .with_root_certificates(self.root_store()?);
 
-        let config = match &self.client_certificate {
-            None => builder.with_no_client_auth(),
+        match &self.client_certificate {
+            None => Ok(builder.with_no_client_auth()),
             Some(cert) => {
                 let chain = parse_certs(&cert.chain_pem)?;
                 let key = parse_key(&cert.key_pem)?;
                 builder
                     .with_client_auth_cert(chain, key)
-                    .map_err(|e| Error::Unsupported(format!("client certificate rejected: {e}")))?
+                    .map_err(|e| Error::Unsupported(format!("client certificate rejected: {e}")))
             }
-        };
-
-        Ok(TlsConnector::from(Arc::new(config)))
+        }
     }
 
     /// The name to verify the server against for a given host.

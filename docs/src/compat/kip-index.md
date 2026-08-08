@@ -13,6 +13,7 @@ Each KIP is searchable by number on the
 |---|---|---|
 | KIP-98 | Exactly-once: idempotent producer + transactions | ✅ |
 | KIP-227 | Incremental fetch sessions | ✅ in `kafka-consume` |
+| KIP-255 | SASL/OAUTHBEARER | ✅ RFC 7628, caller-supplied token |
 | KIP-345 | Static consumer membership | ✅ both protocols |
 | KIP-368 | SASL re-authentication | ✅ |
 | KIP-405 | Tiered storage | ⚠️ `-4` sentinel surfaced |
@@ -23,6 +24,7 @@ Each KIP is searchable by number on the
 | KIP-554 | SCRAM admin API | ✅ describe + alter |
 | KIP-699 | Batched `FindCoordinator` | ⚠️ single-key form |
 | KIP-734 | `MAX_TIMESTAMP` sentinel | ✅ `-3` |
+| KIP-768 | OAUTHBEARER with OIDC (`client_credentials`) | ✅ behind the `oidc` feature |
 | KIP-848 | The next-generation consumer rebalance protocol | ✅ describe + membership |
 | KIP-932 | Queues for Kafka (share groups) | ⚠️ describe only |
 | KIP-1005 | `LATEST_TIERED_TIMESTAMP` sentinel | ✅ `-5` |
@@ -119,6 +121,36 @@ Closed by [#10].
 
 [#10]: https://github.com/kaas-rs/kaas-lib/issues/10
 [`ConsumerGroupMetadata`]: https://docs.rs/kafka-meta
+
+### KIP-255 — SASL/OAUTHBEARER ✅ · KIP-768 — OIDC token retrieval ✅
+
+Split across an issue boundary on purpose, because the second half is the one
+that changes the dependency tree.
+
+KIP-255 is the mechanism: RFC 7628's `%x01`-separated initial client response,
+the failure challenge, and a `TokenProvider` the exchange asks again on every
+KIP-368 re-authentication rather than a token captured at construction. No new
+dependencies, and useful on its own to anyone with a token source.
+
+KIP-768 is the `client_credentials` flow: fetch from a token endpoint, cache,
+refresh at 80% of the lifetime. It needs an HTTP client, so it is behind the
+`oidc` cargo feature — a caller who brings its own tokens does not pay for
+`hyper` in the crate everything else here sits on. It decodes no JWTs: the
+token response carries `expires_in`, and an access token is opaque to a client
+by design.
+
+Neither one implements authorization-code or device flows. A Kafka client is a
+machine; when a human is in the loop the token arrives some other way, and
+`SaslConfig::oauth_bearer` takes it.
+
+The framing traps, the second round trip, and why OAuth-over-`PLAIN` is not a
+substitute are in
+[TLS, SASL and re-authentication](../architecture/security.md).
+
+Closed by [#12] and [#13].
+
+[#12]: https://github.com/kaas-rs/kaas-lib/issues/12
+[#13]: https://github.com/kaas-rs/kaas-lib/issues/13
 
 ### KIP-699 — batched `FindCoordinator` ⚠️
 

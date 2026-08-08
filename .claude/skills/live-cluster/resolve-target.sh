@@ -37,7 +37,14 @@ case "$TARGET" in
     echo "export KAAS_TEST_BOOTSTRAP='$BOOTSTRAP'"
     echo "export KAAS_TEST_LABEL='strimzi'"
 
-    if [ "$LISTENER" = "tls" ]; then
+    # Whether *this* listener is encrypted, from the CR rather than from its
+    # name. `tls` is not the only encrypted listener any more — the `internal`
+    # OAUTHBEARER one is SASL_SSL — and keying the CA off the name silently
+    # produced an unencrypted-looking run that then failed in the handshake.
+    LISTENER_TLS=$(kubectl -n "$NS" get kafka "$KAFKA" \
+      -o jsonpath="{.spec.kafka.listeners[?(@.name=='$LISTENER')].tls}")
+
+    if [ "$LISTENER_TLS" = "true" ]; then
       # The cluster CA, which the broker certificates chain to. Written to a
       # file rather than inlined so the PEM's newlines survive.
       CA_FILE="${TMPDIR:-/tmp}/kaas-live-strimzi-ca.pem"
@@ -50,6 +57,15 @@ case "$TARGET" in
     else
       echo "unset KAAS_TEST_CA_FILE"
       echo "unset KAAS_TEST_TLS_SERVER_NAME"
+    fi
+
+    # Say so when the listener authenticates, because the next thing to happen
+    # otherwise is a SASL handshake failure that looks like a broken listener.
+    LISTENER_AUTH=$(kubectl -n "$NS" get kafka "$KAFKA" \
+      -o jsonpath="{.spec.kafka.listeners[?(@.name=='$LISTENER')].authentication.type}")
+    if [ -n "$LISTENER_AUTH" ]; then
+      echo "resolve-target: listener '$LISTENER' authenticates ($LISTENER_AUTH);" \
+           "set KAAS_TEST_SASL_MECHANISM and its credentials yourself" >&2
     fi
     ;;
 
@@ -81,3 +97,5 @@ esac
 # these itself, so an unauthenticated run cannot silently pick up somebody's
 # credentials from a secret it happened to be able to read.
 echo "unset KAAS_TEST_SASL_MECHANISM KAAS_TEST_SASL_USERNAME KAAS_TEST_SASL_PASSWORD"
+echo "unset KAAS_TEST_OAUTH_TOKEN KAAS_TEST_OAUTH_TOKEN_ENDPOINT KAAS_TEST_OAUTH_CLIENT_ID"
+echo "unset KAAS_TEST_OAUTH_CLIENT_SECRET KAAS_TEST_OAUTH_SCOPE KAAS_TEST_OAUTH_AUDIENCE"

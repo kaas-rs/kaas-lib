@@ -60,6 +60,15 @@ practice:
   `connections.max.reauth.ms` around 10 seconds and asserts a connection
   survives past twice that window while still serving requests. The only way
   to prove re-auth works is to let a session expire.
+- **A rejected OAUTHBEARER token** asserts the error carries the broker's
+  `status` *and* that it arrives inside 15 seconds. RFC 7628 needs one more
+  client message before the broker will fail the exchange, so an
+  implementation that skips it does not return a wrong error — it returns
+  nothing until the connect deadline, and only the elapsed-time assertion
+  catches that.
+- **An OAUTHBEARER token source** is asserted to be *asked again* when the
+  session expires, not replayed. Replaying works right up until the token
+  itself expires, which is hours later and on someone else's cluster.
 - **The read-only gate** drives its assertion from `ApiKey::iter` rather than
   a hand-written list, so new protocol keys are covered automatically.
 - **Per-item results** describe 50 topics where 2 do not exist and assert

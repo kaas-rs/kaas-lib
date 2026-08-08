@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-admin"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-conn"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.23.0",
  "bytes",
@@ -1183,6 +1183,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",
+ "serde_json",
  "sha2",
  "stringprep",
  "subtle",
@@ -1195,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-consume"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1211,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-meta"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "bytes",
@@ -1226,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-produce"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "futures",
@@ -1260,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "kafka-read"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2344,8 +2345,9 @@ dependencies = [
 
 [[package]]
 name = "testkit"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
+ "base64 0.23.0",
  "futures",
  "testcontainers",
  "testkit-macros",
@@ -2356,7 +2358,7 @@ dependencies = [
 
 [[package]]
 name = "testkit-macros"
-version = "0.3.0"
+version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -110,6 +110,26 @@ pub enum Error {
     /// A request was malformed before it went out.
     #[error("invalid request: {0}")]
     InvalidRequest(String),
+
+    /// An OAuth token endpoint could not be reached, or refused to issue a
+    /// token.
+    ///
+    /// Deliberately not [`Error::Authentication`]: nothing has been said to a
+    /// broker yet. "Your identity provider rejected our client secret" and "the
+    /// broker rejected the token we got" are different problems with different
+    /// owners, and collapsing them sends an operator to the wrong system.
+    #[error("token endpoint {endpoint} {detail}")]
+    TokenEndpoint {
+        /// The endpoint that was asked, so the message names the system at
+        /// fault.
+        endpoint: String,
+        /// The HTTP status, when there was a response at all. `None` means the
+        /// endpoint was never reached.
+        status: Option<u16>,
+        /// What happened, including the issuer's own `error_description` when it
+        /// sent one.
+        detail: String,
+    },
 }
 
 impl Error {
@@ -162,6 +182,13 @@ impl Error {
                 true
             }
             Error::Broker { code, .. } => code.retriable(),
+            // An endpoint we never reached may come back, and so may one that
+            // is overloaded or rate limiting. One that *refused* — a bad client
+            // secret, an unknown scope — will refuse again.
+            Error::TokenEndpoint { status, .. } => match status {
+                None => true,
+                Some(code) => *code >= 500 || *code == 429,
+            },
             Error::Authorization(_)
             | Error::Authentication(_)
             | Error::Decode { .. }
@@ -242,6 +269,15 @@ impl Clone for Error {
             },
             Error::Unsupported(message) => Error::Unsupported(message.clone()),
             Error::InvalidRequest(message) => Error::InvalidRequest(message.clone()),
+            Error::TokenEndpoint {
+                endpoint,
+                status,
+                detail,
+            } => Error::TokenEndpoint {
+                endpoint: endpoint.clone(),
+                status: *status,
+                detail: detail.clone(),
+            },
         }
     }
 }

@@ -32,11 +32,20 @@ our bug".
 | `UnsupportedApi` | no version of this API is speakable by both ends |
 | `Unsupported` | the caller asked for something this build cannot express |
 | `InvalidRequest` | malformed before it went out |
+| `TokenEndpoint` | an OAuth token endpoint was unreachable or refused to issue a token |
 
 `Decode` is worth calling out separately. Every other variant describes
 something about the cluster or the caller; `Decode` describes a bug in this
 library or a schema that has drifted, and it should be reported rather than
 retried.
+
+`TokenEndpoint` is the same argument applied to a *third* system. "Your
+identity provider rejected our client secret" and "the broker rejected the
+token it issued" are different problems with different owners, so the first is
+not an `Authentication` failure — nothing has been said to a broker yet. It
+carries the endpoint, the issuer's own `error_description`, and the HTTP status
+when there was a response at all: `None` means unreachable, which is retriable,
+where a `401` is not.
 
 ## `ErrorCode` — derived, not transcribed
 
