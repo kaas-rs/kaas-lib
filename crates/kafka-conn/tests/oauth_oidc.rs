@@ -239,7 +239,7 @@ async fn a_dead_endpoint_does_not_invalidate_a_token_that_still_works() {
     let issuer = Issuer::start(Arc::new(|count| match count {
         0 => (
             200,
-            r#"{"access_token":"token-a","expires_in":4}"#.to_owned(),
+            r#"{"access_token":"token-a","expires_in":8}"#.to_owned(),
         ),
         _ => (500, r#"{"error":"temporarily_unavailable"}"#.to_owned()),
     }))
@@ -247,9 +247,12 @@ async fn a_dead_endpoint_does_not_invalidate_a_token_that_still_works() {
     let provider = issuer.provider();
 
     assert_eq!(provider.current_token().await.unwrap(), "token-a");
-    // Past the refresh point (half the lifetime at the earliest, so 2s here)
-    // and well short of the four-second expiry.
-    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    // Between the refresh point (half the lifetime at the earliest, so 4s here)
+    // and the eight-second expiry. The gap either side is deliberately wide: the
+    // assertion below is about *behaviour in that window*, so a runner slow
+    // enough to sleep past the expiry would turn a correct library into a red
+    // test, which `tests/connection.rs` documents this suite having done once.
+    tokio::time::sleep(Duration::from_millis(4_500)).await;
     assert_eq!(
         provider.current_token().await.unwrap(),
         "token-a",

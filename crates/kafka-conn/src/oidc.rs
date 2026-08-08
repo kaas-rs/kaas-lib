@@ -50,6 +50,20 @@ const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 /// refreshing more often than strictly needed.
 const ASSUMED_LIFETIME: Duration = Duration::from_secs(300);
 
+/// Ceiling on a lifetime we will believe.
+///
+/// Two jobs, and the second is why this is a cap rather than a validation
+/// error. An access token that claims a century is not a token to trust for a
+/// century, so capping bounds the claim; and `expires_in` is a number from the
+/// network that ends up added to an `Instant`, where `std`'s `Add` **panics**
+/// on overflow rather than saturating. Bounding it here is what keeps that
+/// arithmetic — the only unchecked arithmetic in this file — safe by
+/// construction, which matters more than the cap's exact value.
+///
+/// A day is far above what any issuer in practice hands out (Entra's is an
+/// hour) and far below anything that can overflow.
+const MAX_LIFETIME: Duration = Duration::from_secs(24 * 60 * 60);
+
 type HttpClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
 /// How to reach an OIDC token endpoint.
@@ -419,6 +433,9 @@ impl OidcTokenProvider {
             took_ms = started.elapsed().as_millis(),
             "fetched an access token"
         );
+        // Safe because `parse_token_response` caps the lifetime at
+        // `MAX_LIFETIME`: `Instant + Duration` panics on overflow, and this is
+        // the one place a number from the network reaches it.
         let now = Instant::now();
         Ok(Cached {
             token,
@@ -509,6 +526,16 @@ fn parse_token_response(endpoint: &str, body: &[u8]) -> Result<(String, Duration
             );
             ASSUMED_LIFETIME
         });
+
+    if lifetime > MAX_LIFETIME {
+        tracing::warn!(
+            endpoint,
+            claimed_s = lifetime.as_secs(),
+            capped_s = MAX_LIFETIME.as_secs(),
+            "token endpoint claimed an implausible lifetime; treating it as capped"
+        );
+        return Ok((token, MAX_LIFETIME));
+    }
 
     Ok((token, lifetime))
 }
@@ -634,6 +661,32 @@ mod tests {
         let (_, lifetime) =
             parse_token_response("e", br#"{"access_token":"t","expires_in":"120"}"#).unwrap();
         assert_eq!(lifetime, Duration::from_secs(120));
+    }
+
+    /// An `expires_in` from the network reaches `Instant + Duration`, which
+    /// **panics** on overflow instead of saturating — so the cap is not a
+    /// nicety, it is the thing standing between a broken issuer and a panicking
+    /// client. The addition is performed here so this test fails loudly if the
+    /// cap is ever removed.
+    #[test]
+    fn an_implausible_expires_in_is_capped_rather_than_panicking() {
+        for body in [
+            format!(r#"{{"access_token":"t","expires_in":{}}}"#, u64::MAX),
+            r#"{"access_token":"t","expires_in":"99999999999999999999"}"#.to_owned(),
+            format!(r#"{{"access_token":"t","expires_in":{}}}"#, 400 * 24 * 3600),
+        ] {
+            let (_, lifetime) = parse_token_response("https://idp/token", body.as_bytes()).unwrap();
+            assert!(lifetime <= MAX_LIFETIME, "{body}: {lifetime:?}");
+            let now = Instant::now();
+            let _ = now + lifetime;
+            let _ = now + usable_lifetime(lifetime, Duration::from_secs(60));
+        }
+
+        // A string that does not parse as a number is "no lifetime given", not
+        // a capped one — the fallback, not the ceiling.
+        let (_, lifetime) =
+            parse_token_response("e", br#"{"access_token":"t","expires_in":"soon"}"#).unwrap();
+        assert_eq!(lifetime, ASSUMED_LIFETIME);
     }
 
     #[test]

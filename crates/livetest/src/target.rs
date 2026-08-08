@@ -254,19 +254,28 @@ fn sasl_from_env() -> Result<Option<SaslConfig>> {
 /// exercise the refresh, which is the half that fails hours in rather than at
 /// connect.
 fn oauth_bearer_from_env() -> Result<SaslConfig> {
-    let plaintext = std::env::var(CA_PEM_ENV).is_err() && std::env::var(CA_FILE_ENV).is_err();
-
-    if let Ok(token) = std::env::var(OAUTH_TOKEN_ENV)
-        && !token.trim().is_empty()
+    let config = match std::env::var(OAUTH_TOKEN_ENV)
+        .ok()
+        .filter(|token| !token.trim().is_empty())
     {
-        let config = SaslConfig::oauth_bearer_token(token.trim());
-        return Ok(if plaintext {
+        Some(token) => SaslConfig::oauth_bearer_token(token.trim()),
+        None => SaslConfig::oauth_bearer(OidcTokenProvider::new(oidc_from_env()?)?),
+    };
+
+    // One gate for both paths, applied once here rather than on each branch: a
+    // bearer token is as reusable as a password, and the two ways of obtaining
+    // one must never disagree about when it may go out in the clear.
+    Ok(
+        if std::env::var(CA_PEM_ENV).is_err() && std::env::var(CA_FILE_ENV).is_err() {
             config.allow_plaintext_password()
         } else {
             config
-        });
-    }
+        },
+    )
+}
 
+/// The `client_credentials` half of [`oauth_bearer_from_env`].
+fn oidc_from_env() -> Result<OidcConfig> {
     let endpoint = std::env::var(OAUTH_TOKEN_ENDPOINT_ENV).with_context(|| {
         format!(
             "{SASL_MECHANISM_ENV}=OAUTHBEARER needs either {OAUTH_TOKEN_ENV} or \
@@ -280,7 +289,7 @@ fn oauth_bearer_from_env() -> Result<SaslConfig> {
         format!("{OAUTH_TOKEN_ENDPOINT_ENV} is set, so {OAUTH_CLIENT_SECRET_ENV} must be")
     })?;
 
-    let oidc = OidcConfig::new(endpoint, client_id, client_secret)
+    Ok(OidcConfig::new(endpoint, client_id, client_secret)
         .with_maybe_scope(
             std::env::var(OAUTH_SCOPE_ENV)
                 .ok()
@@ -290,13 +299,7 @@ fn oauth_bearer_from_env() -> Result<SaslConfig> {
             std::env::var(OAUTH_AUDIENCE_ENV)
                 .ok()
                 .filter(|s| !s.is_empty()),
-        );
-    let config = SaslConfig::oauth_bearer(OidcTokenProvider::new(oidc)?);
-    Ok(if plaintext {
-        config.allow_plaintext_password()
-    } else {
-        config
-    })
+        ))
 }
 
 /// Whether `name` was created by a run using `prefix`.
