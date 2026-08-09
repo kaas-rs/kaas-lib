@@ -74,7 +74,7 @@ pub use rpc::Rpc;
 pub use sasl::{SaslConfig, SaslMechanism};
 pub use scram::{ScramHash, random_salt, salted_password};
 pub use stats::{ConnectionStats, StatsSnapshot};
-pub use tls::{ClientCertificate, TlsConfig, TrustAnchors};
+pub use tls::{ClientCertificate, MinTlsVersion, TlsConfig, TrustAnchors};
 pub use transport::Transport;
 pub use versions::{ApiVersions, BrokerApiVersion, VersionRange, our_range};
 

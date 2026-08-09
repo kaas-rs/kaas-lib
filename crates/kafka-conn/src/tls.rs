@@ -4,7 +4,30 @@
 //! any certificate is worse than one that fails to connect, because the
 //! failure is invisible — so a private CA is configured by handing us the CA,
 //! not by turning verification off.
+//!
+//! Two limits are stated here rather than discovered, because both are silent:
+//!
+//! * **PEM only.** A PKCS#12 (`.p12`) or JKS keystore is not accepted, and the
+//!   Java ecosystem hands those out by default — Strimzi's `KafkaUser` secret
+//!   ships `user.p12` beside the PEMs. Converting is one command:
+//!
+//!   ```sh
+//!   openssl pkcs12 -in user.p12 -nodes -clcerts -out client.pem
+//!   openssl pkcs12 -in user.p12 -nodes -nocerts -out client.key
+//!   ```
+//!
+//!   Bundling a PKCS#12 reader would mean either a C binding or another
+//!   ASN.1 parser in the crate everything else sits on, for a format `openssl`
+//!   already converts; the decision is to document the command.
+//! * **No revocation checking.** No CRLs are supplied to the verifier and OCSP
+//!   stapling is not validated, so a revoked broker certificate is accepted
+//!   until it expires. That is what every mainstream Kafka client does, and it
+//!   is still worth saying out loud: on a cluster with a compliance
+//!   requirement it is the gap. rustls's verifier builder takes CRLs, so
+//!   closing it is a feature rather than a redesign — it wants a caller who
+//!   needs it, and a decision about where the CRLs come from.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 
@@ -48,6 +71,22 @@ impl std::fmt::Debug for ClientCertificate {
     }
 }
 
+/// The oldest TLS version a connection may negotiate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MinTlsVersion {
+    /// TLS 1.2 and 1.3. rustls has no 1.0 or 1.1 to offer, so this is already
+    /// the safe floor and is the default.
+    #[default]
+    Tls12,
+    /// TLS 1.3 only.
+    ///
+    /// A policy choice rather than a correctness one: 1.2 as rustls configures
+    /// it is not broken. Worth having because "TLS 1.3 or fail" is a
+    /// requirement some environments hand down, and the alternative to a knob
+    /// is a caller who cannot express it.
+    Tls13,
+}
+
 /// How to negotiate TLS.
 #[derive(Debug, Clone)]
 pub struct TlsConfig {
@@ -55,12 +94,23 @@ pub struct TlsConfig {
     pub anchors: TrustAnchors,
     /// Client certificate for mutual TLS.
     pub client_certificate: Option<ClientCertificate>,
-    /// Override the name sent in SNI and verified against the certificate.
+    /// Override the name sent in SNI and verified against the certificate, for
+    /// every broker.
     ///
     /// Needed whenever brokers advertise names that do not resolve from where
     /// the client runs — a port-forwarded cluster, or a load balancer in
     /// front of the advertised listeners.
     pub server_name_override: Option<String>,
+    /// Per-host overrides, keyed by the lowercased advertised host, consulted
+    /// before [`TlsConfig::server_name_override`].
+    ///
+    /// One name for a whole pool is right when every broker is reached through
+    /// the same address and wrong the moment they present distinct certificate
+    /// names — a cluster behind one load balancer can otherwise be correct for
+    /// exactly one broker.
+    pub server_names: BTreeMap<String, String>,
+    /// The oldest protocol version to negotiate.
+    pub min_version: MinTlsVersion,
 }
 
 impl Default for TlsConfig {
@@ -69,6 +119,8 @@ impl Default for TlsConfig {
             anchors: TrustAnchors::System,
             client_certificate: None,
             server_name_override: None,
+            server_names: BTreeMap::new(),
+            min_version: MinTlsVersion::Tls12,
         }
     }
 }
@@ -87,6 +139,21 @@ impl TlsConfig {
         }
     }
 
+    /// Trust the system store *and* the given PEM bundle.
+    ///
+    /// The normal shape for a corporate CA that issues the broker certificates
+    /// while the same process also talks to public endpoints — an OIDC issuer,
+    /// most obviously, which shares this trust configuration. Prefer
+    /// [`TlsConfig::with_ca_pem`] where the cluster's CA is the only one that
+    /// should ever be accepted: this variant means a public CA can vouch for a
+    /// broker too.
+    pub fn with_system_and_ca_pem(pem: impl Into<Vec<u8>>) -> Self {
+        Self {
+            anchors: TrustAnchors::SystemAndPem(pem.into()),
+            ..Self::default()
+        }
+    }
+
     /// Present a client certificate.
     pub fn with_client_certificate(
         mut self,
@@ -100,10 +167,38 @@ impl TlsConfig {
         self
     }
 
-    /// Override the name used for SNI and hostname verification.
+    /// Override the name used for SNI and hostname verification, for every
+    /// broker.
     #[must_use]
     pub fn with_server_name(mut self, name: impl Into<String>) -> Self {
         self.server_name_override = Some(name.into());
+        self
+    }
+
+    /// Override the name used for one advertised host.
+    ///
+    /// Additive: call it once per broker. Consulted before
+    /// [`TlsConfig::with_server_name`], so a blanket override can stand as the
+    /// default with named exceptions on top of it.
+    ///
+    /// `host` is matched against the host part of the address the pool dials —
+    /// the advertised listener — case-insensitively, and it is *not* the name
+    /// being verified. The two being different is the entire point.
+    #[must_use]
+    pub fn with_server_name_for(
+        mut self,
+        host: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        self.server_names
+            .insert(host.into().to_ascii_lowercase(), name.into());
+        self
+    }
+
+    /// Require a minimum protocol version.
+    #[must_use]
+    pub fn with_min_tls_version(mut self, version: MinTlsVersion) -> Self {
+        self.min_version = version;
         self
     }
 
@@ -124,8 +219,12 @@ impl TlsConfig {
     /// fail at runtime depending on what else in the binary installed one.
     pub(crate) fn rustls_config(&self) -> Result<RustlsConfig> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let builder = RustlsConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
+        let versions = RustlsConfig::builder_with_provider(provider);
+        let versions = match self.min_version {
+            MinTlsVersion::Tls12 => versions.with_safe_default_protocol_versions(),
+            MinTlsVersion::Tls13 => versions.with_protocol_versions(&[&rustls::version::TLS13]),
+        };
+        let builder = versions
             .map_err(|e| Error::Unsupported(format!("rustls protocol versions: {e}")))?
             .with_root_certificates(self.root_store()?);
 
@@ -142,8 +241,16 @@ impl TlsConfig {
     }
 
     /// The name to verify the server against for a given host.
+    ///
+    /// Most specific first: a per-host entry, then the blanket override, then
+    /// the host itself.
     pub fn server_name(&self, host: &str) -> Result<ServerName<'static>> {
-        let name = self.server_name_override.as_deref().unwrap_or(host);
+        let name = self
+            .server_names
+            .get(&host.to_ascii_lowercase())
+            .map(String::as_str)
+            .or(self.server_name_override.as_deref())
+            .unwrap_or(host);
         ServerName::try_from(name.to_owned())
             .map_err(|e| Error::InvalidRequest(format!("invalid TLS server name {name:?}: {e}")))
     }
@@ -196,6 +303,62 @@ impl TlsConfig {
     }
 }
 
+/// Classify a socket failure that might be the peer refusing our identity.
+///
+/// A mutual-TLS listener that will not accept us reports it as a TLS *alert*,
+/// which arrives here as an ordinary `io::Error` and would otherwise be
+/// [`Error::Transport`] — "the cluster is unreachable", which is the wrong
+/// screen, the wrong owner and the wrong next step. It is a credential
+/// problem, and the taxonomy exists to say so.
+///
+/// Note where this has to be called from. Under TLS 1.3 the client certificate
+/// goes out *after* the server's Finished, so `connect` returns successfully
+/// and the rejection lands on the first read — which is the `ApiVersions`
+/// handshake, not the TLS one.
+pub(crate) fn handshake_error(
+    context: &'static str,
+    error: io::Error,
+    has_client_certificate: bool,
+) -> Error {
+    use rustls::AlertDescription as Alert;
+
+    let alert = error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<rustls::Error>())
+        .and_then(|rustls| match rustls {
+            rustls::Error::AlertReceived(alert) => Some(*alert),
+            _ => None,
+        });
+
+    let Some(alert) = alert else {
+        return Error::transport(context, error);
+    };
+
+    match (alert, has_client_certificate) {
+        (Alert::CertificateRequired, false) => Error::Authentication(
+            "the broker requires a client certificate and none is configured; supply one \
+             with TlsConfig::with_client_certificate"
+                .to_owned(),
+        ),
+        (
+            Alert::CertificateRequired
+            | Alert::BadCertificate
+            | Alert::UnsupportedCertificate
+            | Alert::CertificateRevoked
+            | Alert::CertificateExpired
+            | Alert::CertificateUnknown
+            | Alert::UnknownCA
+            | Alert::AccessDenied,
+            _,
+        ) => Error::Authentication(format!(
+            "the broker rejected our TLS client certificate: {alert:?}. Check that it is \
+             issued by the CA the listener trusts — a broker's *clients* CA is usually not \
+             the CA its own certificate chains to"
+        )),
+        _ => Error::transport(context, error),
+    }
+}
+
 fn parse_certs(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
     let mut reader = io::BufReader::new(pem);
     rustls_pemfile::certs(&mut reader)
@@ -205,9 +368,37 @@ fn parse_certs(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
 
 fn parse_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>> {
     let mut reader = io::BufReader::new(pem);
-    rustls_pemfile::private_key(&mut reader)
+    let parsed = rustls_pemfile::private_key(&mut reader);
+    // Checked before the underlying result is rendered, because an encrypted
+    // key reaches here as either arm depending on which of the two forms it is
+    // in, and "your key has a passphrase" is the useful sentence in both.
+    if let Some(message) = encrypted_key_message(pem) {
+        return Err(Error::InvalidRequest(message));
+    }
+    parsed
         .map_err(|e| Error::InvalidRequest(format!("could not parse private key PEM: {e}")))?
         .ok_or_else(|| Error::InvalidRequest("private key PEM contained no key".to_owned()))
+}
+
+/// Say *why* there is no usable key, when the bytes can tell us.
+///
+/// `rustls_pemfile::private_key` skips the sections it cannot use and reports
+/// the absence, not the reason — so a passphrase-protected key, which is what
+/// `openssl genpkey -aes-256-cbc` produces and what a careful operator is most
+/// likely to be holding, arrives as "contained no key" and sends them off to
+/// look for a missing file.
+fn encrypted_key_message(pem: &[u8]) -> Option<String> {
+    const ENCRYPTED: &[u8] = b"BEGIN ENCRYPTED PRIVATE KEY";
+    // `Proc-Type: 4,ENCRYPTED` is the older, PEM-level encryption openssl
+    // still emits for traditional-format keys.
+    const LEGACY_ENCRYPTED: &[u8] = b"Proc-Type: 4,ENCRYPTED";
+
+    let contains = |needle: &[u8]| pem.windows(needle.len()).any(|window| window == needle);
+    (contains(ENCRYPTED) || contains(LEGACY_ENCRYPTED)).then(|| {
+        "the private key PEM is passphrase-encrypted, which this client cannot decrypt; \
+         decrypt it first with `openssl pkcs8 -topk8 -nocrypt -in key.pem -out key.pk8.pem`"
+            .to_owned()
+    })
 }
 
 #[cfg(test)]
@@ -234,6 +425,141 @@ mod tests {
         // An address that is not a valid DNS name or IP is an error, not a
         // silently-skipped verification.
         assert!(cfg.server_name("not a host name").is_err());
+    }
+
+    #[test]
+    fn a_per_host_name_beats_the_blanket_override() {
+        let cfg = TlsConfig::system()
+            .with_server_name("broker.internal")
+            .with_server_name_for("10.0.0.2", "broker-2.internal");
+
+        let named = cfg.server_name("10.0.0.2").expect("valid name");
+        assert!(format!("{named:?}").contains("broker-2.internal"));
+        // Everything else still falls through to the blanket override, so the
+        // map is exceptions rather than an all-or-nothing switch.
+        let other = cfg.server_name("10.0.0.9").expect("valid name");
+        assert!(format!("{other:?}").contains("broker.internal"));
+    }
+
+    #[test]
+    fn a_per_host_name_matches_the_host_case_insensitively() {
+        let cfg =
+            TlsConfig::system().with_server_name_for("Broker-1.Example.COM", "broker.internal");
+        let name = cfg.server_name("broker-1.example.com").expect("valid name");
+        assert!(format!("{name:?}").contains("broker.internal"));
+    }
+
+    /// The message an operator reads when their key has a passphrase. Naming
+    /// the case is the whole fix — the old one sent them looking for a file
+    /// that was right there.
+    #[test]
+    fn an_encrypted_private_key_says_so() {
+        let key =
+            b"-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIB\n-----END ENCRYPTED PRIVATE KEY-----\n";
+        let err = parse_key(key).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("passphrase-encrypted"), "{message}");
+        assert!(message.contains("openssl pkcs8"), "{message}");
+
+        // The legacy header openssl still writes for traditional-format keys.
+        let legacy = b"-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,00\n\nAAAA\n-----END RSA PRIVATE KEY-----\n";
+        assert!(
+            parse_key(legacy)
+                .unwrap_err()
+                .to_string()
+                .contains("passphrase-encrypted")
+        );
+
+        // And a PEM that genuinely has no key still says that, rather than
+        // blaming a passphrase for every failure.
+        let none = b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+        assert!(
+            parse_key(none)
+                .unwrap_err()
+                .to_string()
+                .contains("contained no key")
+        );
+    }
+
+    #[test]
+    fn requiring_tls13_builds_a_connector() {
+        // The negotiated version is a broker-facing property and belongs in the
+        // acceptance suite; what is decidable here is that the configuration is
+        // one rustls accepts rather than one that fails at connect.
+        let cfg = TlsConfig::system().with_min_tls_version(MinTlsVersion::Tls13);
+        assert_eq!(cfg.min_version, MinTlsVersion::Tls13);
+        assert!(cfg.connector().is_ok());
+    }
+
+    #[test]
+    fn system_and_pem_is_reachable_without_touching_the_field() {
+        // The gap this closes: `SystemAndPem` existed as a variant with no
+        // constructor, so the documented shape — a corporate CA beside the
+        // public ones — was reachable only by assigning to the public field.
+        let cfg = TlsConfig::with_system_and_ca_pem(b"not a certificate".to_vec());
+        assert!(matches!(cfg.anchors, TrustAnchors::SystemAndPem(_)));
+        // Still validated: an unusable bundle fails rather than quietly leaving
+        // the system store to carry the connection.
+        assert!(cfg.connector().is_err());
+    }
+
+    /// A listener that will not accept us is a credential problem, and
+    /// [`Error::Transport`] renders it as "the cluster is unreachable" — the
+    /// wrong screen, and a wrong answer that a live run took four retries and
+    /// two minutes to produce.
+    #[test]
+    fn a_rejected_certificate_is_an_authentication_failure_not_a_transport_one() {
+        let alert = |description| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                rustls::Error::AlertReceived(description),
+            )
+        };
+
+        // Nothing presented, and the broker wanted one. The message has to name
+        // the fix; the alert on its own names only the symptom.
+        let err = handshake_error(
+            "reading handshake response",
+            alert(rustls::AlertDescription::CertificateRequired),
+            false,
+        );
+        let Error::Authentication(message) = &err else {
+            panic!("expected an authentication error, got {err:?}");
+        };
+        assert!(message.contains("with_client_certificate"), "{message}");
+
+        // Presented and refused — most often issued by the wrong CA, which is
+        // easy on a cluster with a separate clients CA.
+        for description in [
+            rustls::AlertDescription::UnknownCA,
+            rustls::AlertDescription::BadCertificate,
+            rustls::AlertDescription::CertificateExpired,
+            rustls::AlertDescription::AccessDenied,
+        ] {
+            let err = handshake_error("TLS handshake", alert(description), true);
+            assert!(
+                matches!(err, Error::Authentication(_)),
+                "{description:?}: {err:?}"
+            );
+        }
+
+        // A genuinely broken socket keeps its own variant: a UI that renders a
+        // dead network as "check your certificate" is the same mistake in the
+        // other direction.
+        let err = handshake_error(
+            "TLS handshake",
+            io::Error::from(io::ErrorKind::ConnectionReset),
+            true,
+        );
+        assert!(matches!(err, Error::Transport { .. }), "{err:?}");
+
+        // And so does an alert that says nothing about identity.
+        let err = handshake_error(
+            "TLS handshake",
+            alert(rustls::AlertDescription::ProtocolVersion),
+            true,
+        );
+        assert!(matches!(err, Error::Transport { .. }), "{err:?}");
     }
 
     #[test]

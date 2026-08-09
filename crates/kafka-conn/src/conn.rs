@@ -472,10 +472,9 @@ async fn open(addr: &str, config: &ConnectionConfig) -> Result<Transport> {
             let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
             let connector = tls.connector()?;
             let server_name = tls.server_name(host)?;
-            let stream = connector
-                .connect(server_name, tcp)
-                .await
-                .map_err(|e| Error::transport("TLS handshake", e))?;
+            let stream = connector.connect(server_name, tcp).await.map_err(|e| {
+                crate::tls::handshake_error("TLS handshake", e, tls.client_certificate.is_some())
+            })?;
             Ok(Transport::Tls(Box::new(stream)))
         }
     }
@@ -669,7 +668,20 @@ impl RawConn<'_> {
             .ok_or_else(|| Error::ConnectionClosed {
                 peer: self.peer.to_owned(),
             })?
-            .map_err(|e| Error::transport("reading handshake response", e))?;
+            .map_err(|e| {
+                // The read where a mutual-TLS rejection actually lands: under
+                // TLS 1.3 our certificate goes out after the server's Finished,
+                // so the alert arrives on the first read rather than during the
+                // handshake that caused it.
+                crate::tls::handshake_error(
+                    "reading handshake response",
+                    e,
+                    self.config
+                        .tls
+                        .as_ref()
+                        .is_some_and(|tls| tls.client_certificate.is_some()),
+                )
+            })?;
         self.stats.record_received(frame.len() + 4);
 
         let frame = frame.freeze();
