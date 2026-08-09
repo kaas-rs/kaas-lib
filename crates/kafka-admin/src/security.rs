@@ -735,17 +735,32 @@ impl Admin {
     /// Describe stored SCRAM credentials.
     ///
     /// `None` describes every user.
+    ///
+    /// "Every user" is sent as an **empty list, not a null one**, even though
+    /// the schema nulls the field and the two mean the same thing to a broker
+    /// that reads them. A null there is a live NPE in Apache Kafka 4.3.1: the
+    /// authorized path handles it, and the *unauthorized* path builds its error
+    /// response with `data.users().forEach(…)`, which throws before anything is
+    /// written. The broker logs "Unexpected error handling request" and sends
+    /// nothing at all, so the client waits out its request timeout, retries into
+    /// the same wall, and reports a cluster that looks unreachable — for a call
+    /// whose honest answer is `CLUSTER_AUTHORIZATION_FAILED`.
+    ///
+    /// Java's `AdminClient` sends the empty list, which is why this has stayed
+    /// unfound. Matching it costs nothing and is the difference between a
+    /// legible permission error and a hung describe. Found against a live
+    /// cluster by `livetest probe` as an unprivileged principal.
     pub async fn describe_scram_credentials(
         &self,
         users: Option<Vec<String>>,
     ) -> Result<PerItem<String, Vec<ScramCredentialInfo>>> {
-        let request =
-            DescribeUserScramCredentialsRequest::default().with_users(users.map(|users| {
-                users
-                    .into_iter()
-                    .map(|user| UserName::default().with_name(StrBytes::from_string(user)))
-                    .collect()
-            }));
+        let request = DescribeUserScramCredentialsRequest::default().with_users(Some(
+            users
+                .unwrap_or_default()
+                .into_iter()
+                .map(|user| UserName::default().with_name(StrBytes::from_string(user)))
+                .collect(),
+        ));
 
         let response = self.cluster().send_any(request).await?;
         if let Some(code) = ErrorCode::from_code(response.error_code) {
