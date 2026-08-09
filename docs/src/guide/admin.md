@@ -170,6 +170,7 @@ and `delete_acls` are per-item like everything else.
 let cluster = admin.describe_cluster().await?;
 let dirs = admin.describe_all_log_dirs().await?;
 let sizes = admin.topic_sizes().await?;
+let one = admin.topic_size("orders").await?;
 # Ok(())
 # }
 ```
@@ -178,6 +179,56 @@ let sizes = admin.topic_sizes().await?;
 **It does not double-count replicas** — an RF=3 topic reports its single-replica
 size, not three times it, and there is an acceptance test asserting exactly
 that because getting it wrong produces a plausible-looking number.
+
+`topic_size` is the same join for one topic: metadata for that topic rather
+than the cluster, and a `DescribeLogDirs` naming its partitions rather than
+asking each broker for everything it holds. The fan-out itself stays — a log
+directory belongs to a broker — but nothing else about the call is
+cluster-sized. It errors on a topic that does not exist rather than reporting
+it as empty.
+
+Both return the same `TopicSize`, and it carries the detail the fan-out
+already collected rather than only the totals:
+
+```rust,no_run
+# use kafka_admin::Admin;
+# async fn example(admin: &Admin) -> kafka_admin::Result<()> {
+let size = admin.topic_size("orders").await?;
+
+// Which partition is the big one *on disk*, rather than by record count.
+let biggest = size
+    .partitions
+    .iter()
+    .max_by_key(|partition| partition.replicated_bytes);
+
+// Which broker holds the big copy of it, and how far behind that copy is.
+for replica in &size.replicas {
+    println!(
+        "p{} on {} in {}: {} bytes, lag {}{}{}",
+        replica.partition,
+        replica.node_id,
+        replica.log_dir,
+        replica.size_bytes,
+        replica.offset_lag,
+        if replica.is_leader { " (leader)" } else { "" },
+        if replica.is_future { " (moving)" } else { "" },
+    );
+}
+# let _ = biggest;
+# Ok(())
+# }
+```
+
+Two things worth knowing about `replicas`. Its length is the log-dir **entry**
+count — `DescribeLogDirs` does not report segment files at all, so a "segment
+count" taken from it is a replica count under another name. And future
+replicas appear in it, flagged, so a directory move in flight is visible;
+they stay out of every total, because counting them makes a topic appear to
+grow during a reassignment and shrink again afterwards.
+
+`TopicSize`, `PartitionSize` and `ReplicaSize` are `#[non_exhaustive]`: this
+call collects more than any one caller wants, and the field set has grown once
+already.
 
 ## Partitions and transactions
 

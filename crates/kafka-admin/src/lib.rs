@@ -68,7 +68,7 @@ pub use transactions::{ProducerState, TransactionDescription, TransactionListing
 pub use types::{
     AlterOp, ClusterBroker, ClusterDescription, ConfigChange, ConfigEntry, ConfigResource,
     ConfigResourceType, ConfigSource, CreatedTopic, ListedOffset, LogDir, LogDirReplica, NewTopic,
-    OffsetSpec, PerItem, TopicSize, errs, oks,
+    OffsetSpec, PartitionSize, PerItem, ReplicaSize, TopicSize, errs, oks,
 };
 
 pub use kafka_conn::{ApiKey, Error, ErrorCode, Result};

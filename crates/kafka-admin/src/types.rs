@@ -400,7 +400,16 @@ pub struct LogDirReplica {
 }
 
 /// A topic's size on disk.
+///
+/// Everything here comes out of one `DescribeLogDirs` fan-out joined against
+/// the metadata snapshot, so the detail costs no extra round trip: it is the
+/// same bytes, aggregated at four altitudes rather than one.
+///
+/// `#[non_exhaustive]` because that fan-out reports more than any one caller
+/// wants and the field set has grown once already. Callers read these fields;
+/// only this crate builds one.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TopicSize {
     /// Topic name.
     pub topic: String,
@@ -410,8 +419,74 @@ pub struct TopicSize {
     /// Physical size: every replica on every broker, which is what the disks
     /// actually hold.
     pub replicated_bytes: i64,
-    /// Per-partition logical sizes.
-    pub partitions: Vec<(i32, i64)>,
+    /// Per-partition sizes, in partition-index order.
+    ///
+    /// One entry per partition *some broker reported a copy of*, which is not
+    /// quite the same as one entry per partition: a partition whose every
+    /// holder failed the describe is absent rather than zero.
+    pub partitions: Vec<PartitionSize>,
+    /// One row per log-directory entry, ordered by partition, then broker,
+    /// then directory.
+    ///
+    /// `replicas.len()` is the entry count, and an entry is *one replica in
+    /// one directory* — `DescribeLogDirs` does not report segment files at
+    /// all, so a "segment count" taken from here is a replica count under
+    /// another name. Worth knowing before labelling it in a UI.
+    ///
+    /// Future replicas appear here, flagged, rather than being dropped: a
+    /// directory move in flight is worth showing, and it is deliberately
+    /// invisible in every total above.
+    pub replicas: Vec<ReplicaSize>,
+}
+
+/// One partition's share of a [`TopicSize`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PartitionSize {
+    /// Partition index.
+    pub partition: i32,
+    /// The leader's copy — this partition's share of
+    /// [`TopicSize::logical_bytes`].
+    ///
+    /// Zero when no reported copy was the leader's: a leaderless partition, or
+    /// a leader whose describe failed. Read it against `replicated_bytes`
+    /// before rendering it as "empty".
+    pub logical_bytes: i64,
+    /// Every non-future copy summed — what the disks hold for this partition.
+    ///
+    /// The figure a "which partition is the big one" question wants, where
+    /// `logical_bytes` answers "how big is this topic".
+    pub replicated_bytes: i64,
+}
+
+/// One replica of one partition, in one log directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReplicaSize {
+    /// The broker holding this copy.
+    pub node_id: i32,
+    /// Partition index.
+    pub partition: i32,
+    /// The directory the copy lives in.
+    ///
+    /// Part of the row's identity rather than decoration: on a JBOD broker the
+    /// same partition appears twice — once per directory — while a copy moves
+    /// between disks, and `(node_id, partition)` alone cannot tell those two
+    /// rows apart.
+    pub log_dir: String,
+    /// Bytes on disk for this copy.
+    pub size_bytes: i64,
+    /// How far behind the leader this copy is, in offsets.
+    pub offset_lag: i64,
+    /// Whether this is a future replica — the destination of a directory move,
+    /// not yet the live copy. Excluded from every total in [`TopicSize`].
+    pub is_future: bool,
+    /// Whether the broker holding this copy leads the partition, according to
+    /// the metadata snapshot the sizes were joined against.
+    ///
+    /// Reported so a caller does not have to fetch metadata a second time to
+    /// tell a logical byte from a replicated one.
+    pub is_leader: bool,
 }
 
 /// Broker and cluster identity, from `DescribeCluster`.

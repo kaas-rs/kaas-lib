@@ -260,6 +260,47 @@ async fn per_topic_size_on_rf3_is_the_single_replica_size_not_three_times_it() {
         size.logical_bytes,
         size.replicated_bytes
     );
+
+    // The detail the same fan-out already collected: one row per log-dir
+    // entry, which for 3 partitions at RF=3 is nine copies on three brokers.
+    assert_eq!(size.replicas.len(), 9, "{:?}", size.replicas);
+    assert_eq!(
+        size.replicas.iter().filter(|r| r.is_leader).count(),
+        3,
+        "one copy per partition is the leader's"
+    );
+    assert!(
+        size.replicas.iter().all(|r| !r.is_future),
+        "nothing is being moved between directories here"
+    );
+    assert_eq!(
+        size.replicas.iter().map(|r| r.size_bytes).sum::<i64>(),
+        size.replicated_bytes,
+        "the rows and the total are the same bytes"
+    );
+    for partition in &size.partitions {
+        assert!(
+            partition.replicated_bytes >= partition.logical_bytes,
+            "{partition:?}"
+        );
+        assert!(partition.logical_bytes > 0, "{partition:?}");
+    }
+
+    // The single-topic entry point asks a scoped `DescribeLogDirs` rather than
+    // aggregating the cluster, and has to arrive at the same numbers.
+    let one = admin.topic_size("sized").await.unwrap();
+    assert_eq!(one.logical_bytes, size.logical_bytes);
+    assert_eq!(one.replicated_bytes, size.replicated_bytes);
+    assert_eq!(one.partitions, size.partitions);
+    assert_eq!(one.replicas, size.replicas);
+
+    // And a topic that does not exist is an error rather than a topic of no
+    // size, which is the one answer a size call must not invent.
+    let missing = admin.topic_size("no-such-topic").await;
+    assert_eq!(
+        missing.err().and_then(|error| error.code()),
+        Some(ErrorCode::UnknownTopicOrPartition)
+    );
 }
 
 #[testkit::integration_test]

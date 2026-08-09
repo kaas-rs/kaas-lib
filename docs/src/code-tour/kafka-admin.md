@@ -9,14 +9,14 @@ through `Cluster`, convert the response back.
 | File | Lines | What |
 |---|---|---|
 | `groups.rs` | 1,100 | the four group kinds, offsets, offset reset |
-| `security.rs` | 956 | ACLs, quotas, SCRAM credentials |
+| `security.rs` | 986 | ACLs, quotas, SCRAM credentials |
+| `types.rs` | 600 | the owned vocabulary — `PerItem`, configs, offsets, log dirs |
+| `cluster_info.rs` | 587 | `DescribeCluster`, log dirs, topic sizes |
 | `topics.rs` | 575 | create, delete, describe, `DeleteRecords` |
-| `types.rs` | 524 | the owned vocabulary — `PerItem`, configs, offsets, log dirs |
 | `transactions.rs` | 306 | list/describe transactions, describe producers |
 | `partitions.rs` | 296 | reassignments, leader election |
 | `configs.rs` | 252 | describe and incrementally alter |
 | `offsets.rs` | 235 | `ListOffsets` and the six sentinels |
-| `cluster_info.rs` | 235 | `DescribeCluster`, log dirs, topic sizes |
 | `admin.rs` | 85 | the `Admin` handle |
 
 ## `PerItem` is the whole API shape
