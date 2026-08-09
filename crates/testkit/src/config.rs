@@ -201,6 +201,7 @@ pub struct BrokerConfig {
     mechanisms: Vec<SaslMechanism>,
     users: Vec<SaslUser>,
     authorizer: bool,
+    super_users: Vec<String>,
     auto_create_topics: bool,
     share_groups: bool,
     properties: Vec<(String, String)>,
@@ -218,6 +219,7 @@ impl Default for BrokerConfig {
             mechanisms: Vec::new(),
             users: Vec::new(),
             authorizer: false,
+            super_users: Vec::new(),
             // Kafka's own default is `true`. We invert it because a fixture
             // that creates topics behind the test's back turns "assert this
             // topic does not exist" into a coin flip — and M4's acceptance
@@ -278,6 +280,23 @@ impl BrokerConfig {
     #[must_use]
     pub fn with_authorizer(mut self, enabled: bool) -> Self {
         self.authorizer = enabled;
+        self
+    }
+
+    /// Add a principal to `super.users`.
+    ///
+    /// The configured SASL users and `User:ANONYMOUS` are already there. This
+    /// is for a principal the fixture cannot infer, and there is exactly one:
+    /// an `OAUTHBEARER` client authenticates as its token's `sub` claim, which
+    /// is a value only the test knows.
+    ///
+    /// Takes a bare name — `dana`, not `User:dana`. Kafka's own
+    /// `super.users` wants the `User:` prefix and it is added here, because
+    /// getting that wrong produces a principal that matches nothing and denies
+    /// everything, which is the failure this setter exists to prevent.
+    #[must_use]
+    pub fn with_super_user(mut self, principal: impl Into<String>) -> Self {
+        self.super_users.push(principal.into());
         self
     }
 
@@ -373,6 +392,17 @@ impl BrokerConfig {
         {
             return Err(Error::config(
                 "SASL security was requested but no user was configured",
+            ));
+        }
+        if self.authorizer
+            && self.super_users.is_empty()
+            && self.mechanisms.iter().any(|m| !m.needs_users())
+        {
+            return Err(Error::config(
+                "an authorizer with OAUTHBEARER denies everything: the principal is the \
+                 token's `sub` claim, so the fixture cannot derive it and super.users ends \
+                 up naming only User:ANONYMOUS. Name the subject with \
+                 BrokerConfig::with_super_user",
             ));
         }
         if !self.security.needs_sasl() && !self.mechanisms.is_empty() {
@@ -514,6 +544,13 @@ impl BrokerConfig {
             set("allow.everyone.if.no.acl.found", "false".to_owned());
             let mut supers = vec!["User:ANONYMOUS".to_owned()];
             supers.extend(self.users.iter().map(|u| format!("User:{}", u.name)));
+            // OAUTHBEARER has no users to derive a principal from — the
+            // principal is the token's `sub` — so without this the super user
+            // list is `User:ANONYMOUS` and nothing else, and every request from
+            // an authenticated client is denied for a reason that has nothing
+            // to do with the test. `validate` refuses that combination; this is
+            // where the answer it demands is used.
+            supers.extend(self.super_users.iter().map(|name| format!("User:{name}")));
             set("super.users", supers.join(";"));
         }
 
@@ -674,6 +711,42 @@ mod tests {
             ]
         );
         assert!(rendered.contains("ssl.keystore.location="));
+    }
+
+    /// The trap: `super.users` is derived from the configured *users*, and an
+    /// OAUTHBEARER fixture has none, so the first authorizer test written
+    /// against one would be denied everything with no hint that the principal
+    /// is the problem.
+    #[test]
+    fn an_authorizer_with_oauthbearer_demands_the_token_subject() {
+        let unnamed = BrokerConfig::new()
+            .with_security(Security::SaslPlaintext)
+            .with_mechanism(SaslMechanism::OauthBearer)
+            .with_authorizer(true);
+        let err = unnamed.validate().unwrap_err().to_string();
+        assert!(err.contains("with_super_user"), "{err}");
+
+        let named = unnamed.with_super_user("dana");
+        named.validate().unwrap();
+        let rendered = props(&named);
+        assert!(
+            rendered.contains("super.users=User:ANONYMOUS;User:dana"),
+            "{rendered}"
+        );
+    }
+
+    /// A password mechanism derives its principals from its users, so it is
+    /// unaffected — the check must not turn every authorizer fixture into one
+    /// that needs a super user spelled out.
+    #[test]
+    fn a_password_mechanism_still_derives_its_super_users() {
+        let cfg = BrokerConfig::new()
+            .with_security(Security::SaslPlaintext)
+            .with_mechanism(SaslMechanism::ScramSha256)
+            .with_user("alice", "alice-pw")
+            .with_authorizer(true);
+        cfg.validate().unwrap();
+        assert!(props(&cfg).contains("super.users=User:ANONYMOUS;User:alice"));
     }
 
     #[test]
