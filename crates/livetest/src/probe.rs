@@ -408,6 +408,34 @@ async fn security(admin: &Admin, report: &mut Report) {
         Ok(bindings) => {
             report.set("acls.supported", true);
             report.set("acls.count", bindings.len());
+
+            // The principals, by shape rather than by name — the names
+            // themselves are cluster-specific and would make the report
+            // undiffable. The shape is the conformance fact: a client
+            // authenticated by certificate is its subject DN, `CN=bob-mtls`
+            // and not `bob-mtls`, so a cluster whose ACLs are written against
+            // distinguished names is one where anything matching a bare
+            // username silently matches nothing.
+            let principals: std::collections::BTreeSet<kafka_admin::Principal> = bindings
+                .iter()
+                .map(|binding| kafka_admin::Principal::parse(&binding.principal))
+                .collect();
+            report.set("acls.principals", principals.len());
+            report.set(
+                "acls.principals.distinguished_names",
+                principals
+                    .iter()
+                    .filter(|principal| principal.is_distinguished_name())
+                    .count(),
+            );
+            let mut types: std::collections::BTreeMap<&str, usize> =
+                std::collections::BTreeMap::new();
+            for principal in &principals {
+                *types.entry(principal.principal_type.as_str()).or_default() += 1;
+            }
+            for (principal_type, count) in &types {
+                report.set(format!("acls.principal_type.{principal_type}"), count);
+            }
         }
         Err(error) => {
             report.set("acls.supported", false);
@@ -429,6 +457,23 @@ async fn security(admin: &Admin, report: &mut Report) {
         Err(error) => {
             report.set("scram.supported", false);
             report.set_opt("scram.error_code", error.code());
+        }
+    }
+
+    // Describe rather than create: this is the read-only command, and issuing
+    // a credential is not something to do to a shared cluster on the way past.
+    // The error code is the interesting half anyway —
+    // `DELEGATION_TOKEN_AUTH_DISABLED` says the cluster has no master key,
+    // which is the answer on most clusters and is a fact rather than a
+    // failure.
+    match admin.describe_delegation_tokens(None).await {
+        Ok(tokens) => {
+            report.set("delegation_tokens.supported", true);
+            report.set("delegation_tokens.count", tokens.len());
+        }
+        Err(error) => {
+            report.set("delegation_tokens.supported", false);
+            report.set_opt("delegation_tokens.error_code", error.code());
         }
     }
 

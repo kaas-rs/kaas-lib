@@ -41,15 +41,34 @@ conclusion is that `kaas` is incomplete, not that kaas-lib is broken. Check the
 version table before assuming otherwise — `kaas` advertises about half the api
 keys Strimzi does.
 
-Listeners: `strimzi` has `plain` (9092, no auth), `tls` (9093, server-auth TLS)
-and `internal` (9094, **SASL_SSL/OAUTHBEARER** validated against a real Entra
-ID tenant's JWKS, with `authorization.type: simple` enforcing ACLs). `kaas` has
-`plain` (9092), `authed` (9095) and `tls` (9093).
+Listeners: `strimzi` has `plain` (9092, no auth), `tls` (9093, server-auth TLS),
+`internal` (9094, **SASL_SSL/OAUTHBEARER** validated against a real Entra ID
+tenant's JWKS) and `mtls` (9095, **mutual TLS**, `authentication.type: tls`).
+`authorization.type: simple` enforces ACLs on all of them. `kaas` has `plain`
+(9092), `authed` (9095) and `tls` (9093).
+
+The name is `mtls` and not `tls-auth` because Strimzi validates listener names
+against `^[a-z0-9]{1,11}$` — no hyphens, eleven characters.
 
 `resolve-target.sh strimzi internal` resolves the OAuth listener, including the
 CA — it reads each listener's `tls` field from the CR rather than keying off the
 listener's name — and reminds you on stderr that the credentials are yours to
 supply.
+
+There is one `KafkaUser` that authenticates by certificate: **`bob-mtls`**,
+whose Secret carries `user.crt`, `user.key` and `ca.crt`, and whose principal
+is `CN=bob-mtls` — a distinguished name, not a username, which is what any ACL
+for it has to be written against. Note the two CAs pointing opposite ways: that
+certificate is issued by the **clients** CA, while the broker certificate we
+verify chains to the **cluster** CA. Mixing them up is the likeliest way to
+lose an hour here.
+
+Its ACLs are `All` on topics and groups prefixed `kaaslib-live`, plus
+`Describe`/`Create`/`DescribeConfigs` on the cluster and `Write`/`Describe` on
+`audit-log` — enough for `probe` and `smoke`, and deliberately not enough for
+anything outside this tool's prefix. A `probe` as `bob-mtls` therefore reports
+`CLUSTER_AUTHORIZATION_FAILED` for ACLs, quotas, SCRAM and reassignments, and
+that is the correct answer rather than a broken run.
 
 ## Running it
 
@@ -60,14 +79,32 @@ eval "$(.claude/skills/live-cluster/resolve-target.sh strimzi)"
 cargo run -q -p livetest -- probe
 ```
 
-`resolve-target.sh <strimzi|kaas> [plain|tls|authed]` reads the Kafka CR status
-or the Service and prints `export` lines. For Strimzi's TLS listener it also
-extracts the cluster CA into a temp file and points `KAAS_TEST_CA_FILE` at it.
+`resolve-target.sh <strimzi|kaas> [listener] [kafkauser]` reads the Kafka CR
+status or the Service and prints `export` lines. For Strimzi's TLS listener it
+also extracts the cluster CA into a temp file and points `KAAS_TEST_CA_FILE` at
+it.
 
-It never resolves credentials. A run that needs SASL sets
+It never resolves credentials *by itself*. A run that needs SASL sets
 `KAAS_TEST_SASL_MECHANISM` / `_USERNAME` / `_PASSWORD` itself, so an
 unauthenticated run cannot silently pick up someone's credentials from a secret
 it happened to be able to read.
+
+The third argument is the one exception, and it is opt-in for exactly that
+reason: naming a `KafkaUser` with `authentication.type: tls` extracts its
+client certificate and key and exports `KAAS_TEST_CLIENT_CERT_FILE` /
+`KAAS_TEST_CLIENT_KEY_FILE` — a mutual-TLS identity, which cannot be handed
+over as a username and password.
+
+```sh
+eval "$(.claude/skills/live-cluster/resolve-target.sh strimzi mtls bob-mtls)"
+cargo run -q -p livetest -- probe
+cargo run -q -p livetest -- smoke
+```
+
+Both halves or neither: `livetest` refuses a certificate without its key by
+name rather than falling through to a server-auth handshake that the broker
+then rejects with `SSLHandshakeException` and no hint about which half is
+missing.
 
 For the `internal` listener that means `KAAS_TEST_SASL_MECHANISM=OAUTHBEARER`
 plus either `KAAS_TEST_OAUTH_TOKEN` (a token you fetched yourself) or

@@ -27,6 +27,14 @@ pub const CA_PEM_ENV: &str = "KAAS_TEST_CA_PEM";
 pub const CA_FILE_ENV: &str = "KAAS_TEST_CA_FILE";
 /// Name to verify the broker certificate against, overriding the host.
 pub const TLS_SERVER_NAME_ENV: &str = "KAAS_TEST_TLS_SERVER_NAME";
+/// PEM-encoded client certificate chain for mutual TLS, inline.
+pub const CLIENT_CERT_PEM_ENV: &str = "KAAS_TEST_CLIENT_CERT_PEM";
+/// Path to a PEM-encoded client certificate chain.
+pub const CLIENT_CERT_FILE_ENV: &str = "KAAS_TEST_CLIENT_CERT_FILE";
+/// PEM-encoded private key for the client certificate, inline.
+pub const CLIENT_KEY_PEM_ENV: &str = "KAAS_TEST_CLIENT_KEY_PEM";
+/// Path to a PEM-encoded private key for the client certificate.
+pub const CLIENT_KEY_FILE_ENV: &str = "KAAS_TEST_CLIENT_KEY_FILE";
 /// SASL mechanism: `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` or `OAUTHBEARER`.
 pub const SASL_MECHANISM_ENV: &str = "KAAS_TEST_SASL_MECHANISM";
 /// SASL username.
@@ -119,10 +127,12 @@ impl Target {
             connection = connection.read_only();
         }
 
-        if let Some(tls) = tls_from_env()? {
+        let tls = tls_from_env()?;
+        let encrypted = tls.is_some();
+        if let Some(tls) = tls {
             connection = connection.with_tls(tls);
         }
-        if let Some(sasl) = sasl_from_env()? {
+        if let Some(sasl) = sasl_from_env(encrypted)? {
             connection = connection.with_sasl(sasl);
         }
 
@@ -182,22 +192,71 @@ impl Target {
     }
 }
 
+/// A PEM either inline in one variable or in a file named by another.
+///
+/// One helper rather than the same six lines per credential: the CA had them,
+/// and a client certificate and its key would have made three copies of a
+/// fallback whose two halves have to agree about what "set but empty" means.
+fn pem_from_env(inline: &str, file: &str) -> Result<Option<Vec<u8>>> {
+    if let Ok(pem) = std::env::var(inline)
+        && !pem.trim().is_empty()
+    {
+        return Ok(Some(pem.into_bytes()));
+    }
+    if let Ok(path) = std::env::var(file)
+        && !path.trim().is_empty()
+    {
+        return Ok(Some(
+            std::fs::read(&path).with_context(|| format!("reading {file} at {path}"))?,
+        ));
+    }
+    Ok(None)
+}
+
+/// A client certificate is both halves or neither.
+///
+/// Named here rather than left to the handshake: a chain without a key falls
+/// through to a server-auth connection, which the broker refuses with
+/// `SSLHandshakeException` and no hint about which half is missing — and the
+/// operator, who set two of the four variables, has no reason to suspect the
+/// one they got wrong.
+fn client_certificate(
+    chain: Option<Vec<u8>>,
+    key: Option<Vec<u8>>,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    match (chain, key) {
+        (Some(chain), Some(key)) => Ok(Some((chain, key))),
+        (None, None) => Ok(None),
+        (Some(_), None) => bail!(
+            "a client certificate was configured without its key; set \
+             {CLIENT_KEY_PEM_ENV} or {CLIENT_KEY_FILE_ENV} too"
+        ),
+        (None, Some(_)) => bail!(
+            "a client key was configured without its certificate; set \
+             {CLIENT_CERT_PEM_ENV} or {CLIENT_CERT_FILE_ENV} too"
+        ),
+    }
+}
+
 fn tls_from_env() -> Result<Option<TlsConfig>> {
-    let pem = match (
-        std::env::var(CA_PEM_ENV).ok(),
-        std::env::var(CA_FILE_ENV).ok(),
-    ) {
-        (Some(pem), _) if !pem.trim().is_empty() => Some(pem.into_bytes()),
-        (_, Some(path)) if !path.trim().is_empty() => {
-            Some(std::fs::read(&path).with_context(|| format!("reading {CA_FILE_ENV} at {path}"))?)
-        }
-        _ => None,
-    };
-    let Some(pem) = pem else {
-        return Ok(None);
+    let ca = pem_from_env(CA_PEM_ENV, CA_FILE_ENV)?;
+    let chain = pem_from_env(CLIENT_CERT_PEM_ENV, CLIENT_CERT_FILE_ENV)?;
+    let key = pem_from_env(CLIENT_KEY_PEM_ENV, CLIENT_KEY_FILE_ENV)?;
+
+    let client = client_certificate(chain, key)?;
+
+    // A client certificate is reason enough to speak TLS: an mTLS listener
+    // whose broker certificate chains to a public CA needs no CA of ours.
+    let mut tls = match ca {
+        Some(pem) => TlsConfig::with_ca_pem(pem),
+        None if client.is_some() => TlsConfig::system(),
+        None => return Ok(None),
     };
 
-    let mut tls = TlsConfig::with_ca_pem(pem);
+    if let Some((chain, key)) = client {
+        tls = tls.with_client_certificate(chain, key);
+    }
+
     if let Ok(name) = std::env::var(TLS_SERVER_NAME_ENV)
         && !name.trim().is_empty()
     {
@@ -210,7 +269,7 @@ fn tls_from_env() -> Result<Option<TlsConfig>> {
     Ok(Some(tls))
 }
 
-fn sasl_from_env() -> Result<Option<SaslConfig>> {
+fn sasl_from_env(encrypted: bool) -> Result<Option<SaslConfig>> {
     let Ok(mechanism) = std::env::var(SASL_MECHANISM_ENV) else {
         return Ok(None);
     };
@@ -232,13 +291,11 @@ fn sasl_from_env() -> Result<Option<SaslConfig>> {
 
     let config = SaslConfig::new(mechanism, username, password);
     // PLAIN over an unencrypted socket is refused unless asked for. A live run
-    // against a listener that offers it is a legitimate reason to ask, and the
-    // CA settings are right there in the same environment to show whether the
-    // socket is encrypted.
-    let config = if matches!(mechanism, SaslMechanism::Plain)
-        && std::env::var(CA_PEM_ENV).is_err()
-        && std::env::var(CA_FILE_ENV).is_err()
-    {
+    // against a listener that offers it is a legitimate reason to ask, and
+    // whether this run resolved any TLS at all is what says whether the socket
+    // is encrypted — asked of the resolved configuration rather than of the
+    // environment, so the two cannot disagree.
+    let config = if matches!(mechanism, SaslMechanism::Plain) && !encrypted {
         config.allow_plaintext_password()
     } else {
         config
@@ -365,5 +422,25 @@ mod tests {
     #[test]
     fn run_tokens_differ_between_runs() {
         assert_ne!(run_token(), run_token());
+    }
+
+    /// Env vars are process-global, so the rule lives in a function that takes
+    /// what was read rather than reading it — which is also the only way two
+    /// of these can run at once.
+    #[test]
+    fn half_a_client_certificate_is_named_rather_than_left_to_the_handshake() {
+        let chain = || Some(b"chain".to_vec());
+        let key = || Some(b"key".to_vec());
+
+        assert!(client_certificate(None, None).unwrap().is_none());
+        assert_eq!(
+            client_certificate(chain(), key()).unwrap(),
+            Some((b"chain".to_vec(), b"key".to_vec()))
+        );
+
+        let no_key = client_certificate(chain(), None).unwrap_err().to_string();
+        assert!(no_key.contains(CLIENT_KEY_FILE_ENV), "{no_key}");
+        let no_chain = client_certificate(None, key()).unwrap_err().to_string();
+        assert!(no_chain.contains(CLIENT_CERT_FILE_ENV), "{no_chain}");
     }
 }

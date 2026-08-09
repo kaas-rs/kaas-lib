@@ -129,7 +129,12 @@ ENVIRONMENT
     KAAS_TEST_CA_PEM         inline PEM bundle to trust
     KAAS_TEST_CA_FILE        path to a PEM bundle to trust
     KAAS_TEST_TLS_SERVER_NAME  name to verify the broker certificate against
-    KAAS_TEST_SASL_MECHANISM   PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
+    KAAS_TEST_CLIENT_CERT_PEM  inline PEM client certificate chain, mutual TLS
+    KAAS_TEST_CLIENT_CERT_FILE path to one
+    KAAS_TEST_CLIENT_KEY_PEM   inline PEM key for that chain
+    KAAS_TEST_CLIENT_KEY_FILE  path to one — both halves or neither
+    KAAS_TEST_SASL_MECHANISM   PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512 |
+                               OAUTHBEARER
     KAAS_TEST_SASL_USERNAME
     KAAS_TEST_SASL_PASSWORD
 
