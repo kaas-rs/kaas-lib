@@ -15,13 +15,16 @@
     clippy::indexing_slicing
 )]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use kafka_admin::{Admin, ClusterConfig, NewDelegationToken, Principal};
+use kafka_admin::{Admin, ClusterConfig, DelegationToken, NewDelegationToken, Principal};
 use kafka_conn::{
     Connection, ConnectionConfig, Error, ErrorCode, SaslConfig, SaslMechanism, ScramHash,
 };
 use testkit::{BrokerConfig, Cluster, Security};
+
+/// How long a created token may take to reach the broker serving describes.
+const TOKEN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The master key the broker signs tokens with. Any non-empty value does; it
 /// has to be identical across brokers, which a single-node fixture makes moot.
@@ -45,6 +48,43 @@ fn alice() -> ConnectionConfig {
         "alice",
         "alice-pw",
     ))
+}
+
+/// Wait until a created token is visible, and return the broker's own record
+/// of it.
+///
+/// `CreateDelegationToken` is acked once the controller commits the record;
+/// the broker answers describes — and SCRAM logins — from the
+/// `DelegationTokenCache` it fills by applying that record, which in KRaft
+/// trails the log asynchronously. So a describe or a login immediately after
+/// the create is a race that an idle machine wins and a loaded CI runner
+/// loses, and it loses in the most confusing way available: the login failure
+/// is `invalid credentials`, which reads as a wrong password rather than as a
+/// token the broker has not heard of yet.
+///
+/// Both come from the same cache, so waiting for the token to describe is also
+/// waiting for it to be usable as a credential.
+async fn await_token_visible(admin: &Admin, token_id: &str) -> DelegationToken {
+    let deadline = Instant::now() + TOKEN_TIMEOUT;
+    loop {
+        let described = admin.describe_delegation_tokens(None).await.unwrap();
+        if let Some(found) = described
+            .iter()
+            .find(|candidate| candidate.token_id == token_id)
+        {
+            return found.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "token {token_id} never became visible within {TOKEN_TIMEOUT:?}; \
+             the broker lists {:?}",
+            described
+                .iter()
+                .map(|token| &token.token_id)
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 #[testkit::integration_test]
@@ -80,11 +120,7 @@ async fn a_delegation_token_is_created_described_renewed_and_expired() {
 
     // Describing it back is the only way to see what the broker actually
     // recorded — the create response does not echo the renewer list.
-    let described = admin.describe_delegation_tokens(None).await.unwrap();
-    let found = described
-        .iter()
-        .find(|candidate| candidate.token_id == token.token_id)
-        .expect("the token we just created");
+    let found = await_token_visible(&admin, &token.token_id).await;
     assert_eq!(found.owner, Principal::user("alice"));
     assert_eq!(found.renewers, vec![Principal::user("bob")]);
     assert_eq!(found.hmac, token.hmac, "the owner may see its own HMAC");
@@ -140,6 +176,7 @@ async fn a_delegation_token_authenticates_a_connection() {
         .create_delegation_token(&NewDelegationToken::new())
         .await
         .unwrap();
+    await_token_visible(&admin, &token.token_id).await;
 
     let config = ConnectionConfig::new().with_sasl(SaslConfig::delegation_token(
         ScramHash::Sha256,
@@ -205,6 +242,10 @@ async fn a_forged_token_hmac_is_rejected() {
         .create_delegation_token(&NewDelegationToken::new())
         .await
         .unwrap();
+    // Without the wait this passes for the wrong reason: a token the broker
+    // has not applied yet is refused whatever HMAC is presented, so the case
+    // would prove nothing about the forgery.
+    await_token_visible(&admin, &token.token_id).await;
 
     let config = ConnectionConfig::new()
         .with_connect_timeout(Duration::from_secs(20))
