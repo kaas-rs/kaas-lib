@@ -27,6 +27,15 @@ bytes       = "1.12"
 # "compression.codec": libzstd not available at build time`. A producer that
 # cannot produce zstd cannot prove we read zstd, which is the whole point of
 # that case.
-rdkafka     = { version = "0.38", features = ["cmake-build", "zstd"] }
+#
+# `ssl` for the same reason one step further out: without it librdkafka is
+# built `WITH_SSL 0`, and it needs OpenSSL for SCRAM's and OAUTHBEARER's HMAC,
+# so `WITH_SASL_SCRAM 0` and `WITH_SASL_OAUTHBEARER 0` follow. The one suite
+# whose whole purpose is "do we agree with a genuinely different client" then
+# cannot speak to authentication at all — which is a strange gap for the
+# mechanism where a subtle disagreement (SASLprep, the proof, the extension
+# list) is invisible until it is a production login failure. It costs
+# `libssl-dev` on the runner, which the interop job already installs.
+rdkafka     = { version = "0.38", features = ["cmake-build", "zstd", "ssl"] }
 
 [workspace]

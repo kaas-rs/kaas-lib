@@ -423,6 +423,13 @@ jobs:
       #   Unable to find libclang
       # without it. The feature is not optional — see the comment on the
       # rdkafka dependency in crates/interop/Cargo.toml.
+      #
+      # libssl-dev and pkg-config are load-bearing rather than incidental:
+      # librdkafka needs OpenSSL for SCRAM's and OAUTHBEARER's HMAC, so the
+      # `ssl` feature — and therefore tests/sasl_interop.rs, the only
+      # cross-client check of authentication there is — fails at cmake
+      # configure time without them. openssl-sys finds the library through
+      # pkg-config and reports the absence as "could not find OpenSSL".
       - name: Install cmake + C toolchain + libcurl and libclang
         run: |
           if [ "$(id -u)" -eq 0 ]; then SUDO=""
