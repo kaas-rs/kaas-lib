@@ -327,9 +327,16 @@ impl Admin {
     /// is deliberate on the broker's part: renewing requires proving you hold
     /// the secret. The caller must be the owner or a named renewer.
     ///
-    /// The broker clamps the new expiry to the token's `max_timestamp_ms`, so
-    /// a renewal that returns an unchanged expiry means the token has reached
-    /// the end of its life and needs replacing rather than renewing.
+    /// **The new expiry is `now + renew_period`, not `expiry + renew_period`.**
+    /// "Renew" reads like an extension and is really a reset, so renewing with
+    /// a period shorter than the life the token has left moves its expiry
+    /// *closer* — a 30-minute renewal on a token with an hour to run takes half
+    /// an hour off it. Pass the total remaining life you want, not the amount
+    /// you want to add.
+    ///
+    /// The broker then clamps that to the token's `max_timestamp_ms`, so a
+    /// renewal that returns an expiry earlier than the one you asked for has
+    /// hit the ceiling: the token needs replacing rather than renewing.
     pub async fn renew_delegation_token(
         &self,
         hmac: impl Into<Bytes>,

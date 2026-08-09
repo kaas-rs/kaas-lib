@@ -125,19 +125,37 @@ async fn a_delegation_token_is_created_described_renewed_and_expired() {
     assert_eq!(found.renewers, vec![Principal::user("bob")]);
     assert_eq!(found.hmac, token.hmac, "the owner may see its own HMAC");
 
-    // Renewing moves the expiry out, up to the token's own ceiling.
+    // Renewing sets the expiry to `now + period` rather than adding to the one
+    // it has, so the period must exceed the life the token has left — the
+    // fixture's `delegation.token.expiry.time.ms` is an hour — for this to be
+    // an extension at all. Two hours is still well inside the 24-hour ceiling
+    // the fixture sets, so the clamp is not what is under test here.
     let renewed = admin
-        .renew_delegation_token(token.hmac.clone(), Duration::from_secs(1800))
+        .renew_delegation_token(token.hmac.clone(), Duration::from_secs(7200))
         .await
         .expect("the owner may renew");
     assert!(
-        renewed >= token.expiry_timestamp_ms,
-        "renewal moved the expiry backwards: {renewed} < {}",
+        renewed > token.expiry_timestamp_ms,
+        "renewing for longer than the remaining life did not extend it: \
+         {renewed} <= {}",
         token.expiry_timestamp_ms
     );
     assert!(
         renewed <= token.max_timestamp_ms,
-        "renewed past the ceiling"
+        "renewed past the ceiling: {renewed} > {}",
+        token.max_timestamp_ms
+    );
+
+    // And the direction that surprises people: a period shorter than the
+    // remaining life brings the expiry in. This is the assertion that would
+    // have caught the wrong mental model in the doc comment.
+    let shortened = admin
+        .renew_delegation_token(token.hmac.clone(), Duration::from_secs(600))
+        .await
+        .expect("the owner may renew");
+    assert!(
+        shortened < renewed,
+        "a shorter renewal period should move the expiry in: {shortened} >= {renewed}"
     );
 
     // A negative period is the revocation path.
