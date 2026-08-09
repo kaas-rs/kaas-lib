@@ -49,6 +49,7 @@ mod groups;
 mod offsets;
 mod partitions;
 mod security;
+mod tokens;
 pub(crate) mod topics;
 mod transactions;
 pub mod types;
@@ -64,6 +65,7 @@ pub use security::{
     AclBinding, AclFilter, AclOperation, AclPermission, AclResourceType, PatternType, QuotaEntity,
     QuotaFilter, QuotaOp, ScramCredentialInfo, ScramMechanism, ScramUpsert,
 };
+pub use tokens::{DelegationToken, NewDelegationToken, Principal};
 pub use transactions::{ProducerState, TransactionDescription, TransactionListing};
 pub use types::{
     AlterOp, ClusterBroker, ClusterDescription, ConfigChange, ConfigEntry, ConfigResource,

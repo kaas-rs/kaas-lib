@@ -1,0 +1,255 @@
+//! Delegation tokens, KIP-48: issue one, describe it, renew it, use it.
+//!
+//! `cargo test -p kafka-admin --test tokens -- --ignored`
+//!
+//! Every case here needs a broker with `delegation.token.secret.key` set — the
+//! feature is off without one — and a SASL listener, because Kafka refuses
+//! token requests from an unauthenticated channel. That second rule is the one
+//! worth knowing: on a PLAINTEXT fixture these calls come back
+//! `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED`, which reads like a permissions
+//! problem and is really a listener one.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+
+use std::time::Duration;
+
+use kafka_admin::{Admin, ClusterConfig, NewDelegationToken, Principal};
+use kafka_conn::{
+    Connection, ConnectionConfig, Error, ErrorCode, SaslConfig, SaslMechanism, ScramHash,
+};
+use testkit::{BrokerConfig, Cluster, Security};
+
+/// The master key the broker signs tokens with. Any non-empty value does; it
+/// has to be identical across brokers, which a single-node fixture makes moot.
+const SECRET: &str = "kaas-lib-delegation-token-secret";
+
+fn broker_config() -> BrokerConfig {
+    BrokerConfig::new()
+        .with_security(Security::SaslPlaintext)
+        .with_mechanism(testkit::SaslMechanism::ScramSha256)
+        .with_user("alice", "alice-pw")
+        .with_property("delegation.token.secret.key", SECRET)
+        // Well past the length of any test, so an expiry seen here is one the
+        // test asked for rather than the broker's default arriving early.
+        .with_property("delegation.token.max.lifetime.ms", "86400000")
+        .with_property("delegation.token.expiry.time.ms", "3600000")
+}
+
+fn alice() -> ConnectionConfig {
+    ConnectionConfig::new().with_sasl(SaslConfig::new(
+        SaslMechanism::ScramSha256,
+        "alice",
+        "alice-pw",
+    ))
+}
+
+#[testkit::integration_test]
+async fn a_delegation_token_is_created_described_renewed_and_expired() {
+    let broker = testkit::single_broker_with(broker_config()).await.unwrap();
+    let admin = Admin::connect(
+        broker.bootstrap().to_vec(),
+        ClusterConfig {
+            connection: alice(),
+            ..ClusterConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let token = admin
+        .create_delegation_token(
+            &NewDelegationToken::new()
+                .with_renewer(Principal::user("bob"))
+                .with_max_lifetime(Duration::from_secs(3600)),
+        )
+        .await
+        .expect("a token for the authenticated principal");
+
+    assert_eq!(token.owner, Principal::user("alice"));
+    assert_eq!(token.requester, Principal::user("alice"));
+    assert!(!token.token_id.is_empty());
+    assert!(!token.hmac.is_empty(), "the HMAC is the credential");
+    assert!(
+        token.expiry_timestamp_ms <= token.max_timestamp_ms,
+        "{token:?}"
+    );
+
+    // Describing it back is the only way to see what the broker actually
+    // recorded — the create response does not echo the renewer list.
+    let described = admin.describe_delegation_tokens(None).await.unwrap();
+    let found = described
+        .iter()
+        .find(|candidate| candidate.token_id == token.token_id)
+        .expect("the token we just created");
+    assert_eq!(found.owner, Principal::user("alice"));
+    assert_eq!(found.renewers, vec![Principal::user("bob")]);
+    assert_eq!(found.hmac, token.hmac, "the owner may see its own HMAC");
+
+    // Renewing moves the expiry out, up to the token's own ceiling.
+    let renewed = admin
+        .renew_delegation_token(token.hmac.clone(), Duration::from_secs(1800))
+        .await
+        .expect("the owner may renew");
+    assert!(
+        renewed >= token.expiry_timestamp_ms,
+        "renewal moved the expiry backwards: {renewed} < {}",
+        token.expiry_timestamp_ms
+    );
+    assert!(
+        renewed <= token.max_timestamp_ms,
+        "renewed past the ceiling"
+    );
+
+    // A negative period is the revocation path.
+    admin
+        .expire_delegation_token(token.hmac.clone(), -1)
+        .await
+        .expect("the owner may expire");
+
+    let after = admin.describe_delegation_tokens(None).await.unwrap();
+    assert!(
+        !after
+            .iter()
+            .any(|candidate| candidate.token_id == token.token_id),
+        "an expired token is still listed: {after:?}"
+    );
+}
+
+/// The other half of KIP-48, and the reason the SCRAM extension work exists: a
+/// token id and its HMAC authenticate as a SCRAM credential *only* when
+/// `tokenauth=true` rides along in client-first. Without the extension this
+/// same exchange is a login attempt for a user named after a token id.
+#[testkit::integration_test]
+async fn a_delegation_token_authenticates_a_connection() {
+    let broker = testkit::single_broker_with(broker_config()).await.unwrap();
+    let admin = Admin::connect(
+        broker.bootstrap().to_vec(),
+        ClusterConfig {
+            connection: alice(),
+            ..ClusterConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let token = admin
+        .create_delegation_token(&NewDelegationToken::new())
+        .await
+        .unwrap();
+
+    let config = ConnectionConfig::new().with_sasl(SaslConfig::delegation_token(
+        ScramHash::Sha256,
+        token.token_id.clone(),
+        token.password(),
+    ));
+    let connection = Connection::connect(&broker.bootstrap()[0], config)
+        .await
+        .expect("the token authenticates");
+    connection
+        .send(
+            kafka_conn::protocol::messages::MetadataRequest::default()
+                .with_topics(Some(vec![]))
+                .with_allow_auto_topic_creation(false),
+        )
+        .await
+        .expect("and the connection works afterwards");
+
+    // A token cannot beget a token: the broker refuses to issue one to a
+    // principal that authenticated with one, which is what stops a leaked
+    // token renewing itself into a new identity indefinitely.
+    let token_admin = Admin::connect(
+        broker.bootstrap().to_vec(),
+        ClusterConfig {
+            connection: ConnectionConfig::new().with_sasl(SaslConfig::delegation_token(
+                ScramHash::Sha256,
+                token.token_id.clone(),
+                token.password(),
+            )),
+            ..ClusterConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let err = token_admin
+        .create_delegation_token(&NewDelegationToken::new())
+        .await
+        .expect_err("a token-authenticated principal cannot create tokens");
+    assert_eq!(
+        err.code(),
+        Some(ErrorCode::DelegationTokenRequestNotAllowed),
+        "{err:?}"
+    );
+}
+
+/// The credential is wrong, not the mechanism. It must fail as an
+/// authentication error rather than hanging until the connect deadline, which
+/// is what a UI renders as "the cluster is unreachable".
+#[testkit::integration_test]
+async fn a_forged_token_hmac_is_rejected() {
+    let broker = testkit::single_broker_with(broker_config()).await.unwrap();
+    let admin = Admin::connect(
+        broker.bootstrap().to_vec(),
+        ClusterConfig {
+            connection: alice(),
+            ..ClusterConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let token = admin
+        .create_delegation_token(&NewDelegationToken::new())
+        .await
+        .unwrap();
+
+    let config = ConnectionConfig::new()
+        .with_connect_timeout(Duration::from_secs(20))
+        .with_sasl(SaslConfig::delegation_token(
+            ScramHash::Sha256,
+            token.token_id.clone(),
+            "bm90LXRoZS1obWFj",
+        ));
+    let err = Connection::connect(&broker.bootstrap()[0], config)
+        .await
+        .expect_err("a forged HMAC cannot authenticate");
+    assert!(matches!(err, Error::Authentication(_)), "{err:?}");
+}
+
+/// Without the master key the feature is off, and the broker says so with a
+/// code the error table already names. Worth asserting because it is the first
+/// thing anyone will hit on a cluster that has not enabled tokens, and the
+/// remedy is broker configuration rather than anything a caller can fix.
+#[testkit::integration_test]
+async fn tokens_are_refused_when_the_broker_has_no_master_key() {
+    let broker = testkit::single_broker_with(
+        BrokerConfig::new()
+            .with_security(Security::SaslPlaintext)
+            .with_mechanism(testkit::SaslMechanism::ScramSha256)
+            .with_user("alice", "alice-pw"),
+    )
+    .await
+    .unwrap();
+    let admin = Admin::connect(
+        broker.bootstrap().to_vec(),
+        ClusterConfig {
+            connection: alice(),
+            ..ClusterConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let err = admin
+        .create_delegation_token(&NewDelegationToken::new())
+        .await
+        .expect_err("no master key, no tokens");
+    assert_eq!(
+        err.code(),
+        Some(ErrorCode::DelegationTokenAuthDisabled),
+        "{err:?}"
+    );
+}

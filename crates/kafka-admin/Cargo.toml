@@ -19,6 +19,9 @@ kafka-protocol = { workspace = true }
 tokio          = { workspace = true }
 futures        = { workspace = true }
 bytes          = { workspace = true }
+# A delegation token's HMAC is a SASL password once base64-encoded, and that
+# encoding is the link between issuing a token and authenticating with one.
+base64         = { workspace = true }
 thiserror      = { workspace = true }
 tracing        = { workspace = true }
 
