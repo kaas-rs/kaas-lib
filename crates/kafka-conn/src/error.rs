@@ -54,8 +54,21 @@ pub enum Error {
     Authentication(String),
 
     /// The principal authenticated but is not permitted to do this.
-    #[error("not authorized: {0}")]
-    Authorization(ErrorCode),
+    ///
+    /// The variant a UI branches on to say "ask your admin", which is why it
+    /// is worth reaching even where the broker's own code cannot say it: an
+    /// OAUTHBEARER challenge with `status=insufficient_scope` means the token
+    /// is *valid* and the principal lacks permission, arriving under the same
+    /// error code (58) as an expired one.
+    #[error("not authorized: {code}{}", .detail.as_ref().map(|d| format!(": {d}")).unwrap_or_default())]
+    Authorization {
+        /// The classified code.
+        code: ErrorCode,
+        /// What the broker said, where it said more than the code does. The
+        /// scope an insufficient token would have needed lives here, and it is
+        /// the only actionable part of that failure.
+        detail: Option<String>,
+    },
 
     /// The broker answered with an error code.
     #[error("broker returned {code}{}", .message.as_ref().map(|m| format!(": {m}")).unwrap_or_default())]
@@ -158,7 +171,10 @@ impl Error {
         if code.is_authentication() {
             Error::Authentication(message.unwrap_or_else(|| code.to_string()))
         } else if code.is_authorization() {
-            Error::Authorization(code)
+            Error::Authorization {
+                code,
+                detail: message,
+            }
         } else {
             Error::Broker { code, message }
         }
@@ -167,7 +183,7 @@ impl Error {
     /// The broker code, when there is one.
     pub fn code(&self) -> Option<ErrorCode> {
         match self {
-            Error::Broker { code, .. } | Error::Authorization(code) => Some(*code),
+            Error::Broker { code, .. } | Error::Authorization { code, .. } => Some(*code),
             _ => None,
         }
     }
@@ -189,7 +205,7 @@ impl Error {
                 None => true,
                 Some(code) => *code >= 500 || *code == 429,
             },
-            Error::Authorization(_)
+            Error::Authorization { .. }
             | Error::Authentication(_)
             | Error::Decode { .. }
             | Error::ReadOnly { .. }
@@ -248,7 +264,10 @@ impl Clone for Error {
                 elapsed: *elapsed,
             },
             Error::Authentication(message) => Error::Authentication(message.clone()),
-            Error::Authorization(code) => Error::Authorization(*code),
+            Error::Authorization { code, detail } => Error::Authorization {
+                code: *code,
+                detail: detail.clone(),
+            },
             Error::Broker { code, message } => Error::Broker {
                 code: *code,
                 message: message.clone(),
@@ -292,7 +311,7 @@ mod tests {
         let authn = Error::from_code(ErrorCode::SaslAuthenticationFailed, None);
         assert!(matches!(authn, Error::Authentication(_)));
         let authz = Error::from_code(ErrorCode::TopicAuthorizationFailed, None);
-        assert!(matches!(authz, Error::Authorization(_)));
+        assert!(matches!(authz, Error::Authorization { .. }));
         assert!(!authz.retriable());
     }
 

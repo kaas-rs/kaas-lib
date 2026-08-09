@@ -85,9 +85,13 @@ pub struct SaslConfig {
     /// Where `OAUTHBEARER` gets its token, asked again on every
     /// re-authentication. `None` for every other mechanism.
     pub token_provider: Option<Arc<dyn TokenProvider>>,
-    /// RFC 7628 `SaslExtensions`: extra `key=value` pairs in the initial client
-    /// response, which some managed clusters use to select a logical cluster or
-    /// an identity pool. Empty unless [`SaslConfig::with_extension`] added one.
+    /// Extra `key=value` pairs carried in the mechanism's first client
+    /// message: RFC 7628 `SaslExtensions` for `OAUTHBEARER`, which some managed
+    /// clusters use to select a logical cluster or an identity pool, and RFC
+    /// 5802 attributes on `client-first-message-bare` for SCRAM, which is where
+    /// KIP-48's `tokenauth=true` goes. `PLAIN` has nowhere to put them and
+    /// refuses rather than dropping them. Empty unless
+    /// [`SaslConfig::with_extension`] added one.
     pub extensions: Vec<(String, String)>,
 }
 
@@ -164,10 +168,47 @@ impl SaslConfig {
         Self::oauth_bearer(StaticToken::new(token.into()))
     }
 
-    /// Add an RFC 7628 `SaslExtensions` pair to the initial client response.
+    /// Authenticate with a KIP-48 delegation token.
     ///
-    /// Appends: two calls send two pairs. Keys are ASCII letters and `auth` is
-    /// refused, since that is the token's own key.
+    /// A delegation token is a SCRAM credential in disguise: the token id is
+    /// the username, the token HMAC is the password, and a `tokenauth=true`
+    /// SCRAM extension is what tells the broker to look the pair up in the
+    /// token cache instead of the user store. Omit the extension and the
+    /// exchange fails as a bad password for a user that does not exist, which
+    /// is a long way from what went wrong.
+    ///
+    /// `hash` picks the mechanism: a token can be presented over
+    /// `SCRAM-SHA-256` or `SCRAM-SHA-512`, and which of the two a listener
+    /// enables is the broker's decision, not the token's.
+    ///
+    /// The token itself comes from `kafka-admin`'s
+    /// `Admin::create_delegation_token`, on a connection authenticated some
+    /// other way — the broker refuses to issue a token to a principal that
+    /// authenticated with one.
+    pub fn delegation_token(
+        hash: crate::scram::ScramHash,
+        token_id: impl Into<String>,
+        hmac: impl Into<String>,
+    ) -> Self {
+        let mechanism = match hash {
+            crate::scram::ScramHash::Sha256 => SaslMechanism::ScramSha256,
+            crate::scram::ScramHash::Sha512 => SaslMechanism::ScramSha512,
+        };
+        Self::new(mechanism, token_id, hmac).with_extension("tokenauth", "true")
+    }
+
+    /// Add an extension pair to the mechanism's first client message.
+    ///
+    /// Appends: two calls send two pairs. Keys are ASCII letters, and the names
+    /// the mechanism has already spoken for are refused — `auth` for
+    /// `OAUTHBEARER`, which carries the token, and RFC 5802's reserved single
+    /// letters for SCRAM, which carry the username and the nonce.
+    ///
+    /// `PLAIN` has no field for these at all. Setting one there fails the
+    /// exchange before anything is sent rather than authenticating without it:
+    /// an extension that selects a logical cluster or an identity pool changes
+    /// *who you are*, and silently dropping it is the one outcome with no
+    /// symptom.
     #[must_use]
     pub fn with_extension(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.extensions.push((key.into(), value.into()));
@@ -234,6 +275,24 @@ pub(crate) async fn authenticate<T: SaslTransport>(
     config: &SaslConfig,
     transport: &mut T,
 ) -> Result<i64> {
+    // Before the handshake, because a setting that cannot be honoured is a
+    // caller error rather than a broker one, and because an extension can be
+    // the difference between two principals. `PLAIN` is RFC 4616's three
+    // NUL-separated fields and has no room for anything else.
+    if matches!(config.mechanism, SaslMechanism::Plain) && !config.extensions.is_empty() {
+        return Err(Error::InvalidRequest(format!(
+            "{} has no field for SASL extensions, and [{}] would be silently dropped; \
+             use OAUTHBEARER or SCRAM, which do",
+            config.mechanism,
+            config
+                .extensions
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+
     let enabled = transport.handshake(config.mechanism.as_str()).await?;
     if !enabled.is_empty() && !enabled.iter().any(|m| m == config.mechanism.as_str()) {
         return Err(Error::Authentication(format!(
@@ -260,8 +319,13 @@ pub(crate) async fn authenticate<T: SaslTransport>(
             } else {
                 ScramHash::Sha512
             };
-            let mut client =
-                ScramClient::new(hash, &config.username, &config.password, random_nonce())?;
+            let mut client = ScramClient::new(
+                hash,
+                &config.username,
+                &config.password,
+                random_nonce(),
+                &config.extensions,
+            )?;
 
             let server_first = transport.authenticate(client.client_first()).await?;
             let client_final = client.client_final(&server_first.auth_bytes)?;
@@ -335,6 +399,19 @@ async fn oauth_bearer_exchange<T: SaslTransport>(
     let mut message = format!("broker rejected the OAUTHBEARER token: {rejection}");
     if let Some(broker) = broker_message.filter(|m| !m.is_empty()) {
         message.push_str(&format!("; broker said: {broker}"));
+    }
+
+    // `insufficient_scope` is not an authentication failure. The token
+    // authenticated — the principal it names is simply not allowed here, which
+    // is the "ask your admin" case, and a UI that renders it as bad credentials
+    // sends someone to re-enter a password that was never wrong. The code stays
+    // the one the broker actually sent; the scope the token would have needed
+    // is in the detail, because it is the only part anyone can act on.
+    if rejection.is_insufficient_scope() {
+        return Err(Error::Authorization {
+            code: crate::error_code::ErrorCode::SaslAuthenticationFailed,
+            detail: Some(message),
+        });
     }
     Err(Error::Authentication(message))
 }
@@ -452,6 +529,40 @@ mod tests {
         );
     }
 
+    /// The silent-wrongness case. An extension can select a logical cluster or
+    /// an identity pool — it decides *who you are* — so a mechanism that cannot
+    /// carry one has to say so rather than authenticate as somebody else.
+    #[tokio::test]
+    async fn plain_refuses_extensions_rather_than_dropping_them() {
+        let mut fake = Fake::offering("PLAIN");
+        let cfg = SaslConfig::new(SaslMechanism::Plain, "alice", "s3cret")
+            .with_extension("logicalCluster", "lkc-1");
+        let err = authenticate(&cfg, &mut fake).await.unwrap_err();
+        let Error::InvalidRequest(message) = err else {
+            panic!("expected an invalid-request error, got {err:?}");
+        };
+        assert!(message.contains("logicalCluster"), "{message}");
+        assert!(fake.tokens_sent.is_empty(), "nothing may be sent");
+    }
+
+    /// KIP-48 end to end at this layer: the token id is the username, the HMAC
+    /// is the password, and `tokenauth=true` is what sends the broker to the
+    /// token cache.
+    #[tokio::test]
+    async fn a_delegation_token_authenticates_as_scram_with_tokenauth() {
+        let mut fake = Fake::offering("SCRAM-SHA-512")
+            .then_ok(b"r=nonce,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096", 0);
+        let cfg = SaslConfig::delegation_token(ScramHash::Sha512, "token-id", "aG1hYw==");
+        // The canned server nonce does not extend our random one, so the
+        // exchange stops after one round trip. That is enough: the message
+        // under test is the one already on the wire.
+        let _ = authenticate(&cfg, &mut fake).await;
+        let first = String::from_utf8(fake.tokens_sent[0].clone()).unwrap();
+        assert!(first.starts_with("n,,n=token-id,r="), "{first}");
+        assert!(first.ends_with(",tokenauth=true"), "{first}");
+        assert_eq!(cfg.mechanism, SaslMechanism::ScramSha512);
+    }
+
     #[test]
     fn scram_over_plaintext_is_fine() {
         let cfg = SaslConfig::new(SaslMechanism::ScramSha512, "a", "b");
@@ -505,6 +616,43 @@ mod tests {
         };
         assert!(message.contains("status=invalid_token"), "{message}");
         assert!(message.contains("Authentication failed"), "{message}");
+    }
+
+    /// `insufficient_scope` means the token authenticated and the principal is
+    /// not allowed here. Rendering that as bad credentials sends someone to
+    /// re-enter a password that was never wrong; the remedy is an admin, and
+    /// the taxonomy exists to say which.
+    #[tokio::test]
+    async fn an_insufficient_scope_challenge_is_an_authorization_failure() {
+        let challenge = br#"{"status":"insufficient_scope","scope":"kafka:write"}"#;
+        let mut fake = Fake::offering("OAUTHBEARER")
+            .then_ok(challenge, 0)
+            .then_err(Error::Authentication("Authentication failed".to_owned()));
+
+        let cfg = SaslConfig::oauth_bearer_token("valid.but.narrow");
+        let err = authenticate(&cfg, &mut fake).await.unwrap_err();
+
+        assert_eq!(fake.tokens_sent.len(), 2, "the %x01 message is still sent");
+        let Error::Authorization { code, detail } = err else {
+            panic!("expected an authorization error, got {err:?}");
+        };
+        assert_eq!(code, crate::error_code::ErrorCode::SaslAuthenticationFailed);
+        // The scope is the only actionable part, so losing it would make the
+        // reclassification a downgrade.
+        let detail = detail.unwrap_or_default();
+        assert!(detail.contains("scope=kafka:write"), "{detail}");
+    }
+
+    /// The other statuses stay authentication failures: an expired token is
+    /// fixed by getting another one, which is a different action entirely.
+    #[tokio::test]
+    async fn an_invalid_token_challenge_stays_an_authentication_failure() {
+        let mut fake = Fake::offering("OAUTHBEARER")
+            .then_ok(br#"{"status":"invalid_token"}"#, 0)
+            .then_err(Error::Authentication("Authentication failed".to_owned()));
+        let cfg = SaslConfig::oauth_bearer_token("expired");
+        let err = authenticate(&cfg, &mut fake).await.unwrap_err();
+        assert!(matches!(err, Error::Authentication(_)), "{err:?}");
     }
 
     /// A dead socket during the failure round trip is a transport problem, and

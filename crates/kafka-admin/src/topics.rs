@@ -492,7 +492,10 @@ pub(crate) fn clone_error(error: &Error) -> Error {
             code: *code,
             message: message.clone(),
         },
-        Error::Authorization(code) => Error::Authorization(*code),
+        Error::Authorization { code, detail } => Error::Authorization {
+            code: *code,
+            detail: detail.clone(),
+        },
         Error::Authentication(message) => Error::Authentication(message.clone()),
         Error::ConnectionClosed { peer } => Error::ConnectionClosed { peer: peer.clone() },
         Error::ReadOnly { api_key } => Error::ReadOnly { api_key: *api_key },

@@ -83,7 +83,23 @@ impl ScramClient {
     ///
     /// `nonce` must be printable ASCII without a comma; callers should use
     /// [`random_nonce`].
-    pub fn new(hash: ScramHash, username: &str, password: &str, nonce: String) -> Result<Self> {
+    ///
+    /// `extensions` are appended to `client-first-message-bare` as
+    /// `,key=value` attributes, which is where SCRAM carries anything the
+    /// mechanism itself does not define. The one that matters is KIP-48's
+    /// `tokenauth=true`: it is what tells the broker to look the credential up
+    /// in the delegation token cache rather than in the user store, so a
+    /// delegation token is a SCRAM login that fails without it. Note the
+    /// extensions are part of the bare message and therefore part of the auth
+    /// message the proof is computed over — they are authenticated, not
+    /// decoration.
+    pub fn new(
+        hash: ScramHash,
+        username: &str,
+        password: &str,
+        nonce: String,
+        extensions: &[(String, String)],
+    ) -> Result<Self> {
         let username = saslprep(username, "username")?;
         let password = saslprep(password, "password")?;
         if nonce.contains(',') {
@@ -91,9 +107,17 @@ impl ScramClient {
                 "SCRAM nonce may not contain a comma".to_owned(),
             ));
         }
+        let mut client_first_bare = format!("n={},r={}", escape_username(&username), nonce);
+        for (key, value) in extensions {
+            validate_extension(key, value)?;
+            client_first_bare.push(',');
+            client_first_bare.push_str(key);
+            client_first_bare.push('=');
+            client_first_bare.push_str(value);
+        }
         Ok(Self {
             hash,
-            client_first_bare: format!("n={},r={}", escape_username(&username), nonce),
+            client_first_bare,
             password,
             client_nonce: nonce,
             expected_server_signature: None,
@@ -308,6 +332,43 @@ fn escape_username(username: &str) -> String {
     username.replace('=', "=3D").replace(',', "=2C")
 }
 
+/// Reject an extension that would corrupt `client-first-message-bare`.
+///
+/// The grammar RFC 5802 §7 writes as `attr-val = ALPHA "=" value` is read by
+/// Kafka's own `ScramMessages` as `[a-zA-Z]+=[^,]*`, so multi-letter keys —
+/// `tokenauth` among them — are what the broker actually parses. This follows
+/// the broker rather than the letter of the ABNF, because a client that is
+/// stricter than the server here can send nothing useful.
+///
+/// The reserved single letters are refused for the same reason `auth` is
+/// refused in an OAUTHBEARER response: `n` and `r` are the username and the
+/// nonce, and letting a caller set a second one puts two of the same attribute
+/// in one message with no rule saying which the broker honours.
+fn validate_extension(key: &str, value: &str) -> Result<()> {
+    const RESERVED: [&str; 10] = ["a", "c", "e", "i", "m", "n", "p", "r", "s", "v"];
+
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Err(Error::InvalidRequest(format!(
+            "SCRAM extension key {key:?} must be one or more ASCII letters"
+        )));
+    }
+    if RESERVED.contains(&key.to_ascii_lowercase().as_str()) {
+        return Err(Error::InvalidRequest(format!(
+            "SCRAM extension key {key:?} is a reserved RFC 5802 attribute and cannot be set"
+        )));
+    }
+    // A comma ends the attribute, and a NUL ends nothing but is not a value
+    // character either. Both would be read by the broker as a message we did
+    // not write.
+    if value.is_empty() || value.chars().any(|c| c == ',' || c.is_control()) {
+        return Err(Error::InvalidRequest(format!(
+            "SCRAM extension {key:?} has a value that is empty or contains a character \
+             RFC 5802 does not permit in one"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +383,7 @@ mod tests {
             "user",
             "s3cr3t-pencil",
             "rOprNGfwEbeRWgbNEkqO".to_owned(),
+            &[],
         )
         .unwrap();
 
@@ -348,6 +410,7 @@ mod tests {
             "user",
             "pencil",
             "rOprNGfwEbeRWgbNEkqO".to_owned(),
+            &[],
         )
         .unwrap();
 
@@ -376,6 +439,7 @@ mod tests {
             "user",
             "pencil",
             "rOprNGfwEbeRWgbNEkqO".to_owned(),
+            &[],
         )
         .unwrap();
         client
@@ -396,6 +460,7 @@ mod tests {
             "user",
             "pencil",
             "clientnonce".to_owned(),
+            &[],
         )
         .unwrap();
         let err = client
@@ -407,7 +472,7 @@ mod tests {
     #[test]
     fn server_errors_surface_as_authentication_failures() {
         let mut client =
-            ScramClient::new(ScramHash::Sha256, "user", "pencil", "abc".to_owned()).unwrap();
+            ScramClient::new(ScramHash::Sha256, "user", "pencil", "abc".to_owned(), &[]).unwrap();
         let err = client.client_final(b"e=unknown-user").unwrap_err();
         assert!(format!("{err}").contains("unknown-user"), "{err}");
     }
@@ -421,10 +486,17 @@ mod tests {
             "user",
             "pass\u{00A0}word",
             "abc".to_owned(),
+            &[],
         )
         .unwrap();
-        let with_space =
-            ScramClient::new(ScramHash::Sha256, "user", "pass word", "abc".to_owned()).unwrap();
+        let with_space = ScramClient::new(
+            ScramHash::Sha256,
+            "user",
+            "pass word",
+            "abc".to_owned(),
+            &[],
+        )
+        .unwrap();
         assert_eq!(with_nbsp.password, with_space.password);
         assert_eq!(with_nbsp.password, "pass word");
     }
@@ -432,8 +504,14 @@ mod tests {
     #[test]
     fn saslprep_strips_soft_hyphens() {
         // U+00AD SOFT HYPHEN maps to nothing.
-        let client =
-            ScramClient::new(ScramHash::Sha256, "us\u{00AD}er", "pw", "abc".to_owned()).unwrap();
+        let client = ScramClient::new(
+            ScramHash::Sha256,
+            "us\u{00AD}er",
+            "pw",
+            "abc".to_owned(),
+            &[],
+        )
+        .unwrap();
         assert_eq!(
             String::from_utf8(client.client_first()).unwrap(),
             "n,,n=user,r=abc"
@@ -444,18 +522,96 @@ mod tests {
     fn prohibited_characters_are_an_error_not_a_silent_strip() {
         // U+0007 BELL is prohibited by RFC 4013.
         assert!(
-            ScramClient::new(ScramHash::Sha256, "user", "pw\u{0007}", "abc".to_owned()).is_err()
+            ScramClient::new(
+                ScramHash::Sha256,
+                "user",
+                "pw\u{0007}",
+                "abc".to_owned(),
+                &[]
+            )
+            .is_err()
         );
     }
 
     #[test]
     fn usernames_escape_the_field_separators() {
         let client =
-            ScramClient::new(ScramHash::Sha256, "a,b=c", "pw", "nonce".to_owned()).unwrap();
+            ScramClient::new(ScramHash::Sha256, "a,b=c", "pw", "nonce".to_owned(), &[]).unwrap();
         assert_eq!(
             String::from_utf8(client.client_first()).unwrap(),
             "n,,n=a=2Cb=3Dc,r=nonce"
         );
+    }
+
+    /// KIP-48's whole client side, in one assertion: a delegation token is a
+    /// SCRAM login whose extension is what makes the broker look in the token
+    /// cache. Without the `,tokenauth=true` the same bytes are a login attempt
+    /// for a user named after a token id.
+    #[test]
+    fn extensions_are_attributes_on_client_first_bare() {
+        let client = ScramClient::new(
+            ScramHash::Sha256,
+            "token-id",
+            "hmac",
+            "nonce".to_owned(),
+            &[("tokenauth".to_owned(), "true".to_owned())],
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(client.client_first()).unwrap(),
+            "n,,n=token-id,r=nonce,tokenauth=true"
+        );
+    }
+
+    /// The extension is inside the auth message, so it is covered by the proof.
+    /// A broker that saw a different extension list computes a different
+    /// signature — which is the property that stops one being stripped in
+    /// flight.
+    #[test]
+    fn an_extension_changes_the_proof() {
+        let server_first = b"r=nonce-server,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+        let mut plain =
+            ScramClient::new(ScramHash::Sha256, "u", "p", "nonce".to_owned(), &[]).unwrap();
+        let mut extended = ScramClient::new(
+            ScramHash::Sha256,
+            "u",
+            "p",
+            "nonce".to_owned(),
+            &[("tokenauth".to_owned(), "true".to_owned())],
+        )
+        .unwrap();
+        assert_ne!(
+            plain.client_final(server_first).unwrap(),
+            extended.client_final(server_first).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_extension_that_would_forge_a_field_is_refused() {
+        let bad: [(&str, &str); 6] = [
+            // `n` and `r` are the username and the nonce.
+            ("n", "mallory"),
+            ("R", "attacker-nonce"),
+            ("", "v"),
+            ("token auth", "true"),
+            // A comma ends the attribute, so this is two attributes.
+            ("tokenauth", "true,n=mallory"),
+            ("tokenauth", ""),
+        ];
+        for (key, value) in bad {
+            let err = ScramClient::new(
+                ScramHash::Sha256,
+                "u",
+                "p",
+                "nonce".to_owned(),
+                &[(key.to_owned(), value.to_owned())],
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidRequest(_)),
+                "{key}={value}: {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -491,8 +647,8 @@ mod tests {
     #[test]
     fn sha512_produces_a_different_proof_than_sha256() {
         let server_first = b"r=abcdef,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
-        let mut a = ScramClient::new(ScramHash::Sha256, "u", "p", "abc".to_owned()).unwrap();
-        let mut b = ScramClient::new(ScramHash::Sha512, "u", "p", "abc".to_owned()).unwrap();
+        let mut a = ScramClient::new(ScramHash::Sha256, "u", "p", "abc".to_owned(), &[]).unwrap();
+        let mut b = ScramClient::new(ScramHash::Sha512, "u", "p", "abc".to_owned(), &[]).unwrap();
         assert_ne!(
             a.client_final(server_first).unwrap(),
             b.client_final(server_first).unwrap()

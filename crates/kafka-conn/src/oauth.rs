@@ -231,6 +231,21 @@ impl TokenRejection {
             },
         }
     }
+
+    /// Whether the broker said the token is *valid* and the principal lacks
+    /// permission.
+    ///
+    /// RFC 7628 §3.2.2 gives three statuses and the SASL error code is 58 for
+    /// all of them, so this JSON field is the only thing separating "your token
+    /// expired" — which the caller fixes by getting another one — from "your
+    /// token does not carry the scope this listener needs", which the caller
+    /// cannot fix at all. They are different errors in the taxonomy for exactly
+    /// that reason.
+    pub(crate) fn is_insufficient_scope(&self) -> bool {
+        self.status
+            .as_deref()
+            .is_some_and(|status| status.eq_ignore_ascii_case("insufficient_scope"))
+    }
 }
 
 impl fmt::Display for TokenRejection {
