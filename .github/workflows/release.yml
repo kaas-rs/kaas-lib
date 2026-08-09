@@ -202,6 +202,14 @@ jobs:
   acceptance:
     needs: version
     runs-on: arc-runner-set-lib
+    # Queued against ci.yml's `integration`, which runs the same suite — see
+    # the comment there. A release pushes a commit and then a tag, so both
+    # workflows otherwise boot brokers on the same scale set simultaneously.
+    # Never cancelling: this job is the last gate before an irreversible
+    # upload, and a push to main must not be able to cut it short.
+    concurrency:
+      group: broker-suite
+      cancel-in-progress: false
     permissions:
       contents: read
     steps:

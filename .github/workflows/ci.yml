@@ -135,6 +135,23 @@ jobs:
   integration:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: arc-runner-set-lib
+    # Shared with release.yml's `acceptance`, which runs the identical
+    # `cargo xtask integration`. A release is two pushes — the commit lands
+    # on main, then the tag goes up — so without this the same tree boots two
+    # full sets of brokers on the same scale set at once. That is not a
+    # theoretical cost: it starved container boots and blew the testkit
+    # two-minute deadline on whichever tests happened to be slowest, which
+    # reads as three unrelated flakes rather than as one overloaded runner.
+    #
+    # The duplication itself stays. A tag can point at a tree this workflow
+    # never saw, and "CI was green on some commit" is the wrong thing to
+    # trust before an irreversible publish. They queue; neither is skipped.
+    #
+    # `cancel-in-progress: false` in both places on purpose: a cancelling
+    # member would let a push to main kill a release's gate mid-run.
+    concurrency:
+      group: broker-suite
+      cancel-in-progress: false
     steps:
       - name: Wait for Docker daemon (DinD sidecar)
         run: |
