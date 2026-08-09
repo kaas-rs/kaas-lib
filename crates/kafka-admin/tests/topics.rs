@@ -278,13 +278,23 @@ async fn per_topic_size_on_rf3_is_the_single_replica_size_not_three_times_it() {
         size.replicated_bytes,
         "the rows and the total are the same bytes"
     );
+    // Not every partition necessarily holds bytes: the console producer above
+    // writes keyless records, and the default partitioner is free to stick a
+    // whole run to one partition. An empty partition still has a log-dir entry
+    // per replica, so it appears here reporting zero — which is the case
+    // `PartitionSize::logical_bytes` documents, not a measurement that went
+    // missing.
     for partition in &size.partitions {
         assert!(
             partition.replicated_bytes >= partition.logical_bytes,
             "{partition:?}"
         );
-        assert!(partition.logical_bytes > 0, "{partition:?}");
     }
+    assert!(
+        size.partitions.iter().any(|p| p.logical_bytes > 0),
+        "{:?}",
+        size.partitions
+    );
 
     // The single-topic entry point asks a scoped `DescribeLogDirs` rather than
     // aggregating the cluster, and has to arrive at the same numbers.
