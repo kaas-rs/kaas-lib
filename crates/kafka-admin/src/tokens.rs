@@ -169,8 +169,17 @@ impl NewDelegationToken {
 
     /// Cap the token's lifetime.
     ///
-    /// The broker clamps this to its own `delegation.token.max.lifetime.ms`,
-    /// so this can shorten a token and never lengthen one.
+    /// This is the *ceiling* renewals are clamped to, not the token's first
+    /// expiry — that comes from the broker's `delegation.token.expiry.time.ms`.
+    /// The broker also clamps this to its own
+    /// `delegation.token.max.lifetime.ms`, so it can shorten a token and never
+    /// lengthen one.
+    ///
+    /// Setting it at or below the broker's expiry window creates a token whose
+    /// expiry is already at its ceiling, which is a token that **cannot be
+    /// renewed at all**: every renewal clamps to the same instant and returns
+    /// it, with no error to say why. Leave it unset unless the token needs to
+    /// live for less than the cluster's default.
     #[must_use]
     pub fn with_max_lifetime(mut self, lifetime: std::time::Duration) -> Self {
         self.max_lifetime_ms = i64::try_from(lifetime.as_millis()).unwrap_or(i64::MAX);

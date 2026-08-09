@@ -104,7 +104,12 @@ async fn a_delegation_token_is_created_described_renewed_and_expired() {
         .create_delegation_token(
             &NewDelegationToken::new()
                 .with_renewer(Principal::user("bob"))
-                .with_max_lifetime(Duration::from_secs(3600)),
+                // Four hours, against the fixture's one-hour expiry window.
+                // The ceiling has to exceed that window or the token is born
+                // with its expiry already *at* its maximum, and every renewal
+                // clamps to the same instant — a token that cannot be renewed
+                // from the moment it exists.
+                .with_max_lifetime(Duration::from_secs(4 * 3600)),
         )
         .await
         .expect("a token for the authenticated principal");
@@ -128,8 +133,8 @@ async fn a_delegation_token_is_created_described_renewed_and_expired() {
     // Renewing sets the expiry to `now + period` rather than adding to the one
     // it has, so the period must exceed the life the token has left — the
     // fixture's `delegation.token.expiry.time.ms` is an hour — for this to be
-    // an extension at all. Two hours is still well inside the 24-hour ceiling
-    // the fixture sets, so the clamp is not what is under test here.
+    // an extension at all. Two hours is inside the four-hour ceiling asked for
+    // above, so the clamp is not what is under test here.
     let renewed = admin
         .renew_delegation_token(token.hmac.clone(), Duration::from_secs(7200))
         .await
