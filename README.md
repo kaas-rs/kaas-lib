@@ -80,7 +80,7 @@ Most of the design follows from four statements, covered in the
 
 ## Status
 
-37 of the protocol's 87 api keys — see the
+52 of the 87 api keys this build names — see the
 [API support matrix](https://kaas-rs.github.io/kaas-lib/compat/api-matrix.html).
 
 The write and consume paths are complete, which is what "general-purpose"

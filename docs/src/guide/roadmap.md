@@ -72,8 +72,6 @@ someone doing them.
 - **`DescribeQuorum`** — the one KRaft-adjacent API a cluster UI plausibly
   wants. Present in the `ApiKey` enum and reachable through generic dispatch;
   there is no typed method.
-- **Delegation token management.** Only the ACL *resource type* exists today;
-  `Create`/`Renew`/`Expire`/`DescribeDelegationToken` do not.
 - **`OffsetForLeaderEpoch`, `UpdateFeatures`, `ListConfigResources`** — routing
   entries only, no user-facing surface.
 

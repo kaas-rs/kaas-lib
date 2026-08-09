@@ -162,6 +162,42 @@ let scram = admin.describe_scram_credentials(["alice"]).await?;
 ACLs, client quotas and SCRAM credentials, describe and alter. `create_acls`
 and `delete_acls` are per-item like everything else.
 
+### Delegation tokens
+
+```rust,no_run
+use kafka_admin::{Admin, NewDelegationToken, Principal};
+use kafka_conn::{SaslConfig, ScramHash};
+
+# async fn example(admin: &Admin) -> kafka_admin::Result<()> {
+let token = admin
+    .create_delegation_token(&NewDelegationToken::new().with_renewer(Principal::user("worker")))
+    .await?;
+
+// The token is a SCRAM credential: the id is the username, the base64 HMAC
+// is the password, and `tokenauth=true` is what sends the broker to its token
+// cache instead of the user store.
+let sasl = SaslConfig::delegation_token(ScramHash::Sha256, &token.token_id, token.password());
+# Ok(())
+# }
+```
+
+A [KIP-48](../compat/kip-index.md) token lets something else authenticate *as*
+you without holding your password — a fleet of workers, a Connect cluster, a
+batch job fanned out over a hundred containers. Three broker rules decide
+whether any of this works, and each arrives as a bare error code:
+
+- The cluster needs a `delegation.token.secret.key`, identical on every
+  broker. Without one, every call is `DELEGATION_TOKEN_AUTH_DISABLED`.
+- Tokens cannot be created over an unauthenticated channel, or by a principal
+  that authenticated *with* a token — that is
+  `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED`, and it is what stops a leaked token
+  renewing itself into a permanent identity.
+- Only the owner and the renewers named at creation may renew or expire one,
+  and renewal is capped by the token's own `max_timestamp_ms`.
+
+`hmac` is a live credential. `Debug` redacts it here; anything else that logs
+a token should do the same.
+
 ## Cluster and storage
 
 ```rust,no_run
@@ -258,7 +294,7 @@ transaction state without starting one. See
 match error {
     Error::ReadOnly { api_key } => { /* this client refuses mutations */ }
     Error::UnsupportedApi { api_key, broker, ours } => { /* which side is the ceiling? */ }
-    Error::Authorization(code) => { /* ask your admin */ }
+    Error::Authorization { code, detail } => { /* ask your admin */ }
     Error::Decode { .. } => { /* this is our bug — report it */ }
     _ => {}
 }

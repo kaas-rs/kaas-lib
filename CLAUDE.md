@@ -2,7 +2,7 @@
 
 ## What this is
 
-A **general-purpose Kafka 4.x client library for Rust**, built directly on the `kafka-protocol` crate. Admin, produce and consume are all first-class: 37 of the protocol's 87 api keys, a batching producer with idempotence and transactions, both consumer-group protocols, and a browse-shaped read path on the side.
+A **general-purpose Kafka 4.x client library for Rust**, built directly on the `kafka-protocol` crate. Admin, produce and consume are all first-class: 52 of the 87 api keys this build names, a batching producer with idempotence and transactions, both consumer-group protocols, and a browse-shaped read path on the side.
 
 Three properties define the shape, and each is a rule rather than a description:
 

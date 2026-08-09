@@ -88,6 +88,11 @@ let tls = TlsConfig::system();
 // Or a private CA.
 let tls = TlsConfig::with_ca_pem(std::fs::read("ca.pem")?);
 
+// Or a private CA *and* the system roots — a corporate CA beside the public
+// ones, which is the normal shape when the same process also talks to an
+// OIDC issuer.
+let tls = TlsConfig::with_system_and_ca_pem(std::fs::read("corporate-ca.pem")?);
+
 // Or mutual TLS.
 let tls = TlsConfig::system()
     .with_client_certificate(std::fs::read("client.pem")?, std::fs::read("client.key")?);
@@ -103,6 +108,34 @@ do not resolve from where the client is running — behind a Kubernetes
 service, a load balancer, or a port-forward. Overriding the name sent in SNI
 and verified against the certificate is what makes that work without
 disabling verification.
+
+One name covers the whole pool. Where the brokers behind a single address
+present *different* certificate names, add the exceptions with
+`with_server_name_for("broker-1.internal", "kafka.example.com")` — one entry
+per advertised host, consulted before the blanket override.
+
+`with_min_tls_version(MinTlsVersion::Tls13)` refuses TLS 1.2. The default
+permits both, and 1.2 as rustls configures it is not broken; the knob is
+there because "1.3 or nothing" is a policy some environments hand down.
+
+### Three limits worth knowing before you debug them
+
+- **PEM only.** A PKCS#12 (`.p12`) or JKS keystore is not accepted, and the
+  Java ecosystem hands those out by default — Strimzi's `KafkaUser` Secret
+  ships `user.p12` beside the PEMs. Convert once:
+
+  ```sh
+  openssl pkcs12 -in user.p12 -nodes -clcerts -out client.pem
+  openssl pkcs12 -in user.p12 -nodes -nocerts -out client.key
+  ```
+
+- **A passphrase-protected key is not decrypted.** It is reported by name
+  rather than as "contained no key", with the `openssl pkcs8 -topk8 -nocrypt`
+  invocation that fixes it.
+- **No revocation checking.** No CRLs are supplied to the verifier and OCSP
+  stapling is not validated, so a revoked broker certificate is accepted
+  until it expires. That matches every mainstream Kafka client and is still
+  the gap if you have a compliance requirement that says otherwise.
 
 ## SASL
 

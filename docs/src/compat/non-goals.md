@@ -42,6 +42,36 @@ and the honest tradeoff is maturity against toolchain: it wraps librdkafka
 and wants cmake and a C toolchain, where this is Rust apart from the `lz4`
 and `zstd` codecs, which reach C through `lz4-sys` and `zstd-sys`.
 
+## We do not implement GSSAPI / Kerberos
+
+`PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` and `OAUTHBEARER` are supported.
+`GSSAPI` is not, and this is a decision rather than a queue position.
+
+There are two ways to get it and both cost more than the feature is worth
+here:
+
+- **Bind to a C library.** `libgssapi_krb5` or MIT/Heimdal through a `-sys`
+  crate. That contradicts the one property this library is chosen for — see
+  the toolchain note above; the two compression codecs are already the
+  exception nobody is happy about, and a Kerberos binding is a much larger
+  one, needing a configured `krb5.conf`, a keytab and a working KDC at
+  runtime rather than a C compiler at build time.
+- **Implement Kerberos in Rust.** ASN.1, the AS/TGS exchange, cross-realm
+  referrals, DNS-based realm discovery, and the SPNEGO wrapping Kafka's
+  `GSSAPI` mechanism sits on. That is a project, not a feature, and one whose
+  failure modes are ferociously hard to test without a KDC in the loop.
+
+If you need Kerberos, `rdkafka` has it through librdkafka and Cyrus SASL —
+which is the honest answer, and the same trade the toolchain note describes
+from the other direction.
+
+Two things soften this in practice. A Kerberos-only cluster is increasingly a
+cluster with an OAuth listener beside it, and [KIP-48 delegation
+tokens](../guide/admin.md) exist precisely so that a Kerberos-authenticated
+process can hand a *SCRAM* credential to the workers that do the actual
+talking — which is supported here, including the `tokenauth=true` SCRAM
+extension that makes it work.
+
 ## `kafka-read` is browse-shaped, and stays that way
 
 This is a scoping decision between two crates rather than a missing feature.

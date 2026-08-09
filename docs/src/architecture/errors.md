@@ -100,6 +100,14 @@ carrying an error code becomes `Error::Broker { code, message }` — or
 distinction is what a UI needs and recovering it later means matching on the
 code again.
 
+One case reaches `Error::Authorization` without a code that says so. An
+`OAUTHBEARER` challenge whose RFC 7628 status is `insufficient_scope` means
+the token is *valid* and the principal is not permitted here — the broker
+reports it under the same code (58) as an expired token, and only the JSON
+status separates the two. Rendering it as an authentication failure sends
+someone to re-enter a credential that was never wrong, so the JSON is read and
+the scope the token would have needed is carried in `detail`.
+
 Per-item results keep their own errors: `describe_topics` over 500 names
 returns 500 entries, each independently `Ok` or `Err`, and one
 `UNKNOWN_TOPIC_OR_PARTITION` does not become the result of the call. See
