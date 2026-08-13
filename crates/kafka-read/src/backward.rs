@@ -246,6 +246,7 @@ pub async fn tail(cluster: &Cluster, spec: &TailSpec) -> Result<Vec<PartitionTai
             collected: VecDeque::new(),
             malformed: 0,
             fetches: 0,
+            target: 0,
             trimmed: false,
         });
     }
@@ -257,55 +258,55 @@ pub async fn tail(cluster: &Cluster, spec: &TailSpec) -> Result<Vec<PartitionTai
     }
 
     // Phase 2: spread the limit across the partitions that hold anything, and
-    // top up. Each round divides what is still owed among the walks that still
-    // have offsets below their window; a walk that cannot fill its share runs
-    // out of partition and leaves the divisor, so the next round hands its
-    // unfilled share to the ones that can. Every round either satisfies the
-    // limit or retires at least one walk, so this terminates within
-    // `walks.len()` rounds — and `limit` means "up to this many, if the topic
+    // top up. Each round divides what is still owed among the walks that can
+    // still yield — offsets left below their window, or records already in
+    // hand past their target, since a chunk that over-delivered is spare
+    // capacity too. A walk that cannot fill its grant leaves the divisor, so
+    // the next round hands its share to the ones that can; every round either
+    // satisfies the limit or retires a walk, so this terminates within one
+    // round per partition — and `limit` means "up to this many, if the topic
     // has them" rather than "a per-partition ration".
-    let mut collected_total = 0usize;
-    while collected_total < spec.limit {
+    //
+    // Only `min(collected, target)` counts towards the limit. Chunks are kept
+    // whole (see `run_until`), and counting the overshoot would let one
+    // partition's chunk spend another partition's share — a four-partition
+    // tail of 400 must be [100, 100, 100, 100], not [200, 200, 0, 0], which
+    // is what the release gate measured when the overshoot counted.
+    loop {
+        let kept: usize = walks.iter().map(Walk::kept).sum();
+        if kept >= spec.limit {
+            break;
+        }
         let open: Vec<usize> = walks
             .iter()
             .enumerate()
-            .filter(|(_, walk)| walk.has_more())
+            .filter(|(_, walk)| walk.can_yield_more())
             .map(|(index, _)| index)
             .collect();
         if open.is_empty() {
             break;
         }
-        let share = (spec.limit - collected_total).div_ceil(open.len());
+        let share = (spec.limit - kept).div_ceil(open.len());
         for index in open {
+            let kept: usize = walks.iter().map(Walk::kept).sum();
+            let deficit = spec.limit.saturating_sub(kept);
+            if deficit == 0 {
+                break;
+            }
             let Some(walk) = walks.get_mut(index) else {
                 continue;
             };
-            let before = walk.collected.len();
-            let target = before.saturating_add(share);
+            let target = walk.target.saturating_add(share.min(deficit));
+            walk.target = target;
             walk.run_until(cluster, spec, topic_id, target).await?;
-            collected_total += walk.collected.len().saturating_sub(before);
-            if collected_total >= spec.limit {
-                break;
-            }
         }
     }
 
-    // Enforce the bound before returning. A chunk that straddles a batch
-    // boundary and `div_ceil` rounding both over-collect slightly; trim the
-    // overshoot oldest-first from whichever partition holds the most, so what
-    // is dropped is always the oldest record of the fullest collection.
-    let mut total: usize = walks.iter().map(|walk| walk.collected.len()).sum();
-    while total > spec.limit {
-        let Some(fullest) = walks
-            .iter_mut()
-            .max_by_key(|walk| walk.collected.len())
-            .filter(|walk| !walk.collected.is_empty())
-        else {
-            break;
-        };
-        fullest.collected.pop_front();
-        fullest.trimmed = true;
-        total -= 1;
+    // Enforce each walk's share before returning: a chunk that straddled a
+    // batch boundary over-collected, and what it over-collected is the oldest
+    // of that partition's records.
+    for walk in &mut walks {
+        walk.trim_to_target();
     }
 
     Ok(walks.into_iter().map(Walk::finish).collect())
@@ -324,6 +325,8 @@ struct Walk {
     collected: VecDeque<Record>,
     malformed: usize,
     fetches: usize,
+    /// This walk's share of the topic-wide limit, granted in rounds.
+    target: usize,
     /// Whether records older than `collected` were dropped to hold the limit.
     trimmed: bool,
 }
@@ -332,6 +335,28 @@ impl Walk {
     /// Whether offsets remain below the window — the walk can yield more.
     fn has_more(&self) -> bool {
         self.window_end > self.log_start
+    }
+
+    /// Records that count towards the topic-wide limit: what is in hand,
+    /// capped at what this walk was asked for.
+    fn kept(&self) -> usize {
+        self.collected.len().min(self.target)
+    }
+
+    /// Whether granting this walk a larger target could yield more records —
+    /// offsets remain below the window, or a chunk already over-delivered
+    /// past the current target and the spare is in hand.
+    fn can_yield_more(&self) -> bool {
+        self.has_more() || self.collected.len() > self.target
+    }
+
+    /// Drop over-collection past the target — the oldest records, since the
+    /// walk collects backwards and a chunk's overshoot lands at the front.
+    fn trim_to_target(&mut self) {
+        while self.collected.len() > self.target {
+            self.collected.pop_front();
+            self.trimmed = true;
+        }
     }
 
     /// Walk backwards until `target` records are held or the log start is hit.
@@ -779,8 +804,57 @@ mod tests {
             collected: VecDeque::new(),
             malformed: 0,
             fetches: 0,
+            target: 0,
             trimmed,
         }
+    }
+
+    fn record_at(offset: i64) -> Record {
+        Record {
+            topic: "orders".to_owned(),
+            partition: 0,
+            offset,
+            timestamp: offset,
+            timestamp_type: crate::record::TimestampType::Creation,
+            key: None,
+            value: None,
+            headers: Vec::new(),
+            producer_id: None,
+            transactional: false,
+            leader_epoch: None,
+        }
+    }
+
+    /// The release-gate regression: a chunk that over-delivers keeps its
+    /// records, but they must not count towards the topic-wide limit, and the
+    /// trim must drop the oldest of them.
+    #[test]
+    fn overshoot_is_kept_whole_but_counts_and_returns_only_the_target() {
+        let mut walk = walk_at(50, 10, false);
+        walk.target = 2;
+        for offset in [7, 8, 9] {
+            walk.collected.push_back(record_at(offset));
+        }
+        assert_eq!(walk.kept(), 2, "overshoot must not spend another's share");
+        assert!(
+            walk.can_yield_more(),
+            "the spare record is capacity for a later round"
+        );
+
+        walk.trim_to_target();
+        assert_eq!(
+            walk.collected
+                .iter()
+                .map(|record| record.offset)
+                .collect::<Vec<_>>(),
+            vec![8, 9],
+            "the oldest record is the one dropped"
+        );
+        assert!(walk.trimmed);
+        assert!(
+            !walk.finish().reached_log_start,
+            "a trimmed walk never claims the bottom"
+        );
     }
 
     #[test]

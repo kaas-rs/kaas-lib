@@ -6,9 +6,14 @@
 //! that serves the classic group APIs but not KIP-848's key 68 raised
 //! `UnsupportedApi` from every heartbeat, the caller's retry loop read that
 //! as transient, and the consumer looped forever. The fixture reproduces such
-//! a broker by turning the new coordinator protocol off —
-//! `group.coordinator.rebalance.protocols=classic` — which removes
-//! `ConsumerGroupHeartbeat` from what `ApiVersions` advertises.
+//! a broker with Kafka 3.9, where KIP-848 is opt-in early access, off by
+//! default, and — the fact negotiation keys on — absent from `ApiVersions`.
+//!
+//! Deliberately **not** a 4.x broker with
+//! `group.coordinator.rebalance.protocols=classic`: such a broker still
+//! advertises key 68 (the release gate for 0.8.0 measured exactly that), so
+//! it reproduces a different, rarer misconfiguration — one `ApiVersions`
+//! cannot see — and not the filed case, which is kaas and pre-4.0 clusters.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -53,9 +58,10 @@ async fn seeded(config: BrokerConfig) -> (KafkaCluster, Admin) {
     (fixture, admin)
 }
 
-/// A broker whose `ApiVersions` does not offer key 68.
+/// A broker whose `ApiVersions` does not offer key 68: Kafka 3.9, the last
+/// minor where KIP-848 ships disabled and unadvertised.
 fn classic_only() -> BrokerConfig {
-    BrokerConfig::new().with_property("group.coordinator.rebalance.protocols", "classic")
+    BrokerConfig::new().with_image("apache/kafka", "3.9.1")
 }
 
 fn config() -> ConsumerConfig {
