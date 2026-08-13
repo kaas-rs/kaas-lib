@@ -75,6 +75,25 @@ fn config() -> ConsumerConfig {
         .max_wait_ms(200)
 }
 
+/// The fixture's load-bearing property, measured on a fresh bare connection:
+/// what this broker actually advertises for key 68, and how wide its table
+/// is. In the assertion messages so a fixture that turns out to advertise
+/// the key fails saying so, not three inferences later.
+async fn key_68_facts(fixture: &KafkaCluster) -> String {
+    let conn = kafka_conn::Connection::connect(
+        &fixture.bootstrap()[0],
+        kafka_conn::ConnectionConfig::new(),
+    )
+    .await
+    .expect("probe connection");
+    let versions = conn.versions();
+    format!(
+        "broker advertises {} api keys; ConsumerGroupHeartbeat row: {:?}",
+        versions.len(),
+        versions.get(kafka_conn::ApiKey::ConsumerGroupHeartbeat)
+    )
+}
+
 /// Poll until records arrive, bounded so a consumer that cannot make progress
 /// fails as this assertion rather than as the fixture's two-minute deadline.
 async fn drain_some(consumer: &mut NegotiatedConsumer) -> usize {
@@ -94,7 +113,8 @@ async fn drain_some(consumer: &mut NegotiatedConsumer) -> usize {
 
 #[testkit::integration_test]
 async fn auto_downgrades_to_classic_on_a_broker_without_kip848() {
-    let (_fixture, admin) = seeded(classic_only()).await;
+    let (fixture, admin) = seeded(classic_only()).await;
+    let facts = key_68_facts(&fixture).await;
 
     let mut consumer = NegotiatedConsumer::subscribe(
         admin.cluster().clone(),
@@ -108,7 +128,7 @@ async fn auto_downgrades_to_classic_on_a_broker_without_kip848() {
     assert_eq!(
         consumer.protocol(),
         GroupProtocol::Classic,
-        "key 68 is not advertised, so negotiation must land on classic"
+        "key 68 must not be advertised here, so negotiation must land on classic — {facts}"
     );
     let got = drain_some(&mut consumer).await;
     assert!(got > 0, "the downgraded consumer must actually consume");
@@ -136,16 +156,20 @@ async fn a_pinned_group_consumer_fails_at_subscribe_not_on_every_poll() {
     // where a retry loop treats it as transient and spins. Pinning the KIP-848
     // type against a broker that cannot serve it must now fail once, at the
     // point the caller made the choice.
-    let (_fixture, admin) = seeded(classic_only()).await;
+    let (fixture, admin) = seeded(classic_only()).await;
+    let facts = key_68_facts(&fixture).await;
 
-    let error = GroupConsumer::subscribe(
+    let result = GroupConsumer::subscribe(
         admin.cluster().clone(),
         config(),
         "negotiate-pinned",
         [TOPIC],
     )
-    .await
-    .expect_err("a broker without key 68 can never admit this member");
+    .await;
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("a broker without key 68 can never admit this member — {facts}"),
+    };
 
     assert!(
         matches!(error, kafka_consume::Error::UnsupportedApi { .. }),
