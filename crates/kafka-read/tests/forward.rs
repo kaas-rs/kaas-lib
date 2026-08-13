@@ -83,10 +83,26 @@ async fn ten_thousand_records_across_six_partitions_with_mixed_codecs() {
     let mut count = 0usize;
     let mut per_partition: HashMap<i32, Vec<i64>> = HashMap::new();
     let mut saw_progress = false;
+    let mut started: Vec<i32> = Vec::new();
     let mut done = None;
 
     while let Some(event) = stream.next().await {
         match event.expect("no scan-level failure") {
+            ScanEvent::PartitionStarted {
+                partition,
+                substituted,
+                ..
+            } => {
+                assert!(
+                    count == 0,
+                    "every partition announces its start before any record"
+                );
+                assert_eq!(
+                    substituted, None,
+                    "Earliest is always honoured, never substituted"
+                );
+                started.push(partition);
+            }
             ScanEvent::Record(record) => {
                 count += 1;
                 per_partition
@@ -110,10 +126,15 @@ async fn ten_thousand_records_across_six_partitions_with_mixed_codecs() {
 
     assert_eq!(count, 10_000, "exact count across all five codecs");
     assert!(saw_progress, "a 10k-record scan must report progress");
+    assert_eq!(started.len(), 6, "one PartitionStarted per partition");
 
     let done = done.expect("the scan ends with Done");
     assert_eq!(done.records_emitted, 10_000);
     assert_eq!(done.partitions_active, 0);
+    assert_eq!(
+        done.partitions_planned, 6,
+        "the merge width survives onto the final event"
+    );
 
     // Per-partition ordering is exact, always. This is the assertion that
     // catches an interleave that reorders within a partition.

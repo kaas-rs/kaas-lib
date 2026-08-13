@@ -266,7 +266,7 @@ async fn scan_one(cluster: &Cluster, topic: &str, options: &Options) -> Result<S
             }
             ScanEvent::Malformed { .. } => stats.malformed += 1,
             ScanEvent::Progress(_) => stats.saw_progress = true,
-            ScanEvent::PartitionComplete { .. } => {}
+            ScanEvent::PartitionStarted { .. } | ScanEvent::PartitionComplete { .. } => {}
             ScanEvent::Done(progress) => {
                 stats.hit_limit =
                     progress.records_emitted >= u64::try_from(options.limit).unwrap_or(u64::MAX);

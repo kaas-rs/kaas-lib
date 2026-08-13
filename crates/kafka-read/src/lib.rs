@@ -93,7 +93,9 @@ pub use batch::{
 };
 pub use offsets::partition_bounds;
 pub use record::{DecodeError, Record, RecordOutcome, TimestampType};
-pub use scan::{RecordFilter, ScanEvent, ScanProgress, ScanSpec, StartPosition, scan};
+pub use scan::{
+    RecordFilter, ScanEvent, ScanProgress, ScanSpec, StartPosition, StartSubstitution, scan,
+};
 
 pub use kafka_conn::{Error, Result};
 pub use kafka_meta::{Cluster, ClusterConfig};

@@ -21,9 +21,11 @@
 //! usual case. When the buffer cap forces an emit before every partition is
 //! represented, ordering degrades gracefully: the emitted record is the
 //! earliest among those buffered, so the reorder is bounded by the span of the
-//! buffer rather than by the length of the topic. [`ScanEvent::Progress`]
-//! reports when that happens, so a UI can say "approximately ordered" rather
-//! than quietly lying.
+//! buffer rather than by the length of the topic.
+//! [`ScanProgress::reorder_window`] reports how far that bound stretched — and
+//! stays `0` on a single-partition scan, where there is no merge to degrade —
+//! so a UI can say "approximately ordered, within N" rather than quietly
+//! lying.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -237,9 +239,25 @@ pub struct ScanProgress {
     /// as "N of M records".
     pub offsets_total: i64,
     /// Partitions still being read.
+    ///
+    /// Forced to zero on the final event — it counts what is *left*, so it is
+    /// how a caller watches partitions finish, and it is not the merge's
+    /// width. For the width, which a caller needs exactly when this is zero,
+    /// see [`ScanProgress::partitions_planned`].
     pub partitions_active: usize,
-    /// Whether ordering had to degrade because the buffer filled.
-    pub ordering_degraded: bool,
+    /// Partitions the scan set out to read — the widest the merge has been.
+    /// Never changes over the life of the scan.
+    pub partitions_planned: usize,
+    /// Roughly how far apart, in records, two records from *different*
+    /// partitions may have been emitted relative to timestamp order.
+    ///
+    /// `0` means cross-partition timestamp order held throughout — including,
+    /// always, when the merge is one partition wide: within a partition the
+    /// order is exact whatever the buffer did. Non-zero means the buffer
+    /// ceiling forced an emit before every partition was represented, and the
+    /// reorder is bounded by this many records rather than by the length of
+    /// the topic.
+    pub reorder_window: usize,
 }
 
 impl ScanProgress {
@@ -255,9 +273,61 @@ impl ScanProgress {
     }
 }
 
+/// Why a partition's scan starts somewhere other than where it was asked to.
+///
+/// Both substitutions are the right behaviour for browsing and quietly wrong
+/// for verification — "did my record land at 900001" answered from offset
+/// 12000 looks like it worked. The scan still substitutes, because a partial
+/// browse beats an error; this says so, per partition, so the caller can tell
+/// "I read from where you asked" apart from "I read from somewhere else".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartSubstitution {
+    /// [`StartPosition::Offset`] named an offset the partition no longer
+    /// retains; the scan starts at the log start instead.
+    OffsetBelowLogStart {
+        /// The offset that was asked for.
+        requested: i64,
+        /// The first offset the partition still holds, where the scan starts.
+        log_start: i64,
+    },
+    /// [`StartPosition::Offset`] named an offset the partition has not
+    /// reached; the scan starts at the log end instead.
+    OffsetBeyondLogEnd {
+        /// The offset that was asked for.
+        requested: i64,
+        /// The partition's log end, where the scan starts.
+        log_end: i64,
+    },
+    /// [`StartPosition::Timestamp`] resolved to no offset on this partition —
+    /// nothing was written at or after the instant, or the broker holds no
+    /// timestamp index — and the scan starts at the log end. Without this an
+    /// empty window is indistinguishable from "nothing has been written
+    /// since then".
+    TimestampUnresolved {
+        /// The instant that was asked about, in epoch milliseconds.
+        requested: i64,
+        /// The partition's log end, where the scan starts.
+        log_end: i64,
+    },
+}
+
 /// What a scan emits.
 #[derive(Debug, Clone)]
 pub enum ScanEvent {
+    /// Where a partition's scan actually starts — one per partition, before
+    /// any record. `substituted` is `None` when the requested
+    /// [`StartPosition`] was honoured exactly; for a timestamp start,
+    /// `start_offset` is what the instant resolved to, so a caller does not
+    /// need its own `ListOffsets` to find out.
+    PartitionStarted {
+        /// Partition.
+        partition: i32,
+        /// The first offset the scan will read.
+        start_offset: i64,
+        /// The substitution that was made, when the requested position could
+        /// not be honoured.
+        substituted: Option<StartSubstitution>,
+    },
     /// A decoded record.
     Record(Record),
     /// A batch that would not decode. The scan continues.
@@ -311,6 +381,9 @@ struct PartitionCursor {
     next_offset: i64,
     end_offset: i64,
     start_offset: i64,
+    /// How the start was substituted, when it was; drained into the
+    /// [`ScanEvent::PartitionStarted`] queued before the first record.
+    substituted: Option<StartSubstitution>,
     buffered: VecDeque<RecordOutcome>,
     finished: bool,
 }
@@ -329,6 +402,42 @@ impl PartitionCursor {
             // where it happened.
             RecordOutcome::Malformed { .. } => i64::MIN,
         })
+    }
+}
+
+/// How far apart two records from different partitions may be when the buffer
+/// ceiling forces an emit: the buffer budget spread over the merge's width.
+/// `0` when the merge is one partition wide — there is no cross-partition
+/// order to degrade.
+fn reorder_window(budget: usize, merging: usize) -> usize {
+    if merging <= 1 { 0 } else { budget / merging }
+}
+
+/// Where an explicit-offset start actually lands in `[earliest, latest]`, and
+/// whether that is a substitution the caller should hear about.
+fn resolve_offset_start(
+    requested: i64,
+    earliest: i64,
+    latest: i64,
+) -> (i64, Option<StartSubstitution>) {
+    if requested < earliest {
+        (
+            earliest,
+            Some(StartSubstitution::OffsetBelowLogStart {
+                requested,
+                log_start: earliest,
+            }),
+        )
+    } else if requested > latest {
+        (
+            latest,
+            Some(StartSubstitution::OffsetBeyondLogEnd {
+                requested,
+                log_end: latest,
+            }),
+        )
+    } else {
+        (requested, None)
     }
 }
 
@@ -358,11 +467,23 @@ pub async fn scan(
     cluster: &Cluster,
     spec: ScanSpec,
 ) -> Result<impl Stream<Item = Result<ScanEvent>> + Send> {
-    let (cursors, topic_id) = plan(cluster, &spec).await?;
+    let (mut cursors, topic_id) = plan(cluster, &spec).await?;
     let offsets_total = cursors
         .iter()
         .map(|c| c.end_offset.saturating_sub(c.start_offset).max(0))
         .sum();
+
+    // Every partition announces where it actually starts before any record is
+    // emitted, so a caller sees a substitution — or a timestamp's resolution
+    // — before it has to interpret an empty window.
+    let mut pending = VecDeque::with_capacity(cursors.len());
+    for cursor in &mut cursors {
+        pending.push_back(ScanEvent::PartitionStarted {
+            partition: cursor.partition,
+            start_offset: cursor.start_offset,
+            substituted: cursor.substituted.take(),
+        });
+    }
 
     let state = ScanState {
         cluster: cluster.clone(),
@@ -373,12 +494,13 @@ pub async fn scan(
             offsets_consumed: 0,
             offsets_total,
             partitions_active: cursors.len(),
-            ordering_degraded: false,
+            partitions_planned: cursors.len(),
+            reorder_window: 0,
         },
         cursors,
         spec,
         topic_id,
-        pending: VecDeque::new(),
+        pending,
         buffered_total: 0,
         done: false,
         progress_every: 1_000,
@@ -415,14 +537,34 @@ async fn plan(cluster: &Cluster, spec: &ScanSpec) -> Result<(Vec<PartitionCursor
         let (earliest, latest) =
             crate::offsets::bounds(cluster, &spec.topic, partition, leader).await?;
 
-        let start = match spec.from {
-            StartPosition::Earliest => earliest,
-            StartPosition::Latest => latest,
-            StartPosition::Offset(offset) => offset.clamp(earliest, latest),
+        // Resolve the start, and remember when it is a substitution rather
+        // than an honouring: the facts are in hand at exactly this point —
+        // `bounds` was just paid for, and `at_timestamp` said `None` rather
+        // than an offset — and dropping them forces every caller to buy them
+        // again to interpret an empty window.
+        let (start, substituted) = match spec.from {
+            StartPosition::Earliest => (earliest, None),
+            StartPosition::Latest => (latest, None),
+            StartPosition::Offset(offset) => resolve_offset_start(offset, earliest, latest),
             StartPosition::Timestamp(timestamp) => {
-                crate::offsets::at_timestamp(cluster, &spec.topic, partition, leader, timestamp)
-                    .await?
-                    .unwrap_or(latest)
+                match crate::offsets::at_timestamp(
+                    cluster,
+                    &spec.topic,
+                    partition,
+                    leader,
+                    timestamp,
+                )
+                .await?
+                {
+                    Some(offset) => (offset, None),
+                    None => (
+                        latest,
+                        Some(StartSubstitution::TimestampUnresolved {
+                            requested: timestamp,
+                            log_end: latest,
+                        }),
+                    ),
+                }
             }
         };
 
@@ -432,6 +574,7 @@ async fn plan(cluster: &Cluster, spec: &ScanSpec) -> Result<(Vec<PartitionCursor
             next_offset: start,
             end_offset: latest,
             start_offset: start,
+            substituted,
             buffered: VecDeque::new(),
             // A partition that starts at its own log end has nothing to read
             // — unless the scan is following, in which case that is precisely
@@ -499,7 +642,7 @@ impl ScanState {
     async fn refill(&mut self) -> Result<bool> {
         if self.buffered_total >= self.spec.max_buffered_records {
             // At the ceiling. Emit from what we have rather than growing.
-            self.progress.ordering_degraded = true;
+            self.note_ordering_degraded();
             return Ok(false);
         }
 
@@ -677,7 +820,7 @@ impl ScanState {
             return None;
         }
         if waiting_on_empty_partition && at_ceiling {
-            self.progress.ordering_degraded = true;
+            self.note_ordering_degraded();
         }
 
         let choice = self
@@ -753,6 +896,26 @@ impl ScanState {
         }
     }
 
+    /// Record that the buffer ceiling forced an emit before every partition
+    /// was represented — but only when there is a merge to degrade.
+    ///
+    /// Within one partition the order is exact, always, so a single-partition
+    /// scan that is simply big must not raise a caveat about a guarantee that
+    /// still holds. When it did happen, what a caller wants to render is the
+    /// magnitude — "records may be up to N apart" — and N is the buffer
+    /// budget spread over the merge's width, both of which are this scan's
+    /// own numbers. The widest window ever reached is kept: the caveat
+    /// describes the whole scan, not the moment the last record was emitted.
+    fn note_ordering_degraded(&mut self) {
+        let merging = self
+            .cursors
+            .iter()
+            .filter(|c| !(c.exhausted() && c.buffered.is_empty()))
+            .count();
+        let window = reorder_window(self.spec.max_buffered_records, merging);
+        self.progress.reorder_window = self.progress.reorder_window.max(window);
+    }
+
     fn finish(&mut self) -> ScanEvent {
         self.done = true;
         self.progress.partitions_active = 0;
@@ -822,7 +985,8 @@ mod tests {
             offsets_consumed: 0,
             offsets_total: 0,
             partitions_active: 1,
-            ordering_degraded: false,
+            partitions_planned: 1,
+            reorder_window: 0,
         };
         assert_eq!(progress.fraction(), None);
 
@@ -844,6 +1008,7 @@ mod tests {
             next_offset: 0,
             end_offset: 10,
             start_offset: 0,
+            substituted: None,
             buffered: VecDeque::new(),
             finished: false,
         };
@@ -866,6 +1031,7 @@ mod tests {
             next_offset: 10,
             end_offset: 10,
             start_offset: 0,
+            substituted: None,
             buffered: VecDeque::new(),
             finished: false,
         };
@@ -903,6 +1069,63 @@ mod tests {
         assert!(
             !should_fetch(false, true, false),
             "a tail with records in hand must emit them first"
+        );
+    }
+
+    #[test]
+    fn a_single_partition_merge_has_no_order_to_degrade() {
+        // Within one partition the order is exact, always — a scan that is
+        // simply bigger than its buffer must not raise a caveat about a
+        // guarantee that still holds. This used to fire from the ceiling
+        // alone, and kaas-ui carried a suppression (and a test for it) to
+        // avoid rendering "approximately ordered" over an exactly-ordered
+        // list.
+        assert_eq!(reorder_window(10_000, 1), 0);
+        assert_eq!(reorder_window(10_000, 0), 0);
+    }
+
+    #[test]
+    fn the_reorder_window_is_the_budget_spread_over_the_merge() {
+        // "Records may be up to N apart", where N is the scan's own numbers —
+        // not something every caller reconstructs from the spec it handed in.
+        assert_eq!(reorder_window(10_000, 16), 625);
+        assert_eq!(reorder_window(10_000, 2), 5_000);
+    }
+
+    #[test]
+    fn an_in_range_offset_start_is_honoured_and_says_nothing() {
+        assert_eq!(resolve_offset_start(500, 100, 1_000), (500, None));
+        // The bounds themselves are in range.
+        assert_eq!(resolve_offset_start(100, 100, 1_000), (100, None));
+        assert_eq!(resolve_offset_start(1_000, 100, 1_000), (1_000, None));
+    }
+
+    #[test]
+    fn an_expired_offset_start_names_the_substitution() {
+        // "Did my record land at 43" answered from offset 12_000 looks like
+        // it worked; the substitution is performed for the browse case but
+        // must be reported.
+        let (start, substituted) = resolve_offset_start(43, 12_000, 16_733);
+        assert_eq!(start, 12_000);
+        assert_eq!(
+            substituted,
+            Some(StartSubstitution::OffsetBelowLogStart {
+                requested: 43,
+                log_start: 12_000,
+            })
+        );
+    }
+
+    #[test]
+    fn an_unreached_offset_start_names_the_substitution() {
+        let (start, substituted) = resolve_offset_start(900_001, 0, 200);
+        assert_eq!(start, 200);
+        assert_eq!(
+            substituted,
+            Some(StartSubstitution::OffsetBeyondLogEnd {
+                requested: 900_001,
+                log_end: 200,
+            })
         );
     }
 
