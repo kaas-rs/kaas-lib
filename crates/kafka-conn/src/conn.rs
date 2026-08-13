@@ -707,8 +707,18 @@ impl RawConn<'_> {
 ///
 /// A genuine chicken-and-egg: we cannot know what the broker speaks until we
 /// ask, and asking requires choosing a version. Send at our maximum, and treat
-/// `UNSUPPORTED_VERSION` as data rather than as a failed handshake — the broker
-/// still returns its version table in that error response, encoded at v0.
+/// `UNSUPPORTED_VERSION` as data rather than as a failed handshake: retry at
+/// v0, which every broker serves.
+///
+/// The error response does carry a table (KIP-511), but it names **only the
+/// `ApiVersions` key itself** — which versions the broker would have accepted
+/// — not the broker's api surface. Both mistakes have now been made here and
+/// caught by a Kafka 3.7 broker, whose `ApiVersions` tops out at v3 while
+/// ours is v4: treating the error as fatal failed every handshake, and
+/// treating its one-row table as the answer left every other api key
+/// unadvertised, which downstream read as a broker that cannot serve
+/// `Metadata`. Brokers new enough to accept our maximum never take this path,
+/// which is how both survived every 3.9+/4.x fixture and both live clusters.
 async fn negotiate_versions(raw: &mut RawConn<'_>) -> Result<ApiVersions> {
     let our_max = our_range(ApiKey::ApiVersions)
         .map(|r| r.max)
@@ -733,45 +743,25 @@ async fn negotiate_versions(raw: &mut RawConn<'_>) -> Result<ApiVersions> {
         tracing::debug!(
             peer = raw.peer,
             our_max,
-            "broker rejected ApiVersions at our maximum; falling back to v0"
+            "broker rejected ApiVersions at our maximum; retrying at v0"
         );
-        let mut at_v0 = body.clone();
-        let downgraded = ApiVersionsResponse::decode(&mut at_v0, 0)
-            .map_err(|e| Error::decode("decoding ApiVersions v0 fallback", e))?;
-        if downgraded.api_keys.is_empty() {
-            // Some brokers answer the version probe with an empty table. Ask
-            // again, properly, at v0.
-            let frame = raw.round_trip(ApiKey::ApiVersions, 0, &request).await?;
-            let mut body = codec::split_response_body(ApiKey::ApiVersions, 0, frame)?;
-            ApiVersionsResponse::decode(&mut body, 0)
-                .map_err(|e| Error::decode("decoding ApiVersions v0", e))?
-        } else {
-            downgraded
-        }
+        // A bare default request for the retry: the software-name fields do
+        // not exist at v0.
+        let retry = ApiVersionsRequest::default();
+        let frame = raw.round_trip(ApiKey::ApiVersions, 0, &retry).await?;
+        let mut body = codec::split_response_body(ApiKey::ApiVersions, 0, frame)?;
+        ApiVersionsResponse::decode(&mut body, 0)
+            .map_err(|e| Error::decode("decoding ApiVersions v0", e))?
     } else {
         let mut body = body;
         ApiVersionsResponse::decode(&mut body, our_max)
             .map_err(|e| Error::decode("decoding ApiVersions", e))?
     };
 
-    accept_versions(&response)
-}
-
-/// Accept a decoded `ApiVersions` response, or name why not.
-///
-/// The subtlety this exists for, found by pointing the handshake at a Kafka
-/// 3.7 broker: in the fallback, the version table arrives *inside* an
-/// `UNSUPPORTED_VERSION` response — the error code is the envelope the answer
-/// is delivered in, not a verdict on the handshake — so that code is fatal
-/// only when the table did not come with it. Failing on it unconditionally
-/// re-creates exactly the "treat 35 as a failed handshake" mistake the
-/// fallback was written to avoid, one step later.
-fn accept_versions(response: &ApiVersionsResponse) -> Result<ApiVersions> {
-    match ErrorCode::from_code(response.error_code) {
-        Some(ErrorCode::UnsupportedVersion) if !response.api_keys.is_empty() => {}
-        Some(code) => return Err(Error::from_code(code, None)),
-        None => {}
+    if let Some(code) = ErrorCode::from_code(response.error_code) {
+        return Err(Error::from_code(code, None));
     }
+
     Ok(ApiVersions::from_triples(
         response
             .api_keys
@@ -1143,20 +1133,23 @@ mod tests {
     }
 
     #[test]
-    fn a_v0_fallback_body_decodes_into_a_version_table() {
-        // What the broker sends when it rejects our ApiVersions version: an
-        // error code *and* its table, encoded at v0.
+    fn the_unsupported_version_body_names_only_the_retry_range() {
+        // KIP-511: the error response's table has exactly one row — the
+        // `ApiVersions` key itself, saying which versions the broker would
+        // accept. It is the retry instruction, NOT the broker's api surface;
+        // adopting it as the surface left `Metadata` unadvertised against a
+        // Kafka 3.7 broker, which downstream read as `UnsupportedApi`.
         let mut body = BytesMut::new();
         body.extend_from_slice(&UNSUPPORTED_VERSION.to_be_bytes());
         body.extend_from_slice(&1i32.to_be_bytes()); // one entry
-        body.extend_from_slice(&ApiKey::Metadata.code().to_be_bytes());
+        body.extend_from_slice(&ApiKey::ApiVersions.code().to_be_bytes());
         body.extend_from_slice(&0i16.to_be_bytes());
-        body.extend_from_slice(&13i16.to_be_bytes());
+        body.extend_from_slice(&3i16.to_be_bytes());
 
         let mut buf = body.freeze();
         let decoded = ApiVersionsResponse::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded.error_code, UNSUPPORTED_VERSION);
-        assert_eq!(decoded.api_keys.len(), 1, "the table survives the error");
+        assert_eq!(decoded.api_keys.len(), 1);
 
         let table = ApiVersions::from_triples(
             decoded
@@ -1164,53 +1157,9 @@ mod tests {
                 .iter()
                 .map(|k| (k.api_key, k.min_version, k.max_version)),
         );
-        assert!(table.supports(ApiKey::Metadata));
-    }
-
-    fn versions_response(error_code: i16, keys: usize) -> ApiVersionsResponse {
-        let mut response = ApiVersionsResponse::default();
-        response.error_code = error_code;
-        response.api_keys = (0..keys)
-            .map(|_| {
-                let mut key =
-                    kafka_protocol::messages::api_versions_response::ApiVersion::default();
-                key.api_key = ApiKey::Metadata.code();
-                key.min_version = 0;
-                key.max_version = 13;
-                key
-            })
-            .collect();
-        response
-    }
-
-    /// The Kafka 3.7 regression: the fallback's table rides inside an
-    /// `UNSUPPORTED_VERSION` response, and failing on that code after
-    /// decoding the table re-creates the fatal-handshake mistake one step
-    /// later.
-    #[test]
-    fn a_piggybacked_table_is_an_answer_not_a_failure() {
-        let table = accept_versions(&versions_response(UNSUPPORTED_VERSION, 1)).unwrap();
-        assert!(table.supports(ApiKey::Metadata));
-    }
-
-    #[test]
-    fn unsupported_version_with_no_table_is_still_fatal() {
-        // The empty-table probe answer: there is nothing to negotiate from,
-        // so this one genuinely failed.
-        let err = accept_versions(&versions_response(UNSUPPORTED_VERSION, 0)).unwrap_err();
-        assert!(matches!(
-            err,
-            Error::Broker {
-                code: ErrorCode::UnsupportedVersion,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn any_other_error_code_is_fatal_with_or_without_a_table() {
-        // 29: TOPIC_AUTHORIZATION_FAILED stands in for "something else".
-        assert!(accept_versions(&versions_response(29, 1)).is_err());
-        assert!(accept_versions(&versions_response(0, 1)).is_ok());
+        assert!(
+            !table.supports(ApiKey::Metadata),
+            "which is why it must never be adopted as the broker's surface"
+        );
     }
 }
