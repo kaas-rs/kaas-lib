@@ -398,6 +398,18 @@ async fn a_following_scan_waits_at_the_log_end_and_sees_what_arrives_next() {
         .unwrap(),
     );
 
+    // The per-partition start announcements arrive immediately — a follower
+    // gets them too, and `Latest` is an honoured position, never a
+    // substituted one.
+    for _ in 0..6 {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await {
+            Ok(Some(Ok(ScanEvent::PartitionStarted { substituted, .. }))) => {
+                assert_eq!(substituted, None, "Latest is always honoured");
+            }
+            other => panic!("expected a PartitionStarted, got {other:?}"),
+        }
+    }
+
     // Nothing has been written since the scan opened, so it must be waiting
     // rather than finished.
     let idle = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await;

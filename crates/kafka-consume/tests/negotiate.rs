@@ -6,14 +6,17 @@
 //! that serves the classic group APIs but not KIP-848's key 68 raised
 //! `UnsupportedApi` from every heartbeat, the caller's retry loop read that
 //! as transient, and the consumer looped forever. The fixture reproduces such
-//! a broker with Kafka 3.9, where KIP-848 is opt-in early access, off by
-//! default, and — the fact negotiation keys on — absent from `ApiVersions`.
+//! a broker with Kafka 3.9 running the *old* group coordinator, where
+//! `ConsumerGroupHeartbeat` is — the fact negotiation keys on — absent from
+//! `ApiVersions`.
 //!
-//! Deliberately **not** a 4.x broker with
-//! `group.coordinator.rebalance.protocols=classic`: such a broker still
-//! advertises key 68 (the release gate for 0.8.0 measured exactly that), so
-//! it reproduces a different, rarer misconfiguration — one `ApiVersions`
-//! cannot see — and not the filed case, which is kaas and pre-4.0 clusters.
+//! Two nearby shapes deliberately not used, both measured by the 0.8.0
+//! release gate rather than assumed: a 4.x broker with
+//! `group.coordinator.rebalance.protocols=classic` still advertises key 68,
+//! and so does a stock 3.9, whose new coordinator is on by default even
+//! though the consumer protocol is opt-in. Advertisement follows the
+//! *coordinator*, not the protocol config — so the honest reproduction of
+//! "broker offers None" (kaas, and pre-3.8 clusters) is the old coordinator.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -58,10 +61,13 @@ async fn seeded(config: BrokerConfig) -> (KafkaCluster, Admin) {
     (fixture, admin)
 }
 
-/// A broker whose `ApiVersions` does not offer key 68: Kafka 3.9, the last
-/// minor where KIP-848 ships disabled and unadvertised.
+/// A broker whose `ApiVersions` does not offer key 68: Kafka 3.9 with the
+/// new group coordinator off, which is what gates the advertisement. The
+/// config was removed in 4.0, hence the older image.
 fn classic_only() -> BrokerConfig {
-    BrokerConfig::new().with_image("apache/kafka", "3.9.1")
+    BrokerConfig::new()
+        .with_image("apache/kafka", "3.9.1")
+        .with_property("group.coordinator.new.enable", "false")
 }
 
 fn config() -> ConsumerConfig {
