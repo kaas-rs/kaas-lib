@@ -17,15 +17,18 @@ kafka-consume = "0.4"
 | `GroupConsumer` | the broker (KIP-848) | yes | a Kafka 4.x cluster with the new coordinator enabled, chosen explicitly |
 | `ClassicConsumer` | the group leader, client-side | yes | brokers older than 4.0, or a mixed group with Java clients pinned to `group.protocol=classic` |
 
-`NegotiatedConsumer::subscribe` probes `ApiVersions` for
-`ConsumerGroupHeartbeat` — a fact already in hand on every pooled connection,
-so it costs no extra round trip — and picks KIP-848 when the broker advertises
-it, the classic protocol when it does not, mirroring the Java client's
-`group.protocol=consumer` auto-downgrade. Pin the choice with
-`ConsumerConfig::with_group_protocol(GroupProtocol::Consumer | Classic)`.
-A `GroupConsumer` pinned against a broker that does not serve KIP-848 now
-fails at `subscribe` with `UnsupportedApi`, rather than raising the same
-error from every `poll` where a retry loop reads it as transient and spins.
+`NegotiatedConsumer::subscribe` probes `ApiVersions` for the **GA**
+`ConsumerGroupHeartbeat` (v1+, Kafka 4.0) — a fact already in hand on every
+pooled connection, so it costs no extra round trip — and picks KIP-848 when
+the broker serves it, the classic protocol otherwise. "Otherwise" includes
+3.7–3.9 brokers, which advertise only the preview's v0 while shipping the
+protocol disabled; the Java client draws the same 4.0+ line. Pin the choice
+with `ConsumerConfig::with_group_protocol(GroupProtocol::Consumer | Classic)`.
+A `GroupConsumer` pinned against a broker below the GA floor now fails at
+`subscribe` with `UnsupportedApi`, rather than raising the same error from
+every `poll` where a retry loop reads it as transient and spins. One shape no
+version probe can see: a 4.x broker configured to refuse the consumer
+protocol still advertises it — pin `Classic` there.
 
 `GroupConsumer` and `ClassicConsumer` both wrap a `Consumer` rather than
 replacing it: the fetch path, the sessions and the decoding are identical,

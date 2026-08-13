@@ -3,21 +3,20 @@
 //! `cargo test -p kafka-consume --test negotiate -- --ignored`
 //!
 //! The scenario that motivated this: a `GroupConsumer` pointed at a broker
-//! that serves the classic group APIs but not KIP-848's key 68 raised
+//! that serves the classic group APIs but not KIP-848 raised
 //! `UnsupportedApi` from every heartbeat, the caller's retry loop read that
-//! as transient, and the consumer looped forever. The fixture reproduces such
-//! a Kafka 3.7 broker, where `ConsumerGroupHeartbeat` was still marked
-//! unstable and is therefore — the fact negotiation keys on — absent from
-//! `ApiVersions`.
+//! as transient, and the consumer looped forever.
 //!
-//! Three nearby shapes deliberately not used, all measured by the 0.8.0
-//! release gates rather than assumed: a 4.x broker with
-//! `group.coordinator.rebalance.protocols=classic`, a stock 3.9, and a 3.9
-//! with `group.coordinator.new.enable=false` **all still advertise key 68**
-//! and refuse it at runtime instead. From 3.8 the advertisement tracks the
-//! API's stability marking, not whether the protocol is usable — so the
-//! honest reproduction of "broker offers None" (kaas, and pre-3.8 clusters)
-//! is a genuinely pre-3.8 broker. The advertise-but-refuse shapes are #28.
+//! The fixture is Kafka 3.7 — and what it measures is sharper than "key 68
+//! absent". The 0.8.0 release gates established, one broker at a time, that
+//! **every** stock Apache broker from 3.7 up advertises key 68: 3.7 through
+//! 3.9 at the preview's `0-0` (with the protocol shipped disabled, and
+//! regardless of `group.coordinator.new.enable`), 4.x at `0-1` even when
+//! `group.coordinator.rebalance.protocols=classic` refuses it at runtime.
+//! Advertisement alone therefore cannot mean "usable"; what negotiation keys
+//! on is the **GA version floor** (heartbeat v1+, Kafka 4.0) — the same line
+//! the Java client draws. The 4.x advertise-but-refuse misconfiguration
+//! remains invisible to any version-based probe and is tracked as #28.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -62,9 +61,9 @@ async fn seeded(config: BrokerConfig) -> (KafkaCluster, Admin) {
     (fixture, admin)
 }
 
-/// A broker whose `ApiVersions` does not offer key 68: Kafka 3.7, the last
-/// minor where `ConsumerGroupHeartbeat` is marked unstable and therefore
-/// unadvertised.
+/// A broker that cannot admit a KIP-848 member: Kafka 3.7, which advertises
+/// `ConsumerGroupHeartbeat` at the preview's `0-0` — below the GA floor —
+/// with the protocol itself shipped disabled.
 fn classic_only() -> BrokerConfig {
     BrokerConfig::new().with_image("apache/kafka", "3.7.2")
 }
@@ -128,7 +127,8 @@ async fn auto_downgrades_to_classic_on_a_broker_without_kip848() {
     assert_eq!(
         consumer.protocol(),
         GroupProtocol::Classic,
-        "key 68 must not be advertised here, so negotiation must land on classic — {facts}"
+        "this broker's heartbeat is below the GA floor, so negotiation must \
+         land on classic — {facts}"
     );
     let got = drain_some(&mut consumer).await;
     assert!(got > 0, "the downgraded consumer must actually consume");
@@ -168,7 +168,9 @@ async fn a_pinned_group_consumer_fails_at_subscribe_not_on_every_poll() {
     .await;
     let error = match result {
         Err(error) => error,
-        Ok(_) => panic!("a broker without key 68 can never admit this member — {facts}"),
+        Ok(_) => {
+            panic!("a broker below the GA heartbeat floor can never admit this member — {facts}")
+        }
     };
 
     assert!(

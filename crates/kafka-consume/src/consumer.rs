@@ -66,9 +66,11 @@ fn check_timeout_ordering(config: &ConsumerConfig) -> Result<()> {
 /// exists to exploit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GroupProtocol {
-    /// Probe at subscribe time: KIP-848 when the broker advertises
-    /// `ConsumerGroupHeartbeat`, the classic protocol otherwise. Mirrors the
-    /// Java client's `group.protocol=consumer` auto-downgrade.
+    /// Probe at subscribe time: KIP-848 when the broker serves the GA
+    /// heartbeat (v1+, Kafka 4.0), the classic protocol otherwise —
+    /// including against 3.7–3.9 brokers, which advertise only the preview's
+    /// v0 and ship the protocol disabled. Mirrors the Java client, for which
+    /// `group.protocol=consumer` also requires 4.0+ brokers.
     #[default]
     Auto,
     /// KIP-848, and an error on a broker that does not serve it.
@@ -757,6 +759,42 @@ impl Consumer {
     }
 }
 
+/// The `ConsumerGroupHeartbeat` version floor of the KIP-848 protocol this
+/// implementation speaks.
+///
+/// v0 is the 3.7–3.9 *preview*: brokers of that whole line advertise key 68
+/// at `0-0` while shipping the protocol disabled by default — measured
+/// against `apache/kafka:3.7.2`, which advertises 57 api keys with key 68 at
+/// exactly `0-0` — so advertisement alone does not mean a group can form.
+/// The GA protocol is v1+ (Kafka 4.0), and the Java client draws the same
+/// line ("the consumer group protocol requires brokers 4.0 or newer").
+/// Keying membership on the floor is what makes "advertised" mean "usable".
+const GA_HEARTBEAT_FLOOR: i16 = 1;
+
+/// Require that this cluster serves the GA (v1+) `ConsumerGroupHeartbeat`,
+/// with a typed error naming both sides when it does not.
+///
+/// Free where it matters: the broker's table is already in hand on every
+/// pooled connection, so no extra round trip.
+async fn require_ga_heartbeat(cluster: &Cluster) -> Result<()> {
+    let connection = cluster.pool().any().await?;
+    let row = connection
+        .versions()
+        .get(kafka_conn::ApiKey::ConsumerGroupHeartbeat)
+        .copied();
+    match row.and_then(|entry| entry.negotiated()) {
+        Some(version) if version >= GA_HEARTBEAT_FLOOR => Ok(()),
+        _ => Err(Error::UnsupportedApi {
+            api_key: kafka_conn::ApiKey::ConsumerGroupHeartbeat,
+            broker: row.map(|entry| entry.broker.into()),
+            // What this implementation requires, not the codec's full range:
+            // a `0-0` broker overlaps the codec and still cannot form a group.
+            ours: kafka_conn::our_range(kafka_conn::ApiKey::ConsumerGroupHeartbeat)
+                .map(|range| (GA_HEARTBEAT_FLOOR.max(range.min), range.max)),
+        }),
+    }
+}
+
 /// A consumer that joins a KIP-848 group and lets the broker assign it
 /// partitions.
 ///
@@ -805,14 +843,12 @@ impl GroupConsumer {
         group_id: impl Into<String>,
         topics: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<Self> {
-        // A broker that does not advertise `ConsumerGroupHeartbeat` can never
-        // admit this member. One `UnsupportedApi` here, where the caller made
-        // the choice, beats the same error from every subsequent `poll` —
-        // where a retry loop reads it as a transient fault and spins forever.
+        // A broker that cannot serve the GA heartbeat can never admit this
+        // member. One `UnsupportedApi` here, where the caller made the
+        // choice, beats the same error from every subsequent `poll` — where a
+        // retry loop reads it as a transient fault and spins forever.
         // [`NegotiatedConsumer::subscribe`] makes the downgrade automatic.
-        cluster
-            .negotiated_for::<kafka_conn::protocol::messages::ConsumerGroupHeartbeatRequest>()
-            .await?;
+        require_ga_heartbeat(&cluster).await?;
 
         let group_id = group_id.into();
         let subscription: Vec<String> = topics.into_iter().map(Into::into).collect();
@@ -1507,7 +1543,8 @@ pub enum NegotiatedConsumer {
 impl NegotiatedConsumer {
     /// Join `group_id` and subscribe to `topics`, speaking whichever protocol
     /// [`ConsumerConfig::group_protocol`] names — and under
-    /// [`GroupProtocol::Auto`], whichever this broker serves.
+    /// [`GroupProtocol::Auto`], whichever this broker serves: KIP-848 where
+    /// the GA heartbeat (v1+) is negotiable, the classic path otherwise.
     ///
     /// The probe is free: the broker's `ApiVersions` table is already in hand
     /// on every pooled connection, so `Auto` costs no extra round trip.
@@ -1525,13 +1562,15 @@ impl NegotiatedConsumer {
             GroupProtocol::Consumer => GroupProtocol::Consumer,
             GroupProtocol::Classic => GroupProtocol::Classic,
             GroupProtocol::Auto => {
-                match cluster
-                    .negotiated_for::<kafka_conn::protocol::messages::ConsumerGroupHeartbeatRequest>()
-                    .await
-                {
-                    Ok(_) => GroupProtocol::Consumer,
-                    // The downgrade this type exists for. Any other failure —
-                    // no broker reachable, say — is a real error and stays one.
+                match require_ga_heartbeat(&cluster).await {
+                    Ok(()) => GroupProtocol::Consumer,
+                    // The downgrade this type exists for — the broker does
+                    // not serve the GA heartbeat, whether by not advertising
+                    // key 68 at all (kaas, pre-3.7) or by advertising only
+                    // the 3.7–3.9 preview's v0, which ships disabled and
+                    // cannot admit this member either way. Any other failure
+                    // — no broker reachable, say — is a real error and stays
+                    // one.
                     Err(Error::UnsupportedApi { .. }) => GroupProtocol::Classic,
                     Err(error) => return Err(error),
                 }
