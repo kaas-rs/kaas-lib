@@ -4,7 +4,7 @@
 # Prints `export` lines on stdout, so it is used as:
 #
 #     eval "$(.claude/skills/live-cluster/resolve-target.sh strimzi)"
-#     eval "$(.claude/skills/live-cluster/resolve-target.sh strimzi tls-auth bob-mtls)"
+#     eval "$(.claude/skills/live-cluster/resolve-target.sh strimzi mtls bob-mtls)"
 #
 # Nothing here is baked into the Rust tool on purpose: the cluster's shape lives
 # in the skill, so pointing the same binary at a port-forward, a laptop broker

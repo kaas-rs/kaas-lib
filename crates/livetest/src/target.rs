@@ -150,6 +150,23 @@ impl Target {
         &self.connection
     }
 
+    /// These settings with the client certificate removed, or `None` when no
+    /// client certificate is configured.
+    ///
+    /// The negative half of mutual TLS: connecting with this against an mTLS
+    /// listener must fail as an authentication error, which is how a probe
+    /// shows the listener *requires* the certificate rather than merely
+    /// tolerating one.
+    pub fn connection_without_client_certificate(&self) -> Option<ConnectionConfig> {
+        let tls = self.connection.tls.as_deref()?;
+        tls.client_certificate.as_ref()?;
+        let mut stripped = tls.clone();
+        stripped.client_certificate = None;
+        let mut connection = self.connection.clone();
+        connection.tls = Some(std::sync::Arc::new(stripped));
+        Some(connection)
+    }
+
     /// Cluster settings for a live run.
     pub fn cluster_config(&self) -> ClusterConfig {
         ClusterConfig {

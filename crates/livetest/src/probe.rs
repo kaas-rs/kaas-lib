@@ -39,6 +39,7 @@ pub async fn probe(target: &Target) -> Result<Report> {
         .with_context(|| format!("connecting to {bootstrap}"))?;
 
     api_versions(&connection, &mut report);
+    mtls_negative(&bootstrap, target, &mut report).await;
 
     // 2. Everything above the wire, through the routed client.
     let cluster = Cluster::connect(target.bootstrap.clone(), target.cluster_config())
@@ -53,6 +54,34 @@ pub async fn probe(target: &Target) -> Result<Report> {
     transactions(&admin, &mut report).await;
 
     Ok(report)
+}
+
+/// The negative half of mutual TLS, run only when this target presented a
+/// client certificate: the same listener, approached again *without* it, must
+/// refuse us as an authentication failure rather than hang or shrug.
+///
+/// The positive handshake just succeeded above, so the three outcomes are
+/// cleanly separated: `rejected_as_authentication: true` is a listener doing
+/// its job and an error taxonomy naming it correctly; `false` means the
+/// refusal surfaced as something else — a transport error, say — which is the
+/// classification bug this check exists to catch; and
+/// `accepted_without_certificate` means the listener does not actually
+/// require the certificate we so carefully presented.
+async fn mtls_negative(bootstrap: &str, target: &Target, report: &mut Report) {
+    let Some(config) = target.connection_without_client_certificate() else {
+        return;
+    };
+    report.set("mtls.negative.checked", true);
+    match Connection::connect(bootstrap, config).await {
+        Ok(_) => report.set("mtls.negative.accepted_without_certificate", true),
+        Err(error) => {
+            report.set(
+                "mtls.negative.rejected_as_authentication",
+                matches!(error, kafka_conn::Error::Authentication(_)),
+            );
+            report.set("mtls.negative.error", one_line(&error.to_string()));
+        }
+    }
 }
 
 /// The negotiated version table — the single most useful thing to diff.
