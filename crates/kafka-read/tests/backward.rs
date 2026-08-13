@@ -280,12 +280,67 @@ async fn a_multi_partition_tail_spreads_the_limit() {
         .unwrap();
     assert_eq!(tails.len(), 4);
     let total: usize = tails.iter().map(|t| t.records.len()).sum();
-    // 400 across 4 partitions is 100 each; a partition with fewer records than
-    // its share contributes what it has.
-    assert!(total <= 400, "{total} records for a limit of 400");
-    assert!(total >= 300, "{total} records is too few");
+    // The topic holds 4000, so the limit is a target that is met — not a
+    // ration that partitions may leave partly unspent.
+    assert_eq!(total, 400, "records for a limit of 400");
     for tail in &tails {
         assert!(tail.records.len() <= 100, "{} records", tail.records.len());
+        assert!(
+            !tail.reached_log_start,
+            "partition {} holds ~1000 records; its walk stopped at its share",
+            tail.partition
+        );
+        assert!(
+            tail.log_end > tail.log_start,
+            "the bounds the walk measured must ride along"
+        );
+    }
+}
+
+#[testkit::integration_test]
+async fn idle_partitions_do_not_eat_the_limit() {
+    // The shape that motivated the fix (`kaas-canary-v1`): three partitions,
+    // two of which hold nothing. Dividing the limit before looking meant
+    // ⌈500/3⌉ from the one full partition — 167 rows of the 500 asked for.
+    let (fixture, cluster) = setup("lopsided", 3, BrokerConfig::new()).await;
+    fixture
+        .exec(
+            0,
+            vec![
+                "bash".to_owned(),
+                "-c".to_owned(),
+                // One shared key, so every record lands on one partition and
+                // the other two stay empty.
+                "seq 1 2000 | sed 's/^/k:/' | /opt/kafka/bin/kafka-console-producer.sh \
+                 --bootstrap-server localhost:9093 --topic lopsided \
+                 --property parse.key=true --property key.separator=:"
+                    .to_owned(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    let tails = kafka_read::tail(&cluster, &TailSpec::new("lopsided", 500))
+        .await
+        .unwrap();
+    assert_eq!(tails.len(), 3);
+    let total: usize = tails.iter().map(|t| t.records.len()).sum();
+    assert_eq!(total, 500, "idle partitions must not eat the limit");
+
+    for tail in &tails {
+        if tail.records.is_empty() {
+            assert_eq!(tail.log_start, tail.log_end, "an idle partition");
+            assert!(
+                tail.reached_log_start,
+                "nothing below an empty partition's window"
+            );
+        } else {
+            assert!(
+                !tail.reached_log_start,
+                "1500 records remain below the 500 returned, and the caller \
+                 must be able to page to them"
+            );
+        }
     }
 }
 

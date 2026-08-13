@@ -179,6 +179,18 @@ pub struct PartitionTail {
     /// How many fetches this partition cost, for the byte-budget assertions
     /// that make this milestone verifiable.
     pub fetches: usize,
+    /// The partition's log start offset, as measured before the walk.
+    ///
+    /// The walk pays for these bounds anyway; returning them saves a caller a
+    /// second `ListOffsets` for "how much does this partition hold".
+    pub log_start: i64,
+    /// The partition's log end offset (exclusive), as measured before the walk.
+    pub log_end: i64,
+    /// `true` when the oldest record returned is the oldest the partition
+    /// retains below the anchor: the walk reached the log start and nothing
+    /// older was set aside. `false` means records remain below `records[0]`,
+    /// so a further page exists and can be anchored at `records[0].offset - 1`.
+    pub reached_log_start: bool,
 }
 
 /// Read the last `limit` records of a topic.
@@ -202,117 +214,200 @@ pub async fn tail(cluster: &Cluster, spec: &TailSpec) -> Result<Vec<PartitionTai
     if wanted.is_empty() {
         return Ok(Vec::new());
     }
-
-    // Spread the limit across partitions. A UI asking for "the last 500" of a
-    // six-partition topic wants roughly the newest 500 overall, and reading
-    // 500 from each would fetch six times what was asked for.
-    let per_partition = spec.limit.div_ceil(wanted.len());
-    let first_step = spec.first_step(wanted.len());
     let topic_id = topic.topic_id;
 
-    let mut out = Vec::with_capacity(wanted.len());
+    // Phase 1: bounds and anchors, before any budget is divided. Whether a
+    // partition holds anything below its anchor is decidable without a single
+    // fetch — `bounds` was being paid for per partition anyway — and the
+    // divisor must not count the ones that hold nothing, or a topic with idle
+    // partitions returns a fraction of what was asked for.
+    let mut walks = Vec::with_capacity(wanted.len());
     for partition in wanted {
         let leader = cluster.leader_for(&spec.topic, partition).await?;
-        out.push(
-            tail_partition(
-                cluster,
-                spec,
-                partition,
-                leader,
-                topic_id,
-                per_partition,
-                first_step,
-            )
-            .await?,
-        );
-    }
-    Ok(out)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn tail_partition(
-    cluster: &Cluster,
-    spec: &TailSpec,
-    partition: i32,
-    leader: i32,
-    topic_id: TopicId,
-    limit: usize,
-    first_step: i64,
-) -> Result<PartitionTail> {
-    let (log_start, log_end) =
-        crate::offsets::bounds(cluster, &spec.topic, partition, leader).await?;
-
-    let mut collected: VecDeque<Record> = VecDeque::new();
-    let mut malformed = 0usize;
-    let mut fetches = 0usize;
-    // The exclusive upper bound of the window we still need.
-    let mut window_end = resolve_anchor(
-        cluster,
-        &spec.topic,
-        partition,
-        leader,
-        spec.anchor,
-        log_start,
-        log_end,
-    )
-    .await?;
-    let mut step = first_step.clamp(1, spec.max_step);
-
-    while collected.len() < limit && window_end > log_start {
-        let window_start = window_end.saturating_sub(step).max(log_start);
-
-        let (records, bad, reads) = read_window(
+        let (log_start, log_end) =
+            crate::offsets::bounds(cluster, &spec.topic, partition, leader).await?;
+        let window_end = resolve_anchor(
             cluster,
-            spec,
+            &spec.topic,
             partition,
             leader,
-            topic_id,
-            window_start,
-            window_end,
+            spec.anchor,
+            log_start,
+            log_end,
         )
         .await?;
-        fetches += reads;
-        malformed += bad;
+        walks.push(Walk {
+            partition,
+            leader,
+            log_start,
+            log_end,
+            window_end,
+            step: 1,
+            collected: VecDeque::new(),
+            malformed: 0,
+            fetches: 0,
+            trimmed: false,
+        });
+    }
 
-        let yielded = records.len();
-        // Prepend: we are walking backwards, and the caller wants log order.
-        for record in records.into_iter().rev() {
-            collected.push_front(record);
-            if collected.len() >= limit {
+    let holding = walks.iter().filter(|walk| walk.has_more()).count();
+    let first_step = spec.first_step(holding.max(1)).clamp(1, spec.max_step);
+    for walk in &mut walks {
+        walk.step = first_step;
+    }
+
+    // Phase 2: spread the limit across the partitions that hold anything, and
+    // top up. Each round divides what is still owed among the walks that still
+    // have offsets below their window; a walk that cannot fill its share runs
+    // out of partition and leaves the divisor, so the next round hands its
+    // unfilled share to the ones that can. Every round either satisfies the
+    // limit or retires at least one walk, so this terminates within
+    // `walks.len()` rounds — and `limit` means "up to this many, if the topic
+    // has them" rather than "a per-partition ration".
+    let mut collected_total = 0usize;
+    while collected_total < spec.limit {
+        let open: Vec<usize> = walks
+            .iter()
+            .enumerate()
+            .filter(|(_, walk)| walk.has_more())
+            .map(|(index, _)| index)
+            .collect();
+        if open.is_empty() {
+            break;
+        }
+        let share = (spec.limit - collected_total).div_ceil(open.len());
+        for index in open {
+            let Some(walk) = walks.get_mut(index) else {
+                continue;
+            };
+            let before = walk.collected.len();
+            let target = before.saturating_add(share);
+            walk.run_until(cluster, spec, topic_id, target).await?;
+            collected_total += walk.collected.len().saturating_sub(before);
+            if collected_total >= spec.limit {
                 break;
             }
         }
+    }
 
-        // Grow the step when the window under-delivered, which is what a
-        // compacted topic looks like: a thousand offsets holding fifty
-        // records. Without this the walk crawls and ends up reading the whole
-        // partition, which is exactly the naive behaviour this design avoids.
-        let span = window_end.saturating_sub(window_start).max(1);
-        let density = i64::try_from(yielded).unwrap_or(i64::MAX);
-        if density < span / 2 && yielded < limit {
-            let scale = if density == 0 {
-                8
-            } else {
-                (span / density.max(1)).clamp(2, 8)
-            };
-            step = step.saturating_mul(scale).clamp(1, spec.max_step);
+    // Enforce the bound before returning. A chunk that straddles a batch
+    // boundary and `div_ceil` rounding both over-collect slightly; trim the
+    // overshoot oldest-first from whichever partition holds the most, so what
+    // is dropped is always the oldest record of the fullest collection.
+    let mut total: usize = walks.iter().map(|walk| walk.collected.len()).sum();
+    while total > spec.limit {
+        let Some(fullest) = walks
+            .iter_mut()
+            .max_by_key(|walk| walk.collected.len())
+            .filter(|walk| !walk.collected.is_empty())
+        else {
+            break;
+        };
+        fullest.collected.pop_front();
+        fullest.trimmed = true;
+        total -= 1;
+    }
+
+    Ok(walks.into_iter().map(Walk::finish).collect())
+}
+
+/// One partition's backward walk, resumable so [`tail`] can raise its target
+/// when another partition runs out of records.
+struct Walk {
+    partition: i32,
+    leader: i32,
+    log_start: i64,
+    log_end: i64,
+    /// The exclusive upper bound of the window still to be read.
+    window_end: i64,
+    step: i64,
+    collected: VecDeque<Record>,
+    malformed: usize,
+    fetches: usize,
+    /// Whether records older than `collected` were dropped to hold the limit.
+    trimmed: bool,
+}
+
+impl Walk {
+    /// Whether offsets remain below the window — the walk can yield more.
+    fn has_more(&self) -> bool {
+        self.window_end > self.log_start
+    }
+
+    /// Walk backwards until `target` records are held or the log start is hit.
+    ///
+    /// Everything a chunk yields is kept, even past the target: the walk may
+    /// be resumed with a higher target, and a record discarded mid-chunk would
+    /// be skipped over on resume — `window_end` has already moved below it.
+    /// The overshoot is bounded by one chunk and trimmed by the caller.
+    async fn run_until(
+        &mut self,
+        cluster: &Cluster,
+        spec: &TailSpec,
+        topic_id: TopicId,
+        target: usize,
+    ) -> Result<()> {
+        while self.collected.len() < target && self.window_end > self.log_start {
+            let window_start = self
+                .window_end
+                .saturating_sub(self.step)
+                .max(self.log_start);
+
+            let (records, bad, reads) = read_window(
+                cluster,
+                spec,
+                self.partition,
+                self.leader,
+                topic_id,
+                window_start,
+                self.window_end,
+            )
+            .await?;
+            self.fetches += reads;
+            self.malformed += bad;
+
+            let yielded = records.len();
+            // Prepend: we are walking backwards, and the caller wants log
+            // order.
+            for record in records.into_iter().rev() {
+                self.collected.push_front(record);
+            }
+
+            // Grow the step when the window under-delivered, which is what a
+            // compacted topic looks like: a thousand offsets holding fifty
+            // records. Without this the walk crawls and ends up reading the
+            // whole partition, which is exactly the naive behaviour this
+            // design avoids.
+            let span = self.window_end.saturating_sub(window_start).max(1);
+            let density = i64::try_from(yielded).unwrap_or(i64::MAX);
+            if density < span / 2 && self.collected.len() < target {
+                let scale = if density == 0 {
+                    8
+                } else {
+                    (span / density.max(1)).clamp(2, 8)
+                };
+                self.step = self.step.saturating_mul(scale).clamp(1, spec.max_step);
+            }
+
+            self.window_end = window_start;
         }
-
-        window_end = window_start;
+        Ok(())
     }
 
-    // Trim from the front: we may have collected more than asked for when a
-    // chunk straddled the boundary.
-    while collected.len() > limit {
-        collected.pop_front();
+    fn finish(self) -> PartitionTail {
+        PartitionTail {
+            partition: self.partition,
+            // Nothing below the oldest record returned: the walk examined
+            // down to the log start, and the trim did not set anything older
+            // aside on the way out.
+            reached_log_start: !self.has_more() && !self.trimmed,
+            records: self.collected.into_iter().collect(),
+            malformed: self.malformed,
+            fetches: self.fetches,
+            log_start: self.log_start,
+            log_end: self.log_end,
+        }
     }
-
-    Ok(PartitionTail {
-        partition,
-        records: collected.into_iter().collect(),
-        malformed,
-        fetches,
-    })
 }
 
 /// The exclusive upper bound the walk starts from, for one partition.
@@ -607,5 +702,108 @@ mod tests {
         let step = 1_000i64;
         let window_start = window_end.saturating_sub(step).max(log_start);
         assert_eq!(window_start, log_start);
+    }
+
+    /// The allocation rounds of [`tail`]'s phase 2, as arithmetic: each round
+    /// divides what is still owed among the partitions that still hold
+    /// records, and a partition that runs dry leaves the divisor.
+    fn allocate(capacities: &[usize], limit: usize) -> Vec<usize> {
+        let mut granted = vec![0usize; capacities.len()];
+        let mut total = 0usize;
+        while total < limit {
+            let open: Vec<usize> = (0..capacities.len())
+                .filter(|&i| granted[i] < capacities[i])
+                .collect();
+            if open.is_empty() {
+                break;
+            }
+            let share = (limit - total).div_ceil(open.len());
+            for i in open {
+                let take = share.min(capacities[i] - granted[i]).min(limit - total);
+                granted[i] += take;
+                total += take;
+                if total >= limit {
+                    break;
+                }
+            }
+        }
+        granted
+    }
+
+    /// The shape that motivated the change: `kaas-canary-v1`, three partitions
+    /// of which two hold nothing, read with the UI's default limit of 500.
+    /// Dividing by three spends two thirds of the budget on nothing and
+    /// returns 167; dividing by what holds records returns all 500.
+    #[test]
+    fn the_limit_is_not_spent_on_partitions_that_hold_nothing() {
+        assert_eq!(allocate(&[0, 0, 89_478], 500), [0, 0, 500]);
+    }
+
+    #[test]
+    fn a_partition_that_runs_dry_hands_its_share_to_the_rest() {
+        // 500 across [3, big, big]: the dry partition yields its 3, and the
+        // other two split the rest rather than stopping at ⌈500/3⌉ each.
+        let granted = allocate(&[3, 100_000, 100_000], 500);
+        assert_eq!(granted[0], 3);
+        assert_eq!(granted.iter().sum::<usize>(), 500);
+        assert!(granted[1] >= 167 && granted[2] >= 167, "{granted:?}");
+    }
+
+    #[test]
+    fn a_topic_that_holds_less_than_the_limit_returns_everything_it_has() {
+        assert_eq!(allocate(&[10, 0, 20], 500), [10, 0, 20]);
+    }
+
+    #[test]
+    fn an_even_topic_still_splits_evenly() {
+        // The `kperf-bench` shape: every partition holds plenty, and the
+        // limit divides as it always did — except the total is now the limit
+        // itself, not ⌈500/16⌉ × 16 = 512 with the caller left to truncate.
+        // ⌈500/16⌉ rounding shorts only the last partition in the round.
+        let granted = allocate(&[10_000; 16], 500);
+        assert_eq!(granted.iter().sum::<usize>(), 500);
+        assert!(
+            granted.iter().filter(|&&g| g == 32).count() >= 15,
+            "{granted:?}"
+        );
+    }
+
+    fn walk_at(window_end: i64, log_start: i64, trimmed: bool) -> Walk {
+        Walk {
+            partition: 0,
+            leader: 1,
+            log_start,
+            log_end: 100,
+            window_end,
+            step: 64,
+            collected: VecDeque::new(),
+            malformed: 0,
+            fetches: 0,
+            trimmed,
+        }
+    }
+
+    #[test]
+    fn a_walk_that_hit_the_log_start_says_so() {
+        // `collected.len() >= target` and `window_end <= log_start` were both
+        // known to the loop and neither was reported — this is the field that
+        // lets a caller compute "is there more below" without a second
+        // ListOffsets.
+        assert!(walk_at(10, 10, false).finish().reached_log_start);
+        assert!(!walk_at(50, 10, false).finish().reached_log_start);
+    }
+
+    #[test]
+    fn a_trimmed_walk_never_claims_to_be_the_bottom() {
+        // The trim drops the oldest records of the fullest partition, so the
+        // records below the oldest returned exist even though the walk itself
+        // examined down to the log start.
+        assert!(!walk_at(10, 10, true).finish().reached_log_start);
+    }
+
+    #[test]
+    fn the_bounds_ride_along_on_the_result() {
+        let tail = walk_at(10, 10, false).finish();
+        assert_eq!((tail.log_start, tail.log_end), (10, 100));
     }
 }
