@@ -50,7 +50,10 @@ pub mod rebalance;
 mod session;
 
 pub use classic::Assignor;
-pub use consumer::{ClassicConsumer, Consumer, ConsumerConfig, GroupConsumer, Position};
+pub use consumer::{
+    ClassicConsumer, Consumer, ConsumerConfig, GroupConsumer, GroupProtocol, NegotiatedConsumer,
+    Position,
+};
 pub use offsets::CommittedOffset;
 pub use rebalance::{RebalanceListener, RevokedPartition};
 

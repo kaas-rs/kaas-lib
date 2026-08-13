@@ -56,6 +56,28 @@ fn check_timeout_ordering(config: &ConsumerConfig) -> Result<()> {
     Ok(())
 }
 
+/// Which group-membership protocol a subscribing consumer speaks.
+///
+/// Kafka 4.x brokers serve two: KIP-848 (`ConsumerGroupHeartbeat`, the
+/// broker computes assignments) and the classic
+/// `JoinGroup`/`SyncGroup`/`Heartbeat` dance. Which one a broker offers is
+/// discoverable from `ApiVersions` — and nothing else about the caller's code
+/// needs to change with the answer, which is what [`NegotiatedConsumer`]
+/// exists to exploit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupProtocol {
+    /// Probe at subscribe time: KIP-848 when the broker advertises
+    /// `ConsumerGroupHeartbeat`, the classic protocol otherwise. Mirrors the
+    /// Java client's `group.protocol=consumer` auto-downgrade.
+    #[default]
+    Auto,
+    /// KIP-848, and an error on a broker that does not serve it.
+    Consumer,
+    /// The classic protocol, unconditionally — for mixed groups whose other
+    /// members are pinned to it.
+    Classic,
+}
+
 /// How a [`Consumer`] behaves.
 #[derive(Debug, Clone)]
 pub struct ConsumerConfig {
@@ -113,6 +135,12 @@ pub struct ConsumerConfig {
     /// [`ConsumerConfig::rebalance_timeout_ms`]; Kafka is not tested with the
     /// two inverted, and [`ClassicConsumer::subscribe`] rejects it.
     pub session_timeout_ms: i32,
+    /// Which group protocol [`NegotiatedConsumer::subscribe`] uses.
+    ///
+    /// [`GroupProtocol::Auto`] — the default — asks the broker. Ignored by
+    /// [`GroupConsumer`] and [`ClassicConsumer`], whose types *are* the
+    /// choice.
+    pub group_protocol: GroupProtocol,
 }
 
 impl ConsumerConfig {
@@ -127,6 +155,7 @@ impl ConsumerConfig {
             group_id: None,
             rebalance_timeout_ms: DEFAULT_REBALANCE_TIMEOUT_MS,
             session_timeout_ms: DEFAULT_SESSION_TIMEOUT_MS,
+            group_protocol: GroupProtocol::Auto,
         }
     }
 
@@ -169,6 +198,13 @@ impl ConsumerConfig {
     #[must_use]
     pub fn with_session_timeout_ms(mut self, ms: i32) -> Self {
         self.session_timeout_ms = ms;
+        self
+    }
+
+    /// Which group protocol [`NegotiatedConsumer::subscribe`] uses.
+    #[must_use]
+    pub fn with_group_protocol(mut self, protocol: GroupProtocol) -> Self {
+        self.group_protocol = protocol;
         self
     }
 }
@@ -769,6 +805,15 @@ impl GroupConsumer {
         group_id: impl Into<String>,
         topics: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<Self> {
+        // A broker that does not advertise `ConsumerGroupHeartbeat` can never
+        // admit this member. One `UnsupportedApi` here, where the caller made
+        // the choice, beats the same error from every subsequent `poll` —
+        // where a retry loop reads it as a transient fault and spins forever.
+        // [`NegotiatedConsumer::subscribe`] makes the downgrade automatic.
+        cluster
+            .negotiated_for::<kafka_conn::protocol::messages::ConsumerGroupHeartbeatRequest>()
+            .await?;
+
         let group_id = group_id.into();
         let subscription: Vec<String> = topics.into_iter().map(Into::into).collect();
         config.group_id = Some(group_id.clone());
@@ -1439,6 +1484,182 @@ impl ClassicConsumer {
     }
 }
 
+/// A group consumer whose protocol was chosen at subscribe time.
+///
+/// [`GroupConsumer`] and [`ClassicConsumer`] are deliberately distinct types
+/// — different wire protocols, different constraints — but which one a broker
+/// serves is the broker's fact, not the caller's, and it is advertised in
+/// `ApiVersions`. This wrapper asks, picks, and then delegates: the caller
+/// gets "the right consumer for this broker" without knowing its protocol
+/// support up front, and without a retry loop spinning on `UnsupportedApi`
+/// against a pre-KIP-848 broker.
+///
+/// The variants are public: a caller that needs a protocol-specific method —
+/// [`ClassicConsumer::is_leader`], say — can match and reach it.
+#[derive(Debug)]
+pub enum NegotiatedConsumer {
+    /// KIP-848 — the broker advertises `ConsumerGroupHeartbeat`.
+    Group(GroupConsumer),
+    /// The classic `JoinGroup`/`SyncGroup`/`Heartbeat` path.
+    Classic(ClassicConsumer),
+}
+
+impl NegotiatedConsumer {
+    /// Join `group_id` and subscribe to `topics`, speaking whichever protocol
+    /// [`ConsumerConfig::group_protocol`] names — and under
+    /// [`GroupProtocol::Auto`], whichever this broker serves.
+    ///
+    /// The probe is free: the broker's `ApiVersions` table is already in hand
+    /// on every pooled connection, so `Auto` costs no extra round trip.
+    ///
+    /// Note the classic protocol's constraint survives negotiation: when the
+    /// choice lands on [`ClassicConsumer`], every member of the group needs
+    /// its own [`Cluster`] — see [`ClassicConsumer::subscribe`].
+    pub async fn subscribe(
+        cluster: Cluster,
+        config: ConsumerConfig,
+        group_id: impl Into<String>,
+        topics: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Result<Self> {
+        let choice = match config.group_protocol {
+            GroupProtocol::Consumer => GroupProtocol::Consumer,
+            GroupProtocol::Classic => GroupProtocol::Classic,
+            GroupProtocol::Auto => {
+                match cluster
+                    .negotiated_for::<kafka_conn::protocol::messages::ConsumerGroupHeartbeatRequest>()
+                    .await
+                {
+                    Ok(_) => GroupProtocol::Consumer,
+                    // The downgrade this type exists for. Any other failure —
+                    // no broker reachable, say — is a real error and stays one.
+                    Err(Error::UnsupportedApi { .. }) => GroupProtocol::Classic,
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        match choice {
+            GroupProtocol::Classic => Ok(Self::Classic(
+                ClassicConsumer::subscribe(cluster, config, group_id, topics).await?,
+            )),
+            _ => Ok(Self::Group(
+                GroupConsumer::subscribe(cluster, config, group_id, topics).await?,
+            )),
+        }
+    }
+
+    /// Which protocol the subscribe settled on. Never [`GroupProtocol::Auto`].
+    pub fn protocol(&self) -> GroupProtocol {
+        match self {
+            Self::Group(_) => GroupProtocol::Consumer,
+            Self::Classic(_) => GroupProtocol::Classic,
+        }
+    }
+
+    /// Join as a **static** member. See [`GroupConsumer::instance_id`].
+    #[must_use]
+    pub fn with_instance_id(self, instance_id: impl Into<String>) -> Self {
+        match self {
+            Self::Group(consumer) => Self::Group(consumer.instance_id(instance_id)),
+            Self::Classic(consumer) => Self::Classic(consumer.instance_id(instance_id)),
+        }
+    }
+
+    /// Whether to commit owned positions before revoking a partition.
+    #[must_use]
+    pub fn with_auto_commit(self, enabled: bool) -> Self {
+        match self {
+            Self::Group(consumer) => Self::Group(consumer.auto_commit(enabled)),
+            Self::Classic(consumer) => Self::Classic(consumer.auto_commit(enabled)),
+        }
+    }
+
+    /// Register a hook that fires around every rebalance.
+    ///
+    /// Same contract as [`GroupConsumer::on_rebalance`]; when the choice
+    /// landed on the classic protocol, every rebalance revokes eagerly — see
+    /// [`ClassicConsumer::on_rebalance`].
+    #[must_use]
+    pub fn with_rebalance_listener(self, listener: impl RebalanceListener + 'static) -> Self {
+        match self {
+            Self::Group(consumer) => Self::Group(consumer.on_rebalance(listener)),
+            Self::Classic(consumer) => Self::Classic(consumer.on_rebalance(listener)),
+        }
+    }
+
+    /// Heartbeat, rebalance when told to, fetch, decode.
+    pub async fn poll(&mut self) -> Result<Vec<Record>> {
+        match self {
+            Self::Group(consumer) => consumer.poll().await,
+            Self::Classic(consumer) => consumer.poll().await,
+        }
+    }
+
+    /// Commit the current positions as this member.
+    pub async fn commit(&self) -> Result<Vec<((String, i32), Result<()>)>> {
+        match self {
+            Self::Group(consumer) => consumer.commit().await,
+            Self::Classic(consumer) => consumer.commit().await,
+        }
+    }
+
+    /// The group's committed offsets for the current assignment.
+    pub async fn committed(&self) -> Result<HashMap<(String, i32), CommittedOffset>> {
+        match self {
+            Self::Group(consumer) => consumer.committed().await,
+            Self::Classic(consumer) => consumer.committed().await,
+        }
+    }
+
+    /// Leave the group. A static member deliberately does **not** leave.
+    pub async fn leave(&mut self) -> Result<()> {
+        match self {
+            Self::Group(consumer) => consumer.leave().await,
+            Self::Classic(consumer) => consumer.leave().await,
+        }
+    }
+
+    /// The partitions this member currently owns.
+    pub fn assignment(&self) -> Vec<(String, i32)> {
+        match self {
+            Self::Group(consumer) => consumer.assignment(),
+            Self::Classic(consumer) => consumer.assignment(),
+        }
+    }
+
+    /// The member id the coordinator knows this member by.
+    pub fn member_id(&self) -> &str {
+        match self {
+            Self::Group(consumer) => consumer.member_id(),
+            Self::Classic(consumer) => consumer.member_id(),
+        }
+    }
+
+    /// The next offset to be read, per owned partition.
+    pub fn positions(&self) -> Vec<((String, i32), i64)> {
+        match self {
+            Self::Group(consumer) => consumer.positions(),
+            Self::Classic(consumer) => consumer.positions(),
+        }
+    }
+
+    /// The identity a transactional producer needs for KIP-447 offset
+    /// commits.
+    pub fn group_metadata(&self) -> Result<ConsumerGroupMetadata> {
+        match self {
+            Self::Group(consumer) => consumer.group_metadata(),
+            Self::Classic(consumer) => consumer.group_metadata(),
+        }
+    }
+
+    /// The cluster handle this consumer reads through.
+    pub fn cluster(&self) -> &Cluster {
+        match self {
+            Self::Group(consumer) => consumer.cluster(),
+            Self::Classic(consumer) => consumer.cluster(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1480,5 +1701,15 @@ mod tests {
             .with_session_timeout_ms(45_000);
         assert!(check_timeout_ordering(&equal).is_ok());
         assert!(check_timeout_ordering(&ConsumerConfig::new()).is_ok());
+    }
+
+    /// `Auto` is the default because the whole point of negotiation is that a
+    /// caller should not have to know a broker's protocol support up front.
+    #[test]
+    fn the_group_protocol_defaults_to_auto_and_is_settable() {
+        assert_eq!(ConsumerConfig::new().group_protocol, GroupProtocol::Auto);
+        assert_eq!(GroupProtocol::default(), GroupProtocol::Auto);
+        let pinned = ConsumerConfig::new().with_group_protocol(GroupProtocol::Classic);
+        assert_eq!(pinned.group_protocol, GroupProtocol::Classic);
     }
 }

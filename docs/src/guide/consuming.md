@@ -13,8 +13,19 @@ kafka-consume = "0.4"
 | | Assignment comes from | Rebalances | Use it when |
 |---|---|---|---|
 | `Consumer` | you, explicitly | never | pinning a reader to a partition, a single-instance tail, or anything that must not move |
-| `GroupConsumer` | the broker (KIP-848) | yes | the default on a Kafka 4.x cluster |
+| `NegotiatedConsumer` | whichever protocol the broker serves | yes | you do not know the broker's protocol support up front — the usual case |
+| `GroupConsumer` | the broker (KIP-848) | yes | a Kafka 4.x cluster with the new coordinator enabled, chosen explicitly |
 | `ClassicConsumer` | the group leader, client-side | yes | brokers older than 4.0, or a mixed group with Java clients pinned to `group.protocol=classic` |
+
+`NegotiatedConsumer::subscribe` probes `ApiVersions` for
+`ConsumerGroupHeartbeat` — a fact already in hand on every pooled connection,
+so it costs no extra round trip — and picks KIP-848 when the broker advertises
+it, the classic protocol when it does not, mirroring the Java client's
+`group.protocol=consumer` auto-downgrade. Pin the choice with
+`ConsumerConfig::with_group_protocol(GroupProtocol::Consumer | Classic)`.
+A `GroupConsumer` pinned against a broker that does not serve KIP-848 now
+fails at `subscribe` with `UnsupportedApi`, rather than raising the same
+error from every `poll` where a retry loop reads it as transient and spins.
 
 `GroupConsumer` and `ClassicConsumer` both wrap a `Consumer` rather than
 replacing it: the fetch path, the sessions and the decoding are identical,
