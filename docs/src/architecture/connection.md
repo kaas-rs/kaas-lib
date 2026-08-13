@@ -68,12 +68,20 @@ A permit is acquired before writing and released by a guard, so a dropped
 future cannot leak one. `with_max_in_flight(0)` is clamped to 1: zero permits
 is a deadlock, not a configuration, and there is a unit test asserting it.
 
-> **This default becomes load-bearing the moment a producer exists.** Five
-> requests in flight is only safe with idempotence enabled; without it, a
-> retried produce batch can land after a later one and silently reorder the
-> log. Nothing in the workspace retries a write today, so it is currently
-> harmless — see [Roadmap](../guide/roadmap.md), where wiring this to the
-> idempotence setting is called out as a milestone requirement.
+> **This default is load-bearing, because the producer retries writes.** The
+> connection layer still takes no position on request-retry safety — what it
+> promises is *honesty about ambiguity*: a dropped `send` future has still
+> written its request, and a timeout only un-registers the waiter, so "no
+> response" never means "not executed". Deciding what is safe to *re-send*
+> belongs to the producer, and rests on three mechanisms there:
+> `Attempt::Rejected` vs `Attempt::Ambiguous` in the dispatcher (a failure
+> the broker definitively rejected may retry freely; one whose outcome is
+> unknown retries only when idempotence makes the duplicate harmless), the
+> accumulator's one-batch-per-partition in-flight rule (so a retry cannot
+> overtake a later batch of the same partition), and the producer's own
+> clamp of this `max_in_flight` when idempotence is off. A reader doing a
+> duplicate-safety analysis starts in `kafka-produce/src/dispatch.rs`, not
+> here.
 
 ## Cancel safety
 
