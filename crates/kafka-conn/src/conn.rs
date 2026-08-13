@@ -754,10 +754,24 @@ async fn negotiate_versions(raw: &mut RawConn<'_>) -> Result<ApiVersions> {
             .map_err(|e| Error::decode("decoding ApiVersions", e))?
     };
 
-    if let Some(code) = ErrorCode::from_code(response.error_code) {
-        return Err(Error::from_code(code, None));
-    }
+    accept_versions(&response)
+}
 
+/// Accept a decoded `ApiVersions` response, or name why not.
+///
+/// The subtlety this exists for, found by pointing the handshake at a Kafka
+/// 3.7 broker: in the fallback, the version table arrives *inside* an
+/// `UNSUPPORTED_VERSION` response — the error code is the envelope the answer
+/// is delivered in, not a verdict on the handshake — so that code is fatal
+/// only when the table did not come with it. Failing on it unconditionally
+/// re-creates exactly the "treat 35 as a failed handshake" mistake the
+/// fallback was written to avoid, one step later.
+fn accept_versions(response: &ApiVersionsResponse) -> Result<ApiVersions> {
+    match ErrorCode::from_code(response.error_code) {
+        Some(ErrorCode::UnsupportedVersion) if !response.api_keys.is_empty() => {}
+        Some(code) => return Err(Error::from_code(code, None)),
+        None => {}
+    }
     Ok(ApiVersions::from_triples(
         response
             .api_keys
@@ -1151,5 +1165,52 @@ mod tests {
                 .map(|k| (k.api_key, k.min_version, k.max_version)),
         );
         assert!(table.supports(ApiKey::Metadata));
+    }
+
+    fn versions_response(error_code: i16, keys: usize) -> ApiVersionsResponse {
+        let mut response = ApiVersionsResponse::default();
+        response.error_code = error_code;
+        response.api_keys = (0..keys)
+            .map(|_| {
+                let mut key =
+                    kafka_protocol::messages::api_versions_response::ApiVersion::default();
+                key.api_key = ApiKey::Metadata.code();
+                key.min_version = 0;
+                key.max_version = 13;
+                key
+            })
+            .collect();
+        response
+    }
+
+    /// The Kafka 3.7 regression: the fallback's table rides inside an
+    /// `UNSUPPORTED_VERSION` response, and failing on that code after
+    /// decoding the table re-creates the fatal-handshake mistake one step
+    /// later.
+    #[test]
+    fn a_piggybacked_table_is_an_answer_not_a_failure() {
+        let table = accept_versions(&versions_response(UNSUPPORTED_VERSION, 1)).unwrap();
+        assert!(table.supports(ApiKey::Metadata));
+    }
+
+    #[test]
+    fn unsupported_version_with_no_table_is_still_fatal() {
+        // The empty-table probe answer: there is nothing to negotiate from,
+        // so this one genuinely failed.
+        let err = accept_versions(&versions_response(UNSUPPORTED_VERSION, 0)).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Broker {
+                code: ErrorCode::UnsupportedVersion,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn any_other_error_code_is_fatal_with_or_without_a_table() {
+        // 29: TOPIC_AUTHORIZATION_FAILED stands in for "something else".
+        assert!(accept_versions(&versions_response(29, 1)).is_err());
+        assert!(accept_versions(&versions_response(0, 1)).is_ok());
     }
 }
