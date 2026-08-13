@@ -6,17 +6,18 @@
 //! that serves the classic group APIs but not KIP-848's key 68 raised
 //! `UnsupportedApi` from every heartbeat, the caller's retry loop read that
 //! as transient, and the consumer looped forever. The fixture reproduces such
-//! a broker with Kafka 3.9 running the *old* group coordinator, where
-//! `ConsumerGroupHeartbeat` is — the fact negotiation keys on — absent from
+//! a Kafka 3.7 broker, where `ConsumerGroupHeartbeat` was still marked
+//! unstable and is therefore — the fact negotiation keys on — absent from
 //! `ApiVersions`.
 //!
-//! Two nearby shapes deliberately not used, both measured by the 0.8.0
-//! release gate rather than assumed: a 4.x broker with
-//! `group.coordinator.rebalance.protocols=classic` still advertises key 68,
-//! and so does a stock 3.9, whose new coordinator is on by default even
-//! though the consumer protocol is opt-in. Advertisement follows the
-//! *coordinator*, not the protocol config — so the honest reproduction of
-//! "broker offers None" (kaas, and pre-3.8 clusters) is the old coordinator.
+//! Three nearby shapes deliberately not used, all measured by the 0.8.0
+//! release gates rather than assumed: a 4.x broker with
+//! `group.coordinator.rebalance.protocols=classic`, a stock 3.9, and a 3.9
+//! with `group.coordinator.new.enable=false` **all still advertise key 68**
+//! and refuse it at runtime instead. From 3.8 the advertisement tracks the
+//! API's stability marking, not whether the protocol is usable — so the
+//! honest reproduction of "broker offers None" (kaas, and pre-3.8 clusters)
+//! is a genuinely pre-3.8 broker. The advertise-but-refuse shapes are #28.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -61,13 +62,11 @@ async fn seeded(config: BrokerConfig) -> (KafkaCluster, Admin) {
     (fixture, admin)
 }
 
-/// A broker whose `ApiVersions` does not offer key 68: Kafka 3.9 with the
-/// new group coordinator off, which is what gates the advertisement. The
-/// config was removed in 4.0, hence the older image.
+/// A broker whose `ApiVersions` does not offer key 68: Kafka 3.7, the last
+/// minor where `ConsumerGroupHeartbeat` is marked unstable and therefore
+/// unadvertised.
 fn classic_only() -> BrokerConfig {
-    BrokerConfig::new()
-        .with_image("apache/kafka", "3.9.1")
-        .with_property("group.coordinator.new.enable", "false")
+    BrokerConfig::new().with_image("apache/kafka", "3.7.2")
 }
 
 fn config() -> ConsumerConfig {
