@@ -15,16 +15,19 @@ forward read.
 use kafka_read::TailSpec;
 
 # async fn example(cluster: &kafka_meta::Cluster) -> kafka_read::Result<()> {
-// Last 500 records per partition, all partitions.
+// The last 500 records of the topic, across all partitions.
 let tails = kafka_read::tail(cluster, &TailSpec::new("orders", 500)).await?;
 
 for tail in &tails {
     println!(
-        "partition {}: {} records, {} malformed batches, {} fetches",
+        "partition {}: {} records ({}..{}), {} malformed batches, {} fetches, more below: {}",
         tail.partition,
         tail.records.len(),
+        tail.log_start,
+        tail.log_end,
         tail.malformed,
         tail.fetches,
+        !tail.reached_log_start,
     );
 }
 
@@ -40,6 +43,17 @@ bounded number of records, and the implementation reads roughly that many
 bytes rather than the whole partition. On a compacted topic with large offset
 gaps it still converges — the step grows when a chunk yields fewer records
 than its offset span suggested.
+
+`limit` is a **topic-wide target**, not a per-partition ration: partitions
+that hold nothing are excluded from the division before anything is read, and
+a partition that runs out of records hands its unspent share to the ones that
+have not — so "the last 500" of a topic whose records all sit in one
+partition is 500 records, not ⌈500 ÷ partitions⌉. Each `PartitionTail` also
+says why its walk stopped: `reached_log_start` is `true` when the oldest
+record returned is the oldest the partition retains, and `false` when more
+records lie below — anchor the next page at `records[0].offset - 1` to keep
+walking. The `log_start`/`log_end` bounds the walk measured ride along, so
+"how much does this partition hold" costs no extra `ListOffsets`.
 
 ## The scan — "show me this topic"
 
@@ -113,6 +127,20 @@ What you will **not** see as `Malformed`: a batch truncated by `max_bytes`
 (normal on every fetch), control batches (transaction markers), or aborted
 records under `CommittedOnly`. Those are filtered silently, because reporting
 them means crying wolf on every fetch of every healthy cluster.
+
+## Where the scan actually started
+
+A start position can name something the log no longer holds: an offset below
+the retained range, an offset the partition has not reached, or a timestamp
+that resolves to no offset. The scan substitutes the nearest position it can
+honour — right for browsing, quietly wrong for "did my record land at
+900001" — and says so: the first events of every scan are one
+`ScanEvent::PartitionStarted` per partition, carrying the offset reading
+actually begins at and, when the requested position could not be honoured, a
+`StartSubstitution` naming what was asked and what was done instead. For a
+timestamp start, `start_offset` is what the instant resolved to on that
+partition, so an empty window can be rendered as "14:30 resolved to no
+offset" without a second `ListOffsets`.
 
 ## Transactions and visibility
 

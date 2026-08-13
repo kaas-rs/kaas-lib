@@ -65,9 +65,14 @@ degrades gracefully — the record emitted is the earliest among those
 buffered, so **the reorder is bounded by the span of the buffer rather than
 by the length of the topic**.
 
-`ScanEvent::Progress` reports when that happens, so a UI can say
-"approximately ordered" rather than quietly lying. Degradation you can
-observe is a different thing from degradation you cannot.
+`ScanProgress::reorder_window` reports the magnitude when that happens —
+"records may be up to N apart", where N is the buffer budget spread over the
+merge's width — so a UI can say "approximately ordered, within N" rather
+than quietly lying. It is `0` whenever cross-partition order held, and
+always `0` on a single-partition scan: within a partition the order is exact
+whatever the buffer did, and a caveat about a guarantee that still holds
+would undersell a promise the library keeps. Degradation you can observe is
+a different thing from degradation you cannot.
 
 ## Backward scan
 
