@@ -9,6 +9,23 @@ What belongs here: anything that changes what existing code *does*. A new API
 is discoverable from the docs; a changed meaning is not, and that is what a
 reader of this file is looking for.
 
+## 0.10.0
+
+Purely additive, which by this file's own rule means there is nothing here to
+read carefully: **no existing call changes what it does**, and the new surface
+is documented where it lives. It is listed only so that a version with no
+section does not read as an oversight.
+
+`kafka-admin` gains the two halves of "how does this principal authenticate":
+`Admin::describe_principal` (what the cluster stores about one principal —
+SCRAM credentials, delegation tokens, ACLs, quotas, each reported separately)
+and `Admin::describe_authentication` (what each listener accepts), plus
+`PrincipalDescription::likely_mechanism`, which crosses the two. The reasoning
+and — more importantly — its limits are in the `principal` and
+`authentication` module docs; the short version is that SCRAM is the only
+credential store Kafka itself owns, so everything else is inference and the
+verdict says so.
+
 ## 0.9.0
 
 The security audit's findings and the retry-mechanism review, in one release.
