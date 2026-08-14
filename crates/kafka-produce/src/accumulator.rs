@@ -69,6 +69,12 @@ const HEADER_OVERHEAD: usize = 8;
 #[derive(Debug)]
 struct Queued {
     record: ProducerRecord,
+    /// When this record stops being worth delivering, measured from the
+    /// moment the caller handed it over (#21). Every wait the record can sit
+    /// in — a buffer permit, a linger, a leader election, a retry backoff —
+    /// counts against it, which is what makes it a *delivery* deadline rather
+    /// than a per-attempt timeout.
+    deadline: Instant,
     respond: oneshot::Sender<Result<RecordMetadata>>,
     /// Released when this record is resolved, which is what makes the buffer
     /// bound real rather than advisory.
@@ -92,6 +98,14 @@ struct Batch {
 }
 
 impl Batch {
+    /// The soonest deadline among this batch's records.
+    ///
+    /// The batch travels as one request, so it lives or dies by its most
+    /// impatient record.
+    fn earliest_deadline(&self) -> Option<Instant> {
+        self.records.iter().map(|queued| queued.deadline).min()
+    }
+
     fn new(now: Instant) -> Self {
         Self {
             records: Vec::new(),
@@ -161,6 +175,8 @@ pub(crate) struct Accumulator {
     memory: Arc<Semaphore>,
     /// The largest record this producer will accept, in accounted bytes.
     record_limit: usize,
+    /// How long a record has from `append` to resolve, one way or another.
+    delivery_timeout: Duration,
 }
 
 impl Accumulator {
@@ -179,6 +195,7 @@ impl Accumulator {
         // permit that can never be granted, which presents as a hang rather
         // than as the error it is.
         let record_limit = config.max_request_size.min(config.buffer_memory);
+        let delivery_timeout = config.delivery_timeout;
 
         let actor = Actor::new(dispatcher, config, Arc::clone(&memory), transactions);
         tokio::spawn(actor.run(command_rx));
@@ -187,6 +204,7 @@ impl Accumulator {
             commands,
             memory,
             record_limit,
+            delivery_timeout,
         }
     }
 
@@ -214,10 +232,21 @@ impl Accumulator {
             ));
         }
 
-        let permit = Arc::clone(&self.memory)
-            .acquire_many_owned(permits_for(size))
-            .await
-            .map_err(|_| producer_gone())?;
+        // The deadline starts here, not at the first send: waiting for a
+        // buffer permit is time the caller's record has spent undelivered,
+        // and before #21 that wait was unbounded — a producer wedged behind a
+        // full buffer parked every `send` for ever.
+        let started = Instant::now();
+        let deadline = started
+            .checked_add(self.delivery_timeout)
+            .unwrap_or(started);
+        let permit = tokio::time::timeout_at(
+            deadline,
+            Arc::clone(&self.memory).acquire_many_owned(permits_for(size)),
+        )
+        .await
+        .map_err(|_| delivery_expired(started))?
+        .map_err(|_| producer_gone())?;
 
         let (respond, receiver) = oneshot::channel();
         self.commands
@@ -226,6 +255,7 @@ impl Accumulator {
                 partition,
                 queued: Queued {
                     record,
+                    deadline,
                     respond,
                     _permit: permit,
                 },
@@ -320,6 +350,7 @@ impl Actor {
                 () = sleep_until(deadline) => self.close_expired(),
             }
 
+            self.expire_overdue();
             self.ensure_identity().await;
             self.ensure_enrolled().await;
             self.dispatch_ready();
@@ -507,6 +538,38 @@ impl Actor {
         }
     }
 
+    /// Fail every buffered record whose delivery deadline has passed.
+    ///
+    /// Runs on each turn of the actor loop, so a record expires while it is
+    /// waiting — behind a linger, behind a failing `InitProducerId`, behind
+    /// another partition's in-flight batch — and not only when something
+    /// finally tries to send it. Batches on the wire are left alone: their
+    /// records' fate belongs to the response, and the dispatcher enforces the
+    /// same deadline there.
+    fn expire_overdue(&mut self) {
+        let now = Instant::now();
+        let budget = self.config.delivery_timeout;
+        let mut expired = 0usize;
+        for state in self.partitions.values_mut() {
+            if let Some(open) = state.open.as_mut() {
+                expired += drop_expired(open, now, budget);
+            }
+            for batch in state.pending.iter_mut() {
+                expired += drop_expired(batch, now, budget);
+            }
+            // A batch emptied by expiry is not work; leaving it would send an
+            // empty request and, under idempotence, burn a sequence number.
+            state.open.take_if(|open| open.records.is_empty());
+            state.pending.retain(|batch| !batch.records.is_empty());
+        }
+        if expired > 0 {
+            tracing::warn!(
+                records = expired,
+                "records expired before delivery; they never reached a broker"
+            );
+        }
+    }
+
     /// Whether any partition has a batch waiting for the wire.
     fn has_work(&self) -> bool {
         self.partitions
@@ -544,7 +607,25 @@ impl Actor {
                 .retry
                 .delay(self.identity_attempts.saturating_add(1))
         });
-        earliest_wake(open, identity_retry, Instant::now())
+
+        // The soonest delivery deadline is a wake-up in its own right: a
+        // record parked behind a linger longer than its own budget, or behind
+        // a partition whose batch is in flight, has to expire on time rather
+        // than whenever the actor next happens to turn (#21).
+        let expiry = self
+            .partitions
+            .values()
+            .flat_map(|state| {
+                state
+                    .open
+                    .iter()
+                    .chain(state.pending.iter())
+                    .filter_map(Batch::earliest_deadline)
+            })
+            .min();
+
+        let wake = earliest_wake(open, identity_retry, Instant::now());
+        [wake, expiry].into_iter().flatten().min()
     }
 
     fn close_expired(&mut self) {
@@ -721,6 +802,16 @@ async fn send_group(
                     topic: ready.topic,
                     partition: ready.partition,
                     encoded,
+                    // The batch travels as one request and so lives by its
+                    // most impatient record. A batch with no records cannot
+                    // reach here, but the fallback keeps the deadline honest
+                    // rather than unbounded if it ever did.
+                    deadline: ready
+                        .records
+                        .iter()
+                        .map(|queued| queued.deadline)
+                        .min()
+                        .unwrap_or_else(Instant::now),
                 });
                 records.insert(key, ready.records);
             }
@@ -807,6 +898,38 @@ fn earliest_wake(
     [open, retry].into_iter().flatten().min()
 }
 
+/// Resolve the records in `batch` whose deadline has passed, and report how
+/// many there were.
+///
+/// A free function for the same reason [`fail_buffered`] is: the expiry rule
+/// is worth asserting without a broker in the way.
+fn drop_expired(batch: &mut Batch, now: Instant, budget: Duration) -> usize {
+    if batch.records.iter().all(|queued| queued.deadline > now) {
+        return 0;
+    }
+    let (live, dead): (Vec<Queued>, Vec<Queued>) = std::mem::take(&mut batch.records)
+        .into_iter()
+        .partition(|queued| queued.deadline > now);
+    batch.records = live;
+    batch.bytes = batch
+        .records
+        .iter()
+        .map(|queued| accounted_size(&queued.record))
+        .sum();
+    let count = dead.len();
+    for queued in dead {
+        // `elapsed` is the budget the record was given plus however long past
+        // it the actor took to notice — which is what the caller configured
+        // and can act on, unlike the overshoot alone.
+        let overshoot = now.saturating_duration_since(queued.deadline);
+        queued.resolve(Err(Error::Timeout {
+            api_key: kafka_conn::ApiKey::Produce,
+            elapsed: budget.saturating_add(overshoot),
+        }));
+    }
+    count
+}
+
 /// Resolve every buffered record with `error` and drain the buffers.
 ///
 /// The terminal half of `ensure_identity`'s failure handling, and — like
@@ -881,6 +1004,21 @@ fn now_millis() -> i64 {
 pub(crate) fn producer_gone() -> Error {
     Error::ConnectionClosed {
         peer: "the producer".to_owned(),
+    }
+}
+
+/// The record ran out of `delivery_timeout` before it could be delivered.
+///
+/// Typed as a timeout rather than as a broker error because that is what it
+/// is: nothing rejected the record, this client gave up on it (#21). It is
+/// only ever raised for a record that never reached a broker — expired
+/// waiting for a permit, a linger, or an identity. A record whose *attempt*
+/// failed keeps that attempt's error instead, so an ambiguous send stays
+/// ambiguous rather than being flattened into a clean-sounding timeout.
+fn delivery_expired(started: Instant) -> Error {
+    Error::Timeout {
+        api_key: kafka_conn::ApiKey::Produce,
+        elapsed: started.elapsed(),
     }
 }
 
@@ -968,6 +1106,7 @@ mod tests {
         let (respond, mut receiver) = oneshot::channel();
         let queued = Queued {
             record: ProducerRecord::new("t"),
+            deadline: Instant::now() + Duration::from_secs(300),
             respond,
             _permit: memory.try_acquire_owned().expect("permit"),
         };
@@ -991,6 +1130,75 @@ mod tests {
                 .values()
                 .all(|state| state.open.is_none() && state.pending.is_empty()),
             "failed batches must not stay buffered as work"
+        );
+    }
+
+    /// #21: a record that ran out of `delivery_timeout` while buffered is
+    /// failed as a timeout, and only it — the records batched beside it that
+    /// still have budget travel on. Rule 4 in the write direction, applied to
+    /// the clock.
+    #[tokio::test]
+    async fn a_record_past_its_deadline_is_failed_and_its_neighbours_are_not() {
+        let memory = Arc::new(Semaphore::new(100));
+        let now = Instant::now();
+        let mut batch = Batch::new(now);
+        let mut receivers = Vec::new();
+        // One already expired, one with budget left.
+        for deadline in [now - Duration::from_secs(1), now + Duration::from_secs(300)] {
+            let (respond, receiver) = oneshot::channel();
+            batch.records.push(Queued {
+                record: ProducerRecord::new("t"),
+                deadline,
+                respond,
+                _permit: memory.clone().try_acquire_owned().expect("permit"),
+            });
+            receivers.push(receiver);
+        }
+        batch.bytes = 999;
+
+        let dropped = drop_expired(&mut batch, now, Duration::from_secs(30));
+
+        assert_eq!(dropped, 1);
+        assert_eq!(batch.records.len(), 1, "the live record must survive");
+        assert!(
+            batch.bytes < 999,
+            "the expired record's bytes must stop counting against the batch"
+        );
+        match receivers[0].try_recv() {
+            Ok(Err(Error::Timeout { elapsed, .. })) => assert!(
+                elapsed >= Duration::from_secs(30),
+                "elapsed reports the budget the record was given, got {elapsed:?}"
+            ),
+            other => panic!("the expired record must fail as a timeout, got {other:?}"),
+        }
+        assert!(
+            receivers[1].try_recv().is_err(),
+            "the record with budget left must still be pending"
+        );
+    }
+
+    /// The deadline has to be a *wake-up*, not just a check: a record parked
+    /// behind a linger longer than its own budget must expire on time rather
+    /// than whenever the actor next happens to turn.
+    #[test]
+    fn the_earliest_deadline_is_what_a_batch_reports() {
+        let now = Instant::now();
+        let memory = Arc::new(Semaphore::new(100));
+        let mut batch = Batch::new(now);
+        assert_eq!(batch.earliest_deadline(), None);
+        for offset in [300u64, 5, 60] {
+            let (respond, _receiver) = oneshot::channel();
+            batch.records.push(Queued {
+                record: ProducerRecord::new("t"),
+                deadline: now + Duration::from_secs(offset),
+                respond,
+                _permit: memory.clone().try_acquire_owned().expect("permit"),
+            });
+        }
+        assert_eq!(
+            batch.earliest_deadline(),
+            Some(now + Duration::from_secs(5)),
+            "a batch travels as one request, so it lives by its most impatient record"
         );
     }
 

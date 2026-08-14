@@ -72,11 +72,27 @@ pub struct ProducerConfig {
     pub acks: Acks,
     /// The codec applied to each batch. Defaults to [`Compression::None`].
     pub compression: Compression,
-    /// How long the *broker* may spend collecting acknowledgements.
+    /// How long a record has to be delivered, measured from `send`.
     ///
-    /// Distinct from the connection's own request timeout, which bounds how
-    /// long we wait for the socket. This one is a field in the request and is
-    /// what the leader honours while waiting on its followers.
+    /// A real client-side deadline, the equivalent of Java's
+    /// `delivery.timeout.ms` and librdkafka's `message.timeout.ms`: *every*
+    /// wait a record can sit in counts against it — a buffer permit, a
+    /// linger, a leader election, a retry backoff — and a record that runs
+    /// out is failed with [`kafka_conn::Error::Timeout`] rather than retried
+    /// further. Before 0.9.0 this was only relayed as the request's
+    /// `timeout_ms`, so nothing bounded a record's total lifetime and a
+    /// producer parked behind a full buffer or a failing `InitProducerId`
+    /// could wait for ever.
+    ///
+    /// It also still bounds the broker: the request carries whatever remains
+    /// of the nearest record's deadline, capped by this value, so a leader
+    /// never spends longer collecting acknowledgements than the records are
+    /// going to be waited for.
+    ///
+    /// A record whose *attempt* failed keeps that attempt's error when the
+    /// deadline expires rather than being flattened into a timeout — an
+    /// ambiguous send stays ambiguous, which is the distinction a
+    /// non-idempotent producer's duplicate-safety rests on.
     pub delivery_timeout: Duration,
     /// How to re-send a record the broker **rejected**.
     ///
@@ -190,7 +206,9 @@ impl ProducerConfig {
         self
     }
 
-    /// How long the broker may spend collecting acknowledgements.
+    /// How long a record has to be delivered, measured from `send`.
+    ///
+    /// See [`ProducerConfig::delivery_timeout`].
     #[must_use]
     pub fn delivery_timeout(mut self, timeout: Duration) -> Self {
         self.delivery_timeout = timeout;

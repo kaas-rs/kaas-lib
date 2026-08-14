@@ -8,7 +8,7 @@
 //! broker count instead of partition count.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use tokio::time::Instant;
 
 use bytes::Bytes;
 use kafka_conn::protocol::StrBytes;
@@ -35,6 +35,12 @@ pub(crate) struct Outbound {
     pub partition: i32,
     /// The encoded v2 record batch.
     pub encoded: Bytes,
+    /// When this batch's most impatient record gives up (#21).
+    ///
+    /// Bounds the retry loop below and the broker-side `timeout_ms` above:
+    /// there is no sense asking a leader to spend thirty seconds collecting
+    /// acknowledgements for records that will be failed in five.
+    pub deadline: Instant,
 }
 
 impl Outbound {
@@ -101,10 +107,20 @@ impl Attempt {
         started: Instant,
         policy: &RetryPolicy,
         idempotent: bool,
+        deadline: Instant,
     ) -> bool {
         let error = match self {
             Attempt::Rejected(error) | Attempt::Ambiguous(error) => error,
         };
+        // The delivery deadline outranks both budgets, in both directions: it
+        // stops a leader-election retry that would outlive the records it is
+        // for, and — since it is usually the longer of the two — it is what
+        // lets a producer ride out an outage the attempt count alone gave up
+        // on. Expiring here returns the *attempt's* error rather than a
+        // timeout, so an ambiguous send stays ambiguous (#21).
+        if Instant::now() >= deadline {
+            return false;
+        }
         let budget_left = if error.needs_metadata_refresh() {
             started.elapsed() < policy.coordinator_timeout
         } else {
@@ -177,6 +193,10 @@ impl Dispatcher {
                             started,
                             &self.config.retry,
                             self.config.idempotent,
+                            outbound
+                                .as_ref()
+                                .map(|outbound| outbound.deadline)
+                                .unwrap_or_else(Instant::now),
                         );
                         match (may_retry, outbound) {
                             (true, Some(outbound)) => retry.push(outbound),
@@ -205,7 +225,16 @@ impl Dispatcher {
                 "produce rejected; refreshing metadata and retrying"
             );
             if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
+                // Never sleep past the nearest deadline: waking to send a
+                // request whose records have already expired wastes the
+                // cluster's time and the caller's.
+                let nearest = retry.iter().map(|outbound| outbound.deadline).min();
+                match nearest {
+                    Some(nearest) => {
+                        tokio::time::sleep_until(nearest.min(Instant::now() + delay)).await
+                    }
+                    None => tokio::time::sleep(delay).await,
+                }
             }
             attempt = attempt.saturating_add(1);
             pending = retry;
@@ -359,9 +388,24 @@ impl Dispatcher {
             topic_data.push(data);
         }
 
+        // The broker's own budget for collecting acknowledgements is what
+        // remains of the nearest record's delivery deadline, never more than
+        // the configured timeout (#21): a leader holding a request open past
+        // the moment its records expire is working for nobody.
+        let remaining = group
+            .iter()
+            .map(|outbound| outbound.deadline)
+            .min()
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .unwrap_or(self.config.delivery_timeout);
+        let timeout_ms = i32::try_from(remaining.as_millis())
+            .unwrap_or(i32::MAX)
+            .min(self.config.delivery_timeout_ms())
+            .max(0);
+
         let mut request = ProduceRequest::default()
             .with_acks(self.config.acks.wire())
-            .with_timeout_ms(self.config.delivery_timeout_ms())
+            .with_timeout_ms(timeout_ms)
             .with_topic_data(topic_data);
 
         // A transactional produce must name its transaction. Without this the
@@ -470,7 +514,13 @@ mod tests {
             topic: topic.to_owned(),
             partition,
             encoded: Bytes::from_static(b"batch"),
+            deadline: Instant::now() + Duration::from_secs(30),
         }
+    }
+
+    /// A deadline far enough out that it is never what a test is measuring.
+    fn open_ended() -> Instant {
+        Instant::now() + Duration::from_secs(300)
     }
 
     /// The rule that costs data if it breaks: an ambiguous failure is never
@@ -488,12 +538,65 @@ mod tests {
              must not route through that check"
         );
         assert!(
-            !Attempt::Ambiguous(timeout.clone()).retriable(1, Instant::now(), &policy, false),
+            !Attempt::Ambiguous(timeout.clone()).retriable(
+                1,
+                Instant::now(),
+                &policy,
+                false,
+                open_ended()
+            ),
             "without a producer id, re-sending an unknown outcome duplicates"
         );
         assert!(
-            Attempt::Ambiguous(timeout).retriable(1, Instant::now(), &policy, true),
+            Attempt::Ambiguous(timeout).retriable(1, Instant::now(), &policy, true, open_ended()),
             "with one, the broker deduplicates the re-send — that is M14"
+        );
+    }
+
+    /// #21: the delivery deadline outranks both retry budgets. An expired
+    /// batch stops retrying even where the attempt budget and the coordinator
+    /// deadline would both allow another go.
+    #[test]
+    fn an_expired_deadline_stops_a_retry_the_budgets_would_allow() {
+        let policy = RetryPolicy::default();
+        let refresh = Error::from_code(ErrorCode::NotLeaderOrFollower, None);
+        assert!(
+            Attempt::Rejected(refresh.clone()).retriable(
+                1,
+                Instant::now(),
+                &policy,
+                false,
+                open_ended()
+            ),
+            "with budget left this is the retry that rides out an election"
+        );
+        assert!(
+            !Attempt::Rejected(refresh).retriable(
+                1,
+                Instant::now(),
+                &policy,
+                false,
+                Instant::now()
+            ),
+            "past the deadline there is nobody left to deliver to"
+        );
+    }
+
+    /// And the expiry must not launder an ambiguous outcome into a clean
+    /// failure: a non-idempotent producer's duplicate-safety rests on the
+    /// caller being told the write *may* have landed.
+    #[test]
+    fn expiry_preserves_the_ambiguous_verdict() {
+        let policy = RetryPolicy::default();
+        let error = Error::Timeout {
+            api_key: kafka_conn::ApiKey::Produce,
+            elapsed: Duration::from_secs(1),
+        };
+        let attempt = Attempt::Ambiguous(error);
+        assert!(!attempt.retriable(1, Instant::now(), &policy, true, Instant::now()));
+        assert!(
+            matches!(attempt, Attempt::Ambiguous(_)),
+            "the verdict the caller is handed still says the outcome is unknown"
         );
     }
 
@@ -508,7 +611,7 @@ mod tests {
             let error = Error::from_code(code, None);
             assert!(error.needs_metadata_refresh(), "{code:?} must refresh");
             assert!(
-                Attempt::Rejected(error).retriable(1, Instant::now(), &policy, false),
+                Attempt::Rejected(error).retriable(1, Instant::now(), &policy, false, open_ended()),
                 "{code:?}"
             );
         }
@@ -527,7 +630,8 @@ mod tests {
                 policy.max_attempts + 100,
                 Instant::now(),
                 &policy,
-                false
+                false,
+                open_ended()
             ),
             "attempts must not expire a retry the coordinator_timeout still allows"
         );
@@ -539,7 +643,7 @@ mod tests {
             ..RetryPolicy::default()
         };
         assert!(
-            !Attempt::Rejected(refresh).retriable(1, Instant::now(), &expired, false),
+            !Attempt::Rejected(refresh).retriable(1, Instant::now(), &expired, false, open_ended()),
             "and the deadline is still a deadline"
         );
 
@@ -551,7 +655,8 @@ mod tests {
                 policy.max_attempts,
                 Instant::now(),
                 &policy,
-                false
+                false,
+                open_ended()
             ),
             "a non-handover error must not inherit the longer budget"
         );
@@ -567,7 +672,7 @@ mod tests {
         ] {
             let error = Error::from_code(code, None);
             assert!(
-                !Attempt::Rejected(error).retriable(1, Instant::now(), &policy, true),
+                !Attempt::Rejected(error).retriable(1, Instant::now(), &policy, true, open_ended()),
                 "{code:?}"
             );
         }
