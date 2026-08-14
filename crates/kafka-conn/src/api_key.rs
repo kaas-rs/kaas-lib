@@ -510,6 +510,15 @@ impl ApiKey {
     /// * `SaslHandshake` and `SaslAuthenticate` mutate connection state rather
     ///   than cluster state, and gating them would make a read-only client
     ///   unable to authenticate at all.
+    ///
+    /// And one scope statement, worth making explicit: the gate classifies
+    /// *api keys*, not request contents. `Metadata` is read-only here, yet a
+    /// hand-built `MetadataRequest` with `allow_auto_topic_creation(true)`
+    /// sent through a generic escape hatch like `Cluster::send_any` can
+    /// create topics on a permissive cluster and still pass. The library's
+    /// own metadata layer always sends `false`; the gate is a guard rail for
+    /// the request types, not a per-field proof, and a caller reaching for
+    /// raw `kafka_protocol` structs is past what it can check.
     pub const fn is_mutating(self) -> bool {
         match self {
             ApiKey::Fetch

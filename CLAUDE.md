@@ -10,11 +10,14 @@ Three properties define the shape, and each is a rule rather than a description:
 2. **Rust end to end.** No librdkafka, no vendored C client, no cmake. This is the main reason to choose this library over `rdkafka`. It is *almost* literally true — see the honest exception below.
 3. **Fluent construction.** Owned config, request and record types are built by chaining consuming-`self` methods. See rule 7.
 
-### The one place "pure Rust" is not true
+### The places "pure Rust" is not true
 
-`lz4` and `zstd` bind to C. Both come in through `kafka-protocol`'s feature list in the Stack section below: `lz4` → `lz4-sys`, `zstd` → `zstd-sys`, and `cc` compiles them at build time. `gzip` (flate2/miniz_oxide) and `snappy` (snap) are pure Rust.
+Three cc-compiled components, not two — the audit (#34) caught this section undercounting:
 
-So a downstream build needs a C compiler for two codecs, though not the cmake-plus-librdkafka toolchain `rdkafka` requires. Do not paper over this in docs or a README. Closing it means either dropping codecs real clusters use — zstd especially — or hand-rolling compression, and hand-rolling wire formats is precisely what this codebase does not do. Treat it as an honest blocker under rule 3, not a todo.
+- `lz4` and `zstd` bind to C. Both come in through `kafka-protocol`'s feature list in the Stack section below: `lz4` → `lz4-sys`, `zstd` → `zstd-sys`, and `cc` compiles them at build time. `gzip` (flate2/miniz_oxide) and `snappy` (snap) are pure Rust.
+- `ring`, chosen explicitly over `aws-lc-rs` as the rustls provider, is C/asm on the TLS path of every published crate. It is the *reason* the choice was made — `ring` builds with `cc` alone where `aws-lc-sys` wants cmake — so it is part of the honest count, not an exception to it.
+
+So a downstream build needs a C compiler (but never cmake, which is the toolchain line `rdkafka` crosses). Do not paper over this in docs or a README. Closing it means either dropping codecs real clusters use — zstd especially — or hand-rolling compression and crypto, and hand-rolling wire formats is precisely what this codebase does not do. Treat it as an honest blocker under rule 3, not a todo.
 
 ## Why it exists: the kaas initiative
 

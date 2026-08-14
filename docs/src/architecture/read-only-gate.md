@@ -105,6 +105,14 @@ that must not be mutated by a principal should say so with ACLs; this gate
 protects against the UI doing something nobody asked it to, not against a
 hostile client.
 
+**And it classifies api keys, not request contents.** `Metadata` is
+read-only, yet a developer hand-building a `MetadataRequest` with
+`allow_auto_topic_creation(true)` and sending it through the generic
+`Cluster::send_any` escape hatch can create a topic on a permissive cluster
+while passing the gate. The library's own metadata layer always sends
+`false`; the boundary is the request *type*, and a caller constructing raw
+`kafka_protocol` structs is deliberately past it.
+
 ## Verification
 
 The acceptance test drives its assertion from `ApiKey::iter` rather than from

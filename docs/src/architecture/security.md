@@ -12,6 +12,40 @@ and an SNI override for the case where the address you dial is not the name
 on the certificate — which is routine behind a Kubernetes service or a load
 balancer.
 
+## The metadata redirect is a trust decision
+
+A Kafka client does not choose the addresses it connects to after bootstrap:
+it follows what metadata responses advertise. Two consequences are worth
+having in mind when the brokers themselves are not trusted, and both are
+ecosystem-standard rather than specific to this library — the Java client
+and librdkafka behave identically.
+
+* **Over TLS with the system trust store**, a hostile broker can advertise
+  an endpoint holding a certificate from any *public* CA, and verification
+  succeeds. For PLAIN and OAUTHBEARER — which present a reusable credential
+  — that endpoint has now harvested it. Per-cluster SASL configuration keeps
+  the blast radius to that one cluster; `TrustAnchors::Pem` shrinks it
+  further and is the recommended shape for a private-CA cluster: a redirect
+  can then only land on an endpoint the cluster's own CA vouched for.
+* **Without TLS**, an advertised address steers a plain `TcpStream::connect`
+  to any reachable `host:port` — an SSRF-shaped pivot for probing an
+  internal network, bounded by the fact that only the Kafka wire protocol is
+  spoken to it. This is one more reason "TLS against untrusted brokers" is
+  the floor, not a hardening extra.
+
+## Secrets stay in memory until dropped
+
+Passwords, SCRAM-derived keys, bearer tokens, OIDC client secrets and
+delegation-token HMACs are held as ordinary `String`/`Vec` values and are
+**not zeroized** on drop. This is the Kafka-client norm (librdkafka keeps
+credentials in plain heap memory for the connection's lifetime too, for the
+same reason: KIP-368 re-authentication needs the credential again hours
+later). Zeroization in Rust is also only ever best-effort — every clone,
+reallocation and move leaves bytes behind that no `Drop` impl can reach.
+The stated position is therefore: memory disclosure of this process is out
+of scope for these secrets; deployments for which that is not acceptable
+should isolate the process rather than expect the library to scrub RAM.
+
 ## SASL mechanisms
 
 `PLAIN`, `SCRAM-SHA-256`, `SCRAM-SHA-512` and `OAUTHBEARER`, negotiated via

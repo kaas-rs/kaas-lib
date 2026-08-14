@@ -38,12 +38,25 @@ use tokio_rustls::TlsConnector;
 use crate::error::{Error, Result};
 
 /// Where to get trust anchors from.
+///
+/// This choice is also the *metadata-redirect* containment. A client follows
+/// broker addresses out of metadata responses, so a hostile broker can
+/// advertise any endpoint it likes and the client will connect and — for
+/// PLAIN or OAUTHBEARER — present a reusable credential there. Under
+/// [`TrustAnchors::System`], any endpoint holding a certificate from any
+/// public CA verifies green, which makes that credential harvestable by
+/// whoever controls the advertised name. This matches what the Java client
+/// and librdkafka do, and per-cluster SASL configuration keeps one cluster's
+/// credential from leaking to another — but for a private-CA cluster,
+/// [`TrustAnchors::Pem`] is the stronger statement: a redirect can then only
+/// land on an endpoint the *cluster's own CA* vouched for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustAnchors {
     /// The operating system's trust store.
     System,
     /// Only the supplied PEM bundle. The right choice for a private CA: it
-    /// means a certificate from a public CA will *not* be accepted.
+    /// means a certificate from a public CA will *not* be accepted — which
+    /// also contains the metadata redirect described on this type.
     Pem(Vec<u8>),
     /// The system store plus a PEM bundle.
     SystemAndPem(Vec<u8>),
