@@ -56,7 +56,7 @@ mod snapshot;
 pub use cluster::{Cluster, ClusterConfig};
 pub use group::ConsumerGroupMetadata;
 pub use pool::{BrokerPool, Endpoint};
-pub use retry::RetryPolicy;
+pub use retry::{RetryPolicy, Verdict, reask};
 pub use routing::{BrokerSelector, CoordinatorKind, Routing, routing};
 pub use snapshot::{BrokerInfo, MetadataSnapshot, PartitionInfo, TopicId, TopicInfo};
 

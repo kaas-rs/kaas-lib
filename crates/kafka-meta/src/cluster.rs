@@ -97,6 +97,16 @@ impl Cluster {
         &self.inner.pool
     }
 
+    /// The retry policy this cluster was configured with.
+    ///
+    /// Exposed so the crates above can drive their own [`crate::reask`] loops
+    /// under the *caller's* policy instead of growing private constants —
+    /// which is precisely how the workspace ended up with four flat 500ms
+    /// loops to unify (#22).
+    pub fn retry(&self) -> RetryPolicy {
+        self.inner.config.retry
+    }
+
     /// The version a connection would send a specific request at.
     ///
     /// Exposed because several requests change *shape* with the version rather

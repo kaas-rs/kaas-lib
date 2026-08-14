@@ -65,15 +65,6 @@ const RECORD_OVERHEAD: usize = 32;
 /// Per-header accounting overhead: two length varints.
 const HEADER_OVERHEAD: usize = 8;
 
-/// How long to wait before re-attempting a failed producer-id claim.
-///
-/// Flat rather than exponential, like the coordinator re-ask in
-/// `kafka-consume`: the claim fails because the cluster is not ready to
-/// answer yet — a freshly elected controller still allocating producer-id
-/// blocks, say — and readiness arrives on the cluster's schedule, not on a
-/// backoff curve.
-const IDENTITY_RETRY: Duration = Duration::from_millis(500);
-
 /// A record waiting for the wire, with the caller's delivery channel.
 #[derive(Debug)]
 struct Queued {
@@ -272,6 +263,10 @@ struct Actor {
     /// `init_transactions` is a caller-driven step — and the actor only reads
     /// it.
     identity: Option<ProducerIdentity>,
+    /// Failed `InitProducerId` claims since the last success, pacing the
+    /// re-attempt on the caller's `RetryPolicy` curve (#22) instead of the
+    /// flat 500ms this file used to hardcode.
+    identity_attempts: u32,
     sequences: Sequences,
     transactions: Option<Arc<Transactions>>,
 }
@@ -293,6 +288,7 @@ impl Actor {
             completions_tx,
             completions_rx,
             identity: None,
+            identity_attempts: 0,
             sequences: Sequences::default(),
             transactions,
         }
@@ -449,8 +445,13 @@ impl Actor {
                     "claimed a producer id"
                 );
                 self.identity = Some(identity);
+                self.identity_attempts = 0;
             }
             Err(error) if error.retriable() => {
+                // Paced by next_deadline on the configured retry curve: the
+                // first re-attempt after a failure comes at base_delay and
+                // backs off, jittered, to the cap.
+                self.identity_attempts = self.identity_attempts.saturating_add(1);
                 tracing::warn!(%error, "could not claim a producer id; retrying");
             }
             Err(error) => {
@@ -538,7 +539,12 @@ impl Actor {
 
         let blocked_on_identity =
             self.config.idempotent && self.identity.is_none() && self.has_work();
-        earliest_wake(open, blocked_on_identity, Instant::now())
+        let identity_retry = blocked_on_identity.then(|| {
+            self.config
+                .retry
+                .delay(self.identity_attempts.saturating_add(1))
+        });
+        earliest_wake(open, identity_retry, Instant::now())
     }
 
     fn close_expired(&mut self) {
@@ -794,10 +800,10 @@ async fn send_group(
 /// again.
 fn earliest_wake(
     open: Option<Instant>,
-    blocked_on_identity: bool,
+    identity_retry: Option<Duration>,
     now: Instant,
 ) -> Option<Instant> {
-    let retry = blocked_on_identity.then(|| now + IDENTITY_RETRY);
+    let retry = identity_retry.map(|delay| now + delay);
     [open, retry].into_iter().flatten().min()
 }
 
@@ -937,14 +943,15 @@ mod tests {
     #[test]
     fn work_blocked_on_a_missing_identity_still_wakes_the_actor() {
         let now = Instant::now();
+        let retry = Duration::from_millis(500);
         assert_eq!(
-            earliest_wake(None, true, now),
-            Some(now + IDENTITY_RETRY),
+            earliest_wake(None, Some(retry), now),
+            Some(now + retry),
             "no open batch and no incoming command: this deadline is the only \
              thing that ever polls the actor again"
         );
         assert_eq!(
-            earliest_wake(None, false, now),
+            earliest_wake(None, None, now),
             None,
             "with nothing blocked there is genuinely nothing to wait for"
         );
@@ -992,13 +999,14 @@ mod tests {
     #[test]
     fn the_nearest_deadline_wins() {
         let now = Instant::now();
+        let retry = Duration::from_millis(500);
         let soon = now + Duration::from_millis(1);
-        assert_eq!(earliest_wake(Some(soon), true, now), Some(soon));
+        assert_eq!(earliest_wake(Some(soon), Some(retry), now), Some(soon));
 
         let late = now + Duration::from_secs(60);
         assert_eq!(
-            earliest_wake(Some(late), true, now),
-            Some(now + IDENTITY_RETRY)
+            earliest_wake(Some(late), Some(retry), now),
+            Some(now + retry)
         );
     }
 

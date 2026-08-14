@@ -9,33 +9,19 @@
 //! under ten seconds, which is itself the tell: a budget being consulted would
 //! have spent it.
 //!
-//! So the re-ask lives here, above the decode. `kafka-produce` reached the same
-//! conclusion for the transaction coordinator and keeps its own copy — which is
-//! why transactions never showed this bug. Two private helpers rather than one
-//! shared public one is deliberate for now: this is a lockstep release, and a
-//! new public method on `kafka-meta` that `kafka-consume` calls in the same
-//! version is exactly what `cargo publish --workspace --dry-run` refuses to
-//! verify. Worth unifying once both are published.
+//! The loop itself is [`kafka_meta::reask`] (#22 unified the private copies
+//! this module and `kafka-produce` used to keep): pacing follows the
+//! cluster's configured [`kafka_meta::RetryPolicy`] — jittered exponential,
+//! not the flat 500ms this module once hardcoded — and the budget is the
+//! policy's `coordinator_timeout` unless the caller's own deadline replaces
+//! it. What stays here is only what is consume-specific: which cache to
+//! invalidate, and that a given-up response goes back unchanged so per-item
+//! results survive (rule 4).
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use kafka_conn::{ErrorCode, Result, Rpc};
-use kafka_meta::{Cluster, CoordinatorKind};
-
-/// How long to keep re-asking before handing the answer back as it came.
-///
-/// A deadline rather than an attempt count, because this class of error is not
-/// "the request failed" but "ask again in a moment": the group is being handed
-/// to a new coordinator, or `__consumer_offsets` is still being read. How many
-/// attempts that takes is a function of the backoff curve; how long it takes is
-/// a property of the cluster. Half of Java's `default.api.timeout.ms`, because
-/// this library backs a UI and a genuinely coordinator-less cluster should
-/// still report something before a person gives up on the page.
-const COORDINATOR_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Wait between re-asks. Flat rather than exponential: a handover completes on
-/// the cluster's schedule, and backing off past it only adds latency.
-const BACKOFF: Duration = Duration::from_millis(500);
+use kafka_meta::{Cluster, CoordinatorKind, Verdict};
 
 /// Send to the group coordinator, re-asking while the decoded response says we
 /// asked the wrong broker.
@@ -63,6 +49,7 @@ where
 /// group forms, so their budget is the member's rebalance timeout rather than
 /// the connection's `request_timeout`. Every other coordinator RPC answers
 /// promptly and wants the connection default, which is what `None` selects.
+/// The deadline *replaces* the policy budget — see [`kafka_meta::reask`].
 pub(crate) async fn send_retrying_until<R, F>(
     cluster: &Cluster,
     group_id: &str,
@@ -74,45 +61,42 @@ where
     R: Rpc + Clone,
     F: Fn(&R::Response) -> Option<ErrorCode>,
 {
-    let started = Instant::now();
-    loop {
-        let response = match deadline {
-            Some(deadline) => {
-                cluster
-                    .send_to_coordinator_until(
-                        CoordinatorKind::Group,
-                        group_id,
-                        request.clone(),
-                        deadline,
-                    )
-                    .await?
-            }
-            None => {
-                cluster
-                    .send_to_coordinator(CoordinatorKind::Group, group_id, request.clone())
-                    .await?
-            }
-        };
+    let policy = cluster.retry();
+    kafka_meta::reask(&policy, deadline, |_attempt| {
+        let request = request.clone();
+        let code_of = &code_of;
+        async move {
+            let response = match deadline {
+                Some(deadline) => {
+                    cluster
+                        .send_to_coordinator_until(
+                            CoordinatorKind::Group,
+                            group_id,
+                            request,
+                            deadline,
+                        )
+                        .await?
+                }
+                None => {
+                    cluster
+                        .send_to_coordinator(CoordinatorKind::Group, group_id, request)
+                        .await?
+                }
+            };
 
-        let Some(code) = code_of(&response) else {
-            return Ok(response);
-        };
-        // A caller-supplied deadline *replaces* the constant rather than
-        // capping it, because it can fall either side: a member with a 300s
-        // rebalance timeout is willing to wait longer than 30s for its join,
-        // and one that has already spent that budget in purgatory has nothing
-        // left to spend here. Counting the backoff in avoids sleeping past the
-        // deadline only to send a request that cannot be answered in time.
-        let spent = match deadline {
-            Some(deadline) => Instant::now() + BACKOFF >= deadline,
-            None => started.elapsed() >= COORDINATOR_TIMEOUT,
-        };
-        if !code.needs_coordinator_refresh() || spent {
-            return Ok(response);
+            match code_of(&response) {
+                Some(code) if code.needs_coordinator_refresh() => {
+                    cluster.invalidate_coordinator(CoordinatorKind::Group, group_id);
+                    tracing::debug!(
+                        group_id = %kafka_conn::control_safe(group_id),
+                        %code,
+                        "coordinator moved; re-asking"
+                    );
+                    Ok(Verdict::Reask(Ok(response)))
+                }
+                _ => Ok(Verdict::Settled(response)),
+            }
         }
-
-        cluster.invalidate_coordinator(CoordinatorKind::Group, group_id);
-        tracing::debug!(group_id = %kafka_conn::control_safe(group_id), %code, "coordinator moved; re-asking");
-        tokio::time::sleep(BACKOFF).await;
-    }
+    })
+    .await
 }

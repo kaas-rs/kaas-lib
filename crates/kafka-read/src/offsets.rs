@@ -55,11 +55,6 @@ pub(crate) async fn at_timestamp(
     list_one(cluster, topic, partition, leader, timestamp).await
 }
 
-/// How many times to re-resolve the leader before giving up.
-const MAX_ATTEMPTS: u32 = 5;
-/// Pause between attempts, long enough for an election to settle.
-const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
-
 async fn list_one(
     cluster: &Cluster,
     topic: &str,
@@ -67,31 +62,41 @@ async fn list_one(
     leader: i32,
     timestamp: i64,
 ) -> Result<Option<i64>> {
-    let mut leader = leader;
-    let mut attempt = 1;
-    loop {
-        match list_one_once(cluster, topic, partition, leader, timestamp).await {
-            Err(error) if error.retriable() && attempt < MAX_ATTEMPTS => {
-                // `ListOffsets` reports failure *per partition*, inside a
-                // response the transport considers a success — so
-                // `Cluster::dispatch`'s retry never sees it and this is the
-                // only place it can be handled. `NOT_LEADER_OR_FOLLOWER` on a
-                // freshly created partition is the common case: the topic
-                // exists, the leader is mid-election, and the snapshot names a
-                // broker that is not it yet. Surfacing that to a caller makes
-                // reading a topic you just created a hard error.
-                if error.needs_metadata_refresh() {
-                    cluster.refresh().await.ok();
+    // `ListOffsets` reports failure *per partition*, inside a response the
+    // transport considers a success — so `Cluster::dispatch`'s retry never
+    // sees it and this is the only place it can be handled.
+    // `NOT_LEADER_OR_FOLLOWER` on a freshly created partition is the common
+    // case: the topic exists, the leader is mid-election, and the snapshot
+    // names a broker that is not it yet. Surfacing that to a caller makes
+    // reading a topic you just created a hard error. The loop is
+    // `kafka_meta::reask` (#22): the cluster's configured policy paces it,
+    // and the coordinator deadline — not this file's former five flat 250ms
+    // attempts, which gave up in a second — budgets it, since a leader
+    // election finishes on the cluster's schedule.
+    use std::sync::atomic::{AtomicI32, Ordering};
+    let policy = cluster.retry();
+    // Atomic only to keep the retry future `Send`; attempts never overlap.
+    let current_leader = AtomicI32::new(leader);
+    kafka_meta::reask(&policy, None, |_attempt| {
+        let leader = current_leader.load(Ordering::Relaxed);
+        let current_leader = &current_leader;
+        async move {
+            match list_one_once(cluster, topic, partition, leader, timestamp).await {
+                Ok(value) => Ok(kafka_meta::Verdict::Settled(value)),
+                Err(error) if error.retriable() => {
+                    if error.needs_metadata_refresh() {
+                        cluster.refresh().await.ok();
+                    }
+                    if let Ok(fresh) = cluster.leader_for(topic, partition).await {
+                        current_leader.store(fresh, Ordering::Relaxed);
+                    }
+                    Ok(kafka_meta::Verdict::Reask(Err(error)))
                 }
-                if let Ok(current) = cluster.leader_for(topic, partition).await {
-                    leader = current;
-                }
-                tokio::time::sleep(RETRY_DELAY).await;
-                attempt += 1;
+                Err(error) => Err(error),
             }
-            other => return other,
         }
-    }
+    })
+    .await
 }
 
 async fn list_one_once(

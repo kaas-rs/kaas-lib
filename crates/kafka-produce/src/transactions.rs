@@ -19,7 +19,6 @@
 
 use std::collections::HashSet;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use kafka_conn::protocol::StrBytes;
 use kafka_conn::protocol::messages::add_partitions_to_txn_request::AddPartitionsToTxnTopic;
@@ -38,12 +37,6 @@ use crate::idempotence::ProducerIdentity;
 /// How long the coordinator may leave our transaction open before aborting it
 /// itself. Kafka's own client default.
 const TRANSACTION_TIMEOUT_MS: i32 = 60_000;
-
-/// How many times to re-ask when the coordinator is not ready.
-const COORDINATOR_ATTEMPTS: u32 = 12;
-
-/// How long to wait between those attempts.
-const COORDINATOR_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Whether an error code means "ask the coordinator again", rather than
 /// "this failed".
@@ -193,39 +186,50 @@ impl Transactions {
         R: kafka_conn::Rpc + Clone,
         F: Fn(&R::Response) -> i16,
     {
-        let mut attempt = 1;
-        loop {
-            let response = cluster
-                .send_to_coordinator(kind, key, request.clone())
-                .await?;
-
-            let Some(code) = ErrorCode::from_code(code_of(&response)) else {
-                return Ok(response);
-            };
-
-            if coordinator_not_ready(code) && attempt < COORDINATOR_ATTEMPTS {
-                // Drop the cached coordinator only when it is the *coordinator*
-                // that is wrong. `CONCURRENT_TRANSACTIONS` comes from the right
-                // broker, which is merely busy; re-resolving it would throw
-                // away a correct answer and ask the same node again anyway.
-                if code != ErrorCode::ConcurrentTransactions {
-                    cluster.invalidate_coordinator(kind, key);
+        // The loop is `kafka_meta::reask` (#22): pacing and budget come from
+        // the cluster's configured RetryPolicy — jittered exponential under
+        // the coordinator deadline — instead of this file's former flat
+        // 500ms x 12, which gave up ~6s into elections that routinely take
+        // longer.
+        let policy = cluster.retry();
+        let response = kafka_meta::reask(&policy, None, |attempt| {
+            let request = request.clone();
+            let code_of = &code_of;
+            async move {
+                let response = cluster.send_to_coordinator(kind, key, request).await?;
+                match ErrorCode::from_code(code_of(&response)) {
+                    Some(code) if coordinator_not_ready(code) => {
+                        // Drop the cached coordinator only when it is the
+                        // *coordinator* that is wrong. `CONCURRENT_TRANSACTIONS`
+                        // comes from the right broker, which is merely busy;
+                        // re-resolving it would throw away a correct answer
+                        // and ask the same node again anyway.
+                        if code != ErrorCode::ConcurrentTransactions {
+                            cluster.invalidate_coordinator(kind, key);
+                        }
+                        tracing::debug!(
+                            %code,
+                            attempt,
+                            ?kind,
+                            "the coordinator is not ready; re-asking"
+                        );
+                        Ok(kafka_meta::Verdict::Reask(Ok(response)))
+                    }
+                    _ => Ok(kafka_meta::Verdict::Settled(response)),
                 }
-                tracing::debug!(
-                    %code,
-                    attempt,
-                    ?kind,
-                    "the coordinator is not ready; re-asking"
-                );
-                tokio::time::sleep(COORDINATOR_BACKOFF).await;
-                attempt += 1;
-                continue;
             }
+        })
+        .await?;
 
+        // The loop only decides whether to ask again. Whatever code the
+        // response settled with — or still carries after the budget — is
+        // judged here, exactly as before.
+        if let Some(code) = ErrorCode::from_code(code_of(&response)) {
             let error = Error::from_code(code, None);
             self.note(&error);
             return Err(error);
         }
+        Ok(response)
     }
 
     /// Claim the transactional producer id, fencing any previous holder.
