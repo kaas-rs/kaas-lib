@@ -250,6 +250,68 @@ mod tests {
         assert_eq!(&out[..], &payload[..]);
     }
 
+    /// The most expansion-dense snappy block that the format can express:
+    /// one literal byte, then nothing but maximum-length overlapping copies —
+    /// each 3-byte op emitting 64 bytes. This is the adversary's best move,
+    /// not an average payload; a real encoder compressing zeros does worse.
+    fn max_expansion_block() -> Vec<u8> {
+        let mut block = vec![0x80, 0x80, 0x02]; // uvarint: 32768 uncompressed
+        block.extend_from_slice(&[0x00, 0x5a]); // 1-byte literal 'Z'
+        for _ in 0..511 {
+            // Copy, 2-byte offset: tag ((64-1)<<2)|0b10, offset 1 → emits 64.
+            block.extend_from_slice(&[0xfe, 0x01, 0x00]);
+        }
+        block.extend_from_slice(&[0xfa, 0x01, 0x00]); // len 63 closes at 32768
+        block
+    }
+
+    /// #34: `SNAPPY_MAX_RATIO` guards an allocation and was an unproven
+    /// constant. This drives the most pathological xerial-framed blob the
+    /// snappy format can express against it: the densest block decodes 3-byte
+    /// ops into 64 bytes each, ~21x, so 68 holds with a 3x margin *at the
+    /// format's own limit* — if a denser construction ever exists, the ratio
+    /// assertion here is the tripwire.
+    #[test]
+    fn the_framed_snappy_ratio_bound_survives_the_worst_expressible_blob() {
+        let block = max_expansion_block();
+        // The block must be real snappy, or the test proves nothing about
+        // what a decoder would actually expand.
+        let declared = snap::raw::decompress_len(&block).expect("valid preamble");
+        assert_eq!(declared, 32 * 1024);
+        let mut out = vec![0u8; declared];
+        let written = snap::raw::Decoder::new()
+            .decompress(&block, &mut out)
+            .expect("the pathological block is legal snappy");
+        assert_eq!(written, declared);
+
+        // 64 such blocks in the xerial framing kafka-protocol walks.
+        let mut blob = Vec::from(&XERIAL_MAGIC[..]);
+        for _ in 0..64 {
+            blob.extend_from_slice(&u32::try_from(block.len()).unwrap().to_be_bytes());
+            blob.extend_from_slice(&block);
+        }
+        let expanded = 64 * declared;
+        let ratio = expanded / blob.len();
+        assert!(
+            ratio < SNAPPY_MAX_RATIO,
+            "found a framed-snappy blob with ratio {ratio}, past the assumed {SNAPPY_MAX_RATIO}"
+        );
+
+        // Above the input gate: refused before a byte is decompressed.
+        let mut input = Bytes::from(blob.clone());
+        let error = bounded(&mut input, Compression::Snappy, 64 * 1024)
+            .expect_err("a 96 KiB blob cannot promise to fit 64 KiB");
+        assert!(format!("{error}").contains("could exceed"), "{error}");
+
+        // Below it: decompresses fully and lands under the output limit,
+        // which is the property the input-side bound exists to guarantee.
+        let limit = blob.len() * SNAPPY_MAX_RATIO;
+        let mut input = Bytes::from(blob);
+        let out = bounded(&mut input, Compression::Snappy, limit).expect("passes the gate");
+        assert_eq!(out.len(), expanded);
+        assert!(out.len() <= limit);
+    }
+
     #[test]
     fn a_batch_exactly_at_the_limit_is_accepted() {
         // Off-by-one matters: rejecting a batch that fits is a scan that stops

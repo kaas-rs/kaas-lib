@@ -68,10 +68,12 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
 
       - name: Tag must match the workspace version
         id: version
@@ -139,12 +141,14 @@ jobs:
             gcc libc6-dev pkg-config ca-certificates
           echo "cc → $(command -v cc || echo MISSING)"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # The ARC runners intermittently start a job with the toolchain
       # installed but cargo not on PATH; probing the known homes makes a
@@ -245,12 +249,14 @@ jobs:
             gcc libc6-dev pkg-config ca-certificates
           echo "cc → $(command -v cc || echo MISSING)"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Put cargo on PATH, and prove it
         run: |
@@ -310,12 +316,14 @@ jobs:
       HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
       WORKSPACE_VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Authenticate — Trusted Publishing
         id: auth
@@ -336,7 +344,7 @@ jobs:
         # allowed context there, and environment secrets are in scope because
         # the job declares `environment: crates-io`.
         if: ${{ env.HAS_TOKEN != 'true' && env.DRY_RUN != 'true' }}
-        uses: rust-lang/crates-io-auth-action@v1
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
 
       - name: Publish
         # `cargo publish --workspace` resolves the dependency order itself
