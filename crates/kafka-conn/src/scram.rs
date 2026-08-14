@@ -186,8 +186,11 @@ impl ScramClient {
         let nonce = nonce
             .ok_or_else(|| Error::Authentication("server-first-message had no nonce".to_owned()))?;
         // The server's nonce must extend ours. Without this check a
-        // man-in-the-middle can replay a recorded exchange.
-        if !nonce.starts_with(&self.client_nonce) {
+        // man-in-the-middle can replay a recorded exchange. RFC 5802 says
+        // *appends*, so equality — a server that added nothing of its own —
+        // is refused too; the client nonce being fresh makes that
+        // unexploitable today, but the tightening is free.
+        if !nonce.starts_with(&self.client_nonce) || nonce.len() <= self.client_nonce.len() {
             return Err(Error::Authentication(
                 "server nonce does not extend the client nonce".to_owned(),
             ));
@@ -360,10 +363,25 @@ pub fn random_nonce() -> String {
 }
 
 /// Apply the SASLprep profile, reporting failures as authentication errors.
+///
+/// The error detail is kept for the username and dropped for the password:
+/// stringprep's failure Display names the offending character, error strings
+/// reach log aggregators, and one character of a password is one character
+/// too many.
 fn saslprep(value: &str, what: &'static str) -> Result<String> {
     stringprep::saslprep(value)
         .map(|s| s.into_owned())
-        .map_err(|e| Error::Authentication(format!("{what} is not valid under SASLprep: {e}")))
+        .map_err(|e| {
+            if what == "password" {
+                Error::Authentication(
+                    "password is not valid under SASLprep (RFC 4013); it contains a \
+                     prohibited character"
+                        .to_owned(),
+                )
+            } else {
+                Error::Authentication(format!("{what} is not valid under SASLprep: {e}"))
+            }
+        })
 }
 
 /// RFC 5802 §5.1: `,` and `=` are the field separators, so they are escaped in
@@ -491,6 +509,45 @@ mod tests {
             .verify_server_final(b"v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
             .unwrap_err();
         assert!(matches!(err, Error::Authentication(_)), "{err:?}");
+    }
+
+    /// RFC 5802 says the server *appends* to the client nonce; a server-first
+    /// echoing our nonce unmodified added no freshness of its own and is
+    /// refused. Unexploitable while the client nonce is random per exchange —
+    /// the check is defense in depth, not a fix.
+    #[test]
+    fn a_server_nonce_equal_to_ours_is_rejected() {
+        let mut client = ScramClient::new(
+            ScramHash::Sha256,
+            "user",
+            "pencil",
+            "clientnonce".to_owned(),
+            &[],
+        )
+        .unwrap();
+        let err = client
+            .client_final(b"r=clientnonce,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096")
+            .unwrap_err();
+        assert!(matches!(err, Error::Authentication(_)), "{err:?}");
+    }
+
+    /// The stringprep error Display names the offending character, and error
+    /// strings travel to log aggregators. For a password that is a one-
+    /// character-at-a-time disclosure channel, so the cause is dropped there
+    /// — and kept for the username, where it is the only useful diagnostic.
+    #[test]
+    fn a_prohibited_password_character_is_not_named_in_the_error() {
+        let err = ScramClient::new(
+            ScramHash::Sha256,
+            "user",
+            "pw\u{0007}x",
+            "abc".to_owned(),
+            &[],
+        )
+        .unwrap_err();
+        let rendered = format!("{err}");
+        assert!(!rendered.contains('\u{0007}'), "{rendered:?}");
+        assert!(rendered.contains("password"), "{rendered}");
     }
 
     #[test]

@@ -225,15 +225,23 @@ impl SaslConfig {
 
     /// Reject a combination that would leak the credential.
     pub(crate) fn check_encryption(&self, encrypted: bool) -> Result<()> {
-        if self.mechanism.sends_reusable_credential()
-            && !encrypted
-            && !self.allow_plaintext_password
-        {
-            return Err(Error::Authentication(format!(
-                "{} over an unencrypted connection would send a reusable credential in the \
-                 clear; use TLS or opt in with SaslConfig::allow_plaintext_password",
-                self.mechanism
-            )));
+        if self.mechanism.sends_reusable_credential() && !encrypted {
+            if !self.allow_plaintext_password {
+                return Err(Error::Authentication(format!(
+                    "{} over an unencrypted connection would send a reusable credential in the \
+                     clear; use TLS or opt in with SaslConfig::allow_plaintext_password",
+                    self.mechanism
+                )));
+            }
+            // The override was configured once, possibly long ago and far from
+            // here; the moment it actually puts a credential on the wire in
+            // the clear deserves a line in the log. The OIDC http override
+            // already warns — this is the same courtesy.
+            tracing::warn!(
+                mechanism = %self.mechanism,
+                "sending a reusable credential over an unencrypted connection because \
+                 allow_plaintext_password is set"
+            );
         }
         Ok(())
     }
@@ -305,6 +313,19 @@ pub(crate) async fn authenticate<T: SaslTransport>(
     match config.mechanism {
         SaslMechanism::Plain => {
             // RFC 4616: authzid NUL authcid NUL passwd, with an empty authzid.
+            // NUL is the frame, so neither field may contain one: Java's
+            // PlainSaslServer splits on NUL with trailing-empty removal, so a
+            // relayed username of `user\0guess` plus an empty password parses
+            // as user=`user`, password=`guess` — protocol injection for any
+            // caller relaying untrusted usernames. SCRAM is protected by
+            // SASLprep (which prohibits NUL); PLAIN has to be protected here.
+            if config.username.contains('\0') || config.password.contains('\0') {
+                return Err(Error::InvalidRequest(
+                    "PLAIN credentials may not contain NUL: it is the RFC 4616 field \
+                     separator, and a NUL in a relayed value re-frames the message"
+                        .to_owned(),
+                ));
+            }
             let mut token = Vec::new();
             token.push(0);
             token.extend_from_slice(config.username.as_bytes());
@@ -532,6 +553,21 @@ mod tests {
         assert_eq!(lifetime, 0);
         assert_eq!(fake.tokens_sent.len(), 1);
         assert_eq!(fake.tokens_sent[0], b"\0alice\0s3cret");
+    }
+
+    /// NUL is RFC 4616's field separator. Java's PlainSaslServer splits on it
+    /// with trailing-empty removal, so `user\0guess` + empty password would
+    /// authenticate as user with password guess — protocol injection for any
+    /// caller relaying untrusted usernames. Refused before framing.
+    #[tokio::test]
+    async fn plain_credentials_containing_nul_are_refused_before_framing() {
+        for (user, pass) in [("user\0guess", ""), ("alice", "pa\0ss")] {
+            let mut fake = Fake::offering("PLAIN").then_ok(&[], 0);
+            let cfg = SaslConfig::new(SaslMechanism::Plain, user, pass);
+            let err = authenticate(&cfg, &mut fake).await.unwrap_err();
+            assert!(matches!(err, Error::InvalidRequest(_)), "{err:?}");
+            assert!(fake.tokens_sent.is_empty(), "nothing may reach the wire");
+        }
     }
 
     #[tokio::test]
