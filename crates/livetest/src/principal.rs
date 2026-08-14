@@ -99,11 +99,11 @@ pub async fn principal(target: &Target, names: &[String]) -> Result<Report> {
 
         let verdict = described.likely_mechanism(&listeners);
         report.set(format!("{key}.verdict"), one_line(&verdict.to_string()));
-        report.set(format!("{key}.verdict.basis"), format!("{:?}", verdict.basis));
         report.set(
-            format!("{key}.verdict.conclusive"),
-            verdict.is_conclusive(),
+            format!("{key}.verdict.basis"),
+            format!("{:?}", verdict.basis),
         );
+        report.set(format!("{key}.verdict.conclusive"), verdict.is_conclusive());
     }
 
     Ok(report)
@@ -114,7 +114,10 @@ pub async fn principal(target: &Target, names: &[String]) -> Result<Report> {
 fn listener_facts(listeners: &ClusterAuthentication, report: &mut Report) {
     report.set("auth.described_broker", listeners.node_id);
     report.set("auth.listener.count", listeners.listeners.len());
-    report.set("auth.client_listener.count", listeners.client_listeners().count());
+    report.set(
+        "auth.client_listener.count",
+        listeners.client_listeners().count(),
+    );
     report.set_opt(
         "auth.principal_mapping_rules",
         listeners.principal_mapping_rules.as_deref().map(one_line),
@@ -145,7 +148,10 @@ fn listener_facts(listeners: &ClusterAuthentication, report: &mut Report) {
                 .collect::<Vec<_>>()
                 .join(","),
         );
-        report.set(format!("{key}.client_auth"), format!("{:?}", listener.client_auth));
+        report.set(
+            format!("{key}.client_auth"),
+            format!("{:?}", listener.client_auth),
+        );
         report.set(format!("{key}.inter_broker"), listener.is_inter_broker);
         report.set(format!("{key}.controller"), listener.is_controller);
     }
