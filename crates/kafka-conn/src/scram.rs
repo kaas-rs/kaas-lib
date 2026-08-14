@@ -14,6 +14,12 @@
 //!   value an attacker is trying to forge.
 //!
 //! Kafka does not do channel binding, so the gs2 header is always `n,,`.
+//!
+//! The iteration count is the one field of server-first the *peer* prices:
+//! PBKDF2 cost is linear in it, so it is bounded on both sides
+//! ([`MIN_ITERATIONS`], [`MAX_ITERATIONS`]) before any key derivation runs —
+//! a hostile broker does not get to choose our work factor, downward (proof
+//! weakening) or upward (CPU denial of service).
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -44,6 +50,28 @@ impl ScramHash {
 
 /// The gs2 header Kafka expects: no channel binding, no authzid.
 const GS2_HEADER: &str = "n,,";
+
+/// The lowest iteration count the client will accept from a broker.
+///
+/// 4096 is RFC 7677's floor and the minimum Kafka itself enforces when a
+/// credential is stored (`kafka-admin` refuses to write below it, mirroring the
+/// broker). A server-first message asking for less is therefore never a
+/// legitimate Kafka broker — it is a misconfiguration or an active downgrade:
+/// over a plaintext SCRAM connection, a man-in-the-middle rewriting `i=` to a
+/// tiny value makes an offline dictionary attack against the observed client
+/// proof essentially free.
+const MIN_ITERATIONS: u32 = 4096;
+
+/// The highest iteration count the client will accept from a broker.
+///
+/// PBKDF2 cost is linear in this value and the *server* chooses it, so without
+/// a ceiling a malicious broker replies `i=4294967295` and buys hours of
+/// blocked CPU per handshake — a remote denial of service, re-triggerable over
+/// KIP-368 re-authentication on a single live connection. Kafka's own maximum
+/// for stored credentials is 16384; two orders of magnitude above that is
+/// headroom for any deliberate hardening while keeping the worst case at a few
+/// seconds of compute.
+const MAX_ITERATIONS: u32 = 1_000_000;
 
 /// A SCRAM conversation in progress.
 pub struct ScramClient {
@@ -173,10 +201,19 @@ impl ScramClient {
             })?
             .parse()
             .map_err(|e| Error::Authentication(format!("bad SCRAM iteration count: {e}")))?;
-        if iterations == 0 {
-            return Err(Error::Authentication(
-                "SCRAM iteration count of zero".to_owned(),
-            ));
+        if iterations < MIN_ITERATIONS {
+            return Err(Error::Authentication(format!(
+                "SCRAM iteration count {iterations} is below the RFC 7677 minimum of \
+                 {MIN_ITERATIONS}; refusing what is either a broken broker or a \
+                 downgrade attack"
+            )));
+        }
+        if iterations > MAX_ITERATIONS {
+            return Err(Error::Authentication(format!(
+                "SCRAM iteration count {iterations} exceeds the supported maximum of \
+                 {MAX_ITERATIONS}; refusing to burn unbounded CPU on a broker-chosen \
+                 work factor"
+            )));
         }
 
         let client_final_without_proof = format!("c={},r={}", B64.encode(GS2_HEADER), nonce);
@@ -467,6 +504,38 @@ mod tests {
             .client_final(b"r=somethingelse,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096")
             .unwrap_err();
         assert!(matches!(err, Error::Authentication(_)), "{err:?}");
+    }
+
+    /// The broker chooses the iteration count, and PBKDF2 cost is linear in
+    /// it — so a broker-supplied `i=4294967295` is hours of CPU, not a
+    /// preference. The check must fire before any key derivation runs, which
+    /// is what asserting on the *error* (rather than a slow success) proves:
+    /// were the ceiling missing, this test would hang rather than fail.
+    #[test]
+    fn an_absurd_iteration_count_is_rejected_before_any_derivation() {
+        let mut client =
+            ScramClient::new(ScramHash::Sha256, "user", "pencil", "abc".to_owned(), &[]).unwrap();
+        let err = client
+            .client_final(b"r=abcdef,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4294967295")
+            .unwrap_err();
+        assert!(matches!(err, Error::Authentication(_)), "{err:?}");
+        assert!(format!("{err}").contains("4294967295"), "{err}");
+    }
+
+    /// Below RFC 7677's 4096 floor is a downgrade attack over plaintext SCRAM
+    /// (a MITM rewriting `i=` makes the observed proof cheap to dictionary),
+    /// so it is refused, not warned about. Zero keeps its own coverage: it was
+    /// the only bound the code originally had.
+    #[test]
+    fn a_downgraded_iteration_count_is_rejected() {
+        for i in ["0", "1", "1024", "4095"] {
+            let mut client =
+                ScramClient::new(ScramHash::Sha256, "user", "pencil", "abc".to_owned(), &[])
+                    .unwrap();
+            let server_first = format!("r=abcdef,s=W22ZaJ0SNY7soEsUEjb6gQ==,i={i}");
+            let err = client.client_final(server_first.as_bytes()).unwrap_err();
+            assert!(matches!(err, Error::Authentication(_)), "i={i}: {err:?}");
+        }
     }
 
     #[test]

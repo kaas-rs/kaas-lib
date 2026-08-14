@@ -319,7 +319,7 @@ pub(crate) async fn authenticate<T: SaslTransport>(
             } else {
                 ScramHash::Sha512
             };
-            let mut client = ScramClient::new(
+            let client = ScramClient::new(
                 hash,
                 &config.username,
                 &config.password,
@@ -328,7 +328,26 @@ pub(crate) async fn authenticate<T: SaslTransport>(
             )?;
 
             let server_first = transport.authenticate(client.client_first()).await?;
-            let client_final = client.client_final(&server_first.auth_bytes)?;
+            // PBKDF2 runs `i` HMAC rounds synchronously — with the iteration
+            // ceiling that is still whole seconds of compute at the extreme,
+            // which must not pin an executor thread (on a current-thread
+            // runtime it would stall every other connection). On the blocking
+            // pool the handshake future stays cancel-safe: dropping it
+            // abandons the join handle rather than the computation blocking
+            // the drop.
+            let (client, client_final) = {
+                let mut client = client;
+                let server_first_bytes = server_first.auth_bytes;
+                tokio::task::spawn_blocking(move || {
+                    let client_final = client.client_final(&server_first_bytes);
+                    (client, client_final)
+                })
+                .await
+                .map_err(|e| {
+                    Error::Authentication(format!("SCRAM proof computation was aborted: {e}"))
+                })?
+            };
+            let client_final = client_final?;
             let server_final = transport.authenticate(client_final).await?;
             client.verify_server_final(&server_final.auth_bytes)?;
             Ok(server_final.session_lifetime_ms)
