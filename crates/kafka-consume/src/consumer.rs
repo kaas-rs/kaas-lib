@@ -71,6 +71,12 @@ pub enum GroupProtocol {
     /// including against 3.7–3.9 brokers, which advertise only the preview's
     /// v0 and ship the protocol disabled. Mirrors the Java client, for which
     /// `group.protocol=consumer` also requires 4.0+ brokers.
+    ///
+    /// The probe is not the whole answer: a broker can advertise the GA
+    /// heartbeat and refuse the protocol anyway. `Auto` therefore also
+    /// downgrades off the *first refused heartbeat*, inside
+    /// [`NegotiatedConsumer::poll`] — see there for what carries across and
+    /// why it only ever happens before the member has joined.
     #[default]
     Auto,
     /// KIP-848, and an error on a broker that does not serve it.
@@ -306,6 +312,12 @@ impl Consumer {
     /// The underlying cluster handle.
     pub fn cluster(&self) -> &Cluster {
         &self.cluster
+    }
+
+    /// The configuration this consumer was built with, for the protocol
+    /// handoff in [`NegotiatedConsumer::poll`].
+    pub(crate) fn config(&self) -> &ConsumerConfig {
+        &self.config
     }
 
     /// Assign an explicit set of partitions, replacing any previous
@@ -832,6 +844,13 @@ async fn require_ga_heartbeat(cluster: &Cluster) -> Result<()> {
 pub struct GroupConsumer {
     inner: Consumer,
     membership: crate::group::Membership,
+    /// Whether the coordinator has ever admitted this member.
+    ///
+    /// A one-way latch, not a live reading of the membership: losing
+    /// membership resets the epoch, and a refusal *after* this member has
+    /// once been in the group is a broker that changed underneath us, which
+    /// [`NegotiatedConsumer`] must report rather than quietly downgrade (#28).
+    ever_joined: bool,
     /// Whether to commit owned positions before giving a partition up.
     auto_commit: bool,
     /// The caller's rebalance hook, if it registered one.
@@ -850,6 +869,7 @@ impl std::fmt::Debug for GroupConsumer {
         f.debug_struct("GroupConsumer")
             .field("inner", &self.inner)
             .field("membership", &self.membership)
+            .field("ever_joined", &self.ever_joined)
             .field("auto_commit", &self.auto_commit)
             .field("listener", &self.listener.is_some())
             .field("pending", &self.pending)
@@ -895,6 +915,7 @@ impl GroupConsumer {
                 None,
                 rebalance_timeout_ms,
             ),
+            ever_joined: false,
             auto_commit: true,
             listener: None,
             pending: None,
@@ -972,6 +993,10 @@ impl GroupConsumer {
     /// is that `on_revoke` may run twice for the same partitions; see
     /// [`crate::rebalance`].
     pub async fn poll(&mut self) -> Result<Vec<Record>> {
+        // Latch before anything can fail: once the coordinator has admitted
+        // this member, a later refusal is never a negotiation mistake (#28).
+        self.ever_joined |= self.membership.has_joined();
+
         // Anything a cancelled poll left half-done, before beating again: the
         // broker is waiting on our acknowledgement and must not get one for an
         // assignment the caller has not been told about.
@@ -1577,6 +1602,61 @@ pub enum NegotiatedConsumer {
     Classic(ClassicConsumer),
 }
 
+/// Everything needed to re-subscribe this member on the classic protocol.
+///
+/// Taken from a [`GroupConsumer`] that was refused, so the handoff carries
+/// the caller's own settings across rather than resetting them to defaults:
+/// a downgrade that silently dropped the rebalance listener or the
+/// auto-commit choice would be worse than the error it replaced.
+struct Handoff {
+    cluster: Cluster,
+    config: ConsumerConfig,
+    group_id: String,
+    subscription: Vec<String>,
+    instance_id: Option<String>,
+    auto_commit: bool,
+    listener: Listener,
+}
+
+impl GroupConsumer {
+    /// Whether this member may still be handed to the classic protocol.
+    ///
+    /// Only before the coordinator has ever admitted it: nothing is owned,
+    /// no rebalance callback has fired, and no other member is waiting on an
+    /// assignment this one holds.
+    fn downgradable(&self) -> bool {
+        !self.ever_joined && !self.membership.has_joined()
+    }
+
+    /// Take the pieces a classic re-subscribe needs, listener included.
+    fn handoff(&mut self) -> Handoff {
+        Handoff {
+            cluster: self.inner.cluster().clone(),
+            config: self.inner.config().clone(),
+            group_id: self.membership.group_id().to_owned(),
+            subscription: self.membership.subscription().to_vec(),
+            instance_id: self.membership.instance_id().map(str::to_owned),
+            auto_commit: self.auto_commit,
+            listener: self.listener.take(),
+        }
+    }
+}
+
+/// Whether a heartbeat failure means "this broker will not speak KIP-848".
+///
+/// Two shapes reach here, and both mean the same thing (#28). A broker that
+/// does not advertise `ConsumerGroupHeartbeat` at a usable version fails
+/// negotiation — [`Error::UnsupportedApi`], which `subscribe` already
+/// catches. A broker that advertises it and *refuses the protocol* —
+/// Kafka 4.x with `group.coordinator.rebalance.protocols=classic`, where
+/// advertisement follows the coordinator rather than the config — answers
+/// the heartbeat with `UNSUPPORTED_VERSION`, which no version-based probe
+/// can see in advance. That is the case this predicate exists for.
+fn refuses_consumer_protocol(error: &Error) -> bool {
+    matches!(error, Error::UnsupportedApi { .. })
+        || error.code() == Some(kafka_conn::ErrorCode::UnsupportedVersion)
+}
+
 impl NegotiatedConsumer {
     /// Join `group_id` and subscribe to `topics`, speaking whichever protocol
     /// [`ConsumerConfig::group_protocol`] names — and under
@@ -1663,11 +1743,59 @@ impl NegotiatedConsumer {
     }
 
     /// Heartbeat, rebalance when told to, fetch, decode.
+    ///
+    /// Under [`GroupProtocol::Auto`] this is also where the *runtime*
+    /// downgrade happens (#28). `subscribe` negotiates from `ApiVersions`,
+    /// which cannot see a broker that advertises `ConsumerGroupHeartbeat` and
+    /// then refuses the protocol — a 4.x broker configured
+    /// `group.coordinator.rebalance.protocols=classic` advertises the GA
+    /// range because advertisement follows the coordinator, not the config.
+    /// The refusal only arrives at the first heartbeat, so that is where it
+    /// is caught: this member re-subscribes on the classic protocol, keeping
+    /// its subscription, instance id, auto-commit choice and rebalance
+    /// listener, and returns no records for this call — the next poll reads
+    /// from the classic path as if it had been chosen at subscribe.
+    ///
+    /// Strictly **before** the coordinator has ever admitted this member.
+    /// A refusal after that is a broker that changed underneath a live group,
+    /// where silently re-joining under another protocol would abandon an
+    /// assignment other members are waiting on; that stays an error.
     pub async fn poll(&mut self) -> Result<Vec<Record>> {
-        match self {
-            Self::Group(consumer) => consumer.poll().await,
-            Self::Classic(consumer) => consumer.poll().await,
+        let handoff = match self {
+            Self::Classic(consumer) => return consumer.poll().await,
+            Self::Group(consumer) => match consumer.poll().await {
+                Ok(records) => return Ok(records),
+                Err(error) => {
+                    if consumer.downgradable() && refuses_consumer_protocol(&error) {
+                        tracing::info!(
+                            %error,
+                            "the broker advertises KIP-848 and refuses it; \
+                             re-subscribing on the classic protocol"
+                        );
+                        consumer.handoff()
+                    } else {
+                        return Err(error);
+                    }
+                }
+            },
+        };
+
+        // The borrow of `self` ends above, which is what lets the wrapper
+        // replace its own inner consumer here.
+        let mut classic = ClassicConsumer::subscribe(
+            handoff.cluster,
+            handoff.config,
+            handoff.group_id,
+            handoff.subscription,
+        )
+        .await?;
+        if let Some(instance_id) = handoff.instance_id {
+            classic = classic.instance_id(instance_id);
         }
+        classic = classic.auto_commit(handoff.auto_commit);
+        classic.listener = handoff.listener;
+        *self = Self::Classic(classic);
+        Ok(Vec::new())
     }
 
     /// Commit the current positions as this member.

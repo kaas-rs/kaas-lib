@@ -170,6 +170,25 @@ impl Membership {
     /// This is what an `OffsetCommit` must carry: the coordinator refuses a
     /// commit whose epoch is not the member's current one, and refuses the
     /// anonymous `-1` outright while the group has members.
+    /// Whether the coordinator has ever admitted this member.
+    ///
+    /// The same test `leave` uses to decide there is nothing to leave: a
+    /// member still at the join epoch has never had a heartbeat answered, so
+    /// it owns nothing and nobody is waiting on it (#28).
+    pub(crate) fn has_joined(&self) -> bool {
+        self.member_epoch > EPOCH_JOIN
+    }
+
+    /// The group this member joined.
+    pub(crate) fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    /// The topics this member subscribed to.
+    pub(crate) fn subscription(&self) -> &[String] {
+        &self.subscription
+    }
+
     pub(crate) fn member_epoch(&self) -> i32 {
         self.member_epoch
     }

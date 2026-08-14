@@ -15,8 +15,14 @@
 //! `group.coordinator.rebalance.protocols=classic` refuses it at runtime.
 //! Advertisement alone therefore cannot mean "usable"; what negotiation keys
 //! on is the **GA version floor** (heartbeat v1+, Kafka 4.0) — the same line
-//! the Java client draws. The 4.x advertise-but-refuse misconfiguration
-//! remains invisible to any version-based probe and is tracked as #28.
+//! the Java client draws.
+//!
+//! The 4.x advertise-but-refuse case (#28) is the one no version-based probe
+//! can see, and it has its own fixture below: a stock 4.x broker with
+//! `group.coordinator.rebalance.protocols=classic` advertises the GA range —
+//! advertisement follows the coordinator, not the config — and then refuses
+//! the heartbeat at runtime. `Auto` therefore has to downgrade off the
+//! refusal itself, inside the first `poll`.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -66,6 +72,13 @@ async fn seeded(config: BrokerConfig) -> (KafkaCluster, Admin) {
 /// with the protocol itself shipped disabled.
 fn classic_only() -> BrokerConfig {
     BrokerConfig::new().with_image("apache/kafka", "3.7.2")
+}
+
+/// The #28 fixture: a modern broker that advertises `ConsumerGroupHeartbeat`
+/// at the GA range and refuses the protocol anyway. `with_property` wins over
+/// the fixture's own defaults, which is what makes this one line.
+fn advertises_but_refuses() -> BrokerConfig {
+    BrokerConfig::new().with_property("group.coordinator.rebalance.protocols", "classic")
 }
 
 fn config() -> ConsumerConfig {
@@ -147,6 +160,47 @@ async fn auto_picks_kip848_when_the_broker_serves_it() {
     assert_eq!(consumer.protocol(), GroupProtocol::Consumer);
     let got = drain_some(&mut consumer).await;
     assert!(got > 0, "the negotiated KIP-848 consumer must consume");
+    consumer.leave().await.expect("leave");
+}
+
+/// #28: the case `ApiVersions` cannot see. This broker advertises the GA
+/// heartbeat range, so `subscribe` legitimately picks KIP-848 — and the
+/// coordinator then refuses the first heartbeat. `Auto` must land on the
+/// classic protocol and consume, rather than surfacing the refusal.
+#[testkit::integration_test]
+async fn auto_downgrades_off_a_refused_first_heartbeat() {
+    let (fixture, admin) = seeded(advertises_but_refuses()).await;
+    let facts = key_68_facts(&fixture).await;
+
+    let mut consumer = NegotiatedConsumer::subscribe(
+        admin.cluster().clone(),
+        config(),
+        "negotiate-refused",
+        [TOPIC],
+    )
+    .await
+    .expect("subscribe");
+
+    assert_eq!(
+        consumer.protocol(),
+        GroupProtocol::Consumer,
+        "the premise of this test is that the version probe cannot see the \
+         refusal — if negotiation already chose classic, the fixture stopped \
+         reproducing #28: {facts}"
+    );
+
+    // The refusal arrives at the first heartbeat; the downgrade happens there
+    // and this poll returns nothing, so `drain_some` keeps polling into the
+    // classic path — which is exactly the caller experience being asserted.
+    let got = drain_some(&mut consumer).await;
+
+    assert_eq!(
+        consumer.protocol(),
+        GroupProtocol::Classic,
+        "a refused first heartbeat must hand this member to the classic \
+         protocol: {facts}"
+    );
+    assert!(got > 0, "the downgraded consumer must actually consume");
     consumer.leave().await.expect("leave");
 }
 

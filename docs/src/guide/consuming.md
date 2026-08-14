@@ -26,9 +26,20 @@ protocol disabled; the Java client draws the same 4.0+ line. Pin the choice
 with `ConsumerConfig::with_group_protocol(GroupProtocol::Consumer | Classic)`.
 A `GroupConsumer` pinned against a broker below the GA floor now fails at
 `subscribe` with `UnsupportedApi`, rather than raising the same error from
-every `poll` where a retry loop reads it as transient and spins. One shape no
-version probe can see: a 4.x broker configured to refuse the consumer
-protocol still advertises it — pin `Classic` there.
+every `poll` where a retry loop reads it as transient and spins.
+
+One shape no version probe can see: a 4.x broker configured
+`group.coordinator.rebalance.protocols=classic` still *advertises* the GA
+heartbeat, because advertisement follows the coordinator rather than the
+config, and refuses the protocol only when the first heartbeat arrives. So
+`Auto` downgrades off the refusal itself: that first `poll` re-subscribes the
+member on the classic protocol — carrying its subscription, instance id,
+auto-commit choice and rebalance listener across — returns no records, and
+every poll after it reads from the classic path. This happens strictly
+*before* the coordinator has ever admitted the member. A refusal after that
+is a broker that changed underneath a live group, where re-joining under
+another protocol would abandon an assignment other members are waiting on, so
+it stays an error.
 
 `GroupConsumer` and `ClassicConsumer` both wrap a `Consumer` rather than
 replacing it: the fetch path, the sessions and the decoding are identical,
