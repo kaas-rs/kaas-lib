@@ -97,6 +97,18 @@ fn cert_error(error: rcgen::Error) -> Error {
     }
 }
 
+/// A coherent client certificate and key that **no** fixture broker trusts.
+///
+/// For the negative case that a wrong-CA certificate is refused. It has to be
+/// a self-consistent pair from an unrelated CA: pairing a foreign certificate
+/// with the real client's key is rejected locally by rustls as a key
+/// mismatch, which proves nothing about what the broker would have done with
+/// it.
+pub fn untrusted_client_certificate() -> Result<(String, String)> {
+    let pki = client_pki("bob-mtls")?;
+    Ok((pki.cert_pem, pki.key_pem))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -49,6 +49,7 @@ mod image;
 mod kafka;
 mod token;
 
+pub use certs::untrusted_client_certificate;
 pub use config::{
     BrokerConfig, ClientAuth, DEFAULT_IMAGE, DEFAULT_TAG, INTERNAL_BOOTSTRAP, SaslMechanism,
     SaslUser, Security,

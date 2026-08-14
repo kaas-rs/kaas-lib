@@ -100,10 +100,16 @@ async fn a_missing_client_certificate_is_an_authentication_failure_not_a_transpo
     );
 }
 
-/// The mix-up the two-CA topology exists to catch: presenting a certificate
-/// the broker's clients CA did not issue must fail as authentication, not
-/// succeed. Here the "client certificate" is the broker's own cluster CA
-/// certificate — the anchor an operator reaches for first, and the wrong one.
+/// The mix-up the two-CA topology exists to catch: a certificate the broker's
+/// clients CA did not issue must be refused, not accepted.
+///
+/// The certificate has to be a *coherent* pair from an unrelated CA. The
+/// first version of this test presented the cluster CA's certificate with the
+/// client's key — the anchor an operator reaches for first — and rustls
+/// rejected it locally as `KeyMismatch` before a byte reached the broker.
+/// Correct behaviour, and a good error, but it proved nothing about what the
+/// broker does with a well-formed certificate from the wrong issuer, which is
+/// the actual mistake in the field.
 #[testkit::integration_test]
 async fn a_certificate_from_the_wrong_ca_is_refused() {
     let broker = testkit::single_broker_with(requires_client_certificates())
@@ -111,14 +117,13 @@ async fn a_certificate_from_the_wrong_ca_is_refused() {
         .unwrap();
 
     let ca = broker.ca_pem(0).await.expect("fixture CA");
-    let (_chain, key) = broker.client_certificate().expect("client certificate");
+    let (chain, key) =
+        testkit::untrusted_client_certificate().expect("generate an unrelated client identity");
 
-    // The cluster CA's certificate with the client's key: a well-formed PEM
-    // pair that no clients-CA-verifying broker can accept.
     let config = ConnectionConfig::new().with_tls(
-        TlsConfig::with_ca_pem(ca.clone())
+        TlsConfig::with_ca_pem(ca)
             .with_server_name("localhost")
-            .with_client_certificate(ca, key),
+            .with_client_certificate(chain, key),
     );
 
     let outcome = match Connection::connect(&broker.bootstrap()[0], config).await {
@@ -127,8 +132,8 @@ async fn a_certificate_from_the_wrong_ca_is_refused() {
     };
     let error = outcome.expect_err("a certificate from the wrong CA must not authenticate");
     assert!(
-        matches!(error, Error::Authentication(_) | Error::InvalidRequest(_)),
-        "expected an authentication-shaped refusal (or a local rejection of the \
-         mismatched pair), got: {error:?}"
+        matches!(error, Error::Authentication(_)),
+        "a certificate the broker's clients CA did not issue is a credentials \
+         problem and must say so, got: {error:?}"
     );
 }
