@@ -198,14 +198,18 @@ impl Membership {
     pub(crate) async fn beat(
         &mut self,
         cluster: &Cluster,
+        policy: kafka_meta::RetryPolicy,
         topic_ids: &HashMap<String, TopicId>,
     ) -> Result<Reconciliation> {
         let request = self.build(topic_ids)?;
-        let response =
-            crate::coordinator::send_retrying(cluster, &self.group_id, request, |response| {
-                ErrorCode::from_code(response.error_code)
-            })
-            .await?;
+        let response = crate::coordinator::send_retrying(
+            cluster,
+            policy,
+            &self.group_id,
+            request,
+            |response| ErrorCode::from_code(response.error_code),
+        )
+        .await?;
         self.last_beat = Some(Instant::now());
 
         if let Some(code) = ErrorCode::from_code(response.error_code) {
@@ -272,7 +276,11 @@ impl Membership {
     /// Leave the group.
     ///
     /// A static member parks its assignment; a dynamic one releases it.
-    pub(crate) async fn leave(&mut self, cluster: &Cluster) -> Result<()> {
+    pub(crate) async fn leave(
+        &mut self,
+        cluster: &Cluster,
+        policy: kafka_meta::RetryPolicy,
+    ) -> Result<()> {
         if self.member_epoch <= EPOCH_JOIN {
             // Never joined, so there is nothing to leave.
             return Ok(());
@@ -289,11 +297,14 @@ impl Membership {
             .with_member_epoch(epoch)
             .with_instance_id(self.instance_id.clone().map(StrBytes::from_string));
 
-        let response =
-            crate::coordinator::send_retrying(cluster, &self.group_id, request, |response| {
-                ErrorCode::from_code(response.error_code)
-            })
-            .await?;
+        let response = crate::coordinator::send_retrying(
+            cluster,
+            policy,
+            &self.group_id,
+            request,
+            |response| ErrorCode::from_code(response.error_code),
+        )
+        .await?;
 
         self.reset();
 

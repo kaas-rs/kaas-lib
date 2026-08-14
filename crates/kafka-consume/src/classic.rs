@@ -1189,11 +1189,12 @@ impl ClassicMembership {
     pub(crate) async fn join(
         &mut self,
         cluster: &Cluster,
+        policy: kafka_meta::RetryPolicy,
         partitions_per_topic: &BTreeMap<String, i32>,
         owned: &[(String, i32)],
     ) -> Result<Vec<(String, i32)>> {
-        let members = self.join_group(cluster, owned).await?;
-        self.sync_group(cluster, members, partitions_per_topic)
+        let members = self.join_group(cluster, policy, owned).await?;
+        self.sync_group(cluster, policy, members, partitions_per_topic)
             .await
     }
 
@@ -1244,6 +1245,7 @@ impl ClassicMembership {
     async fn join_group(
         &mut self,
         cluster: &Cluster,
+        policy: kafka_meta::RetryPolicy,
         owned: &[(String, i32)],
     ) -> Result<Vec<MemberSubscription>> {
         let request = self.join_request(owned)?;
@@ -1253,6 +1255,7 @@ impl ClassicMembership {
         // being re-asked.
         let response = crate::coordinator::send_retrying_until(
             cluster,
+            policy,
             &self.group_id,
             request,
             Some(self.rendezvous_deadline()),
@@ -1304,6 +1307,7 @@ impl ClassicMembership {
     async fn sync_group(
         &mut self,
         cluster: &Cluster,
+        policy: kafka_meta::RetryPolicy,
         members: Vec<MemberSubscription>,
         partitions_per_topic: &BTreeMap<String, i32>,
     ) -> Result<Vec<(String, i32)>> {
@@ -1336,6 +1340,7 @@ impl ClassicMembership {
         // anything this member does.
         let response = crate::coordinator::send_retrying_until(
             cluster,
+            policy,
             &self.group_id,
             request,
             Some(self.rendezvous_deadline()),
@@ -1362,7 +1367,11 @@ impl ClassicMembership {
     }
 
     /// One heartbeat. `REBALANCE_IN_PROGRESS` is normal, not an error.
-    pub(crate) async fn heartbeat(&self, cluster: &Cluster) -> Result<bool> {
+    pub(crate) async fn heartbeat(
+        &self,
+        cluster: &Cluster,
+        policy: kafka_meta::RetryPolicy,
+    ) -> Result<bool> {
         if self.generation_id == NO_GENERATION {
             return Ok(true);
         }
@@ -1372,11 +1381,14 @@ impl ClassicMembership {
             .with_member_id(StrBytes::from_string(self.member_id.clone()))
             .with_group_instance_id(self.instance_id.clone().map(StrBytes::from_string));
 
-        let response =
-            crate::coordinator::send_retrying(cluster, &self.group_id, request, |response| {
-                ErrorCode::from_code(response.error_code)
-            })
-            .await?;
+        let response = crate::coordinator::send_retrying(
+            cluster,
+            policy,
+            &self.group_id,
+            request,
+            |response| ErrorCode::from_code(response.error_code),
+        )
+        .await?;
 
         match ErrorCode::from_code(response.error_code) {
             // All three mean "re-join", which is an ordinary part of the

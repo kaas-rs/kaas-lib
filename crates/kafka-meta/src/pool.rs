@@ -296,6 +296,18 @@ impl BrokerPool {
 
         // Backoff is per endpoint, so a broker that is down does not get
         // hammered by every caller that happens to want it.
+        //
+        // Reconnect pacing deliberately shares `ClusterConfig.retry` with
+        // request retries rather than growing its own `reconnect.backoff.*`
+        // pair the way librdkafka separates them (#24). librdkafka's split
+        // exists because its flat request-retry backoff would make a poor
+        // dial pacer; ours is already a capped jittered exponential — the
+        // shape a dial storm needs — and per-endpoint `consecutive_failures`
+        // (not per-request attempts) drives it, so the two uses do not feed
+        // each other's counters. One policy, two counters, is fewer knobs
+        // agreeing with each other by construction. If a caller ever needs
+        // them split, that is one added `ClusterConfig` field, not a design
+        // change.
         if let Some(next) = state.next_attempt
             && Instant::now() < next
         {

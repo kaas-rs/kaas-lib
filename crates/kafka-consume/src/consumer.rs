@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 
 use kafka_conn::{Error, Result};
-use kafka_meta::{Cluster, ConsumerGroupMetadata, TopicId};
+use kafka_meta::{Cluster, ConsumerGroupMetadata, RetryPolicy, TopicId};
 use kafka_read::{DecodeOptions, Record, RecordOutcome, Visibility};
 
 use crate::classic::Assignor;
@@ -143,6 +143,15 @@ pub struct ConsumerConfig {
     /// [`GroupConsumer`] and [`ClassicConsumer`], whose types *are* the
     /// choice.
     pub group_protocol: GroupProtocol,
+    /// Retry pacing for the consumer's own re-ask loops — the coordinator
+    /// re-asks behind subscribe, commit and committed-offset fetches.
+    ///
+    /// `None` — the default — inherits the policy the [`kafka_meta::Cluster`]
+    /// was connected with, which is what most callers want: one retry posture
+    /// per cluster. Set it when the consumer's tolerance differs from the
+    /// connection's — a UI that wants commits to give up fast on a cluster
+    /// whose admin calls should keep trying, say.
+    pub retry: Option<RetryPolicy>,
 }
 
 impl ConsumerConfig {
@@ -158,7 +167,16 @@ impl ConsumerConfig {
             rebalance_timeout_ms: DEFAULT_REBALANCE_TIMEOUT_MS,
             session_timeout_ms: DEFAULT_SESSION_TIMEOUT_MS,
             group_protocol: GroupProtocol::Auto,
+            retry: None,
         }
+    }
+
+    /// Retry pacing for the consumer's re-ask loops, overriding the
+    /// cluster's. See [`ConsumerConfig::retry`].
+    #[must_use]
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = Some(retry);
+        self
     }
 
     /// Store offsets under this group id.
@@ -255,6 +273,12 @@ pub struct Consumer {
 }
 
 impl Consumer {
+    /// The retry policy this consumer's re-ask loops run under:
+    /// [`ConsumerConfig::retry`] when set, the cluster's otherwise (#24).
+    pub(crate) fn retry_policy(&self) -> RetryPolicy {
+        self.config.retry.unwrap_or_else(|| self.cluster.retry())
+    }
+
     /// Wrap an existing cluster handle.
     pub fn new(cluster: Cluster, config: ConsumerConfig) -> Self {
         Self {
@@ -395,7 +419,9 @@ impl Consumer {
     ) -> Result<HashMap<(String, i32), i64>> {
         let mut out = HashMap::new();
         if let Ok(group) = self.group() {
-            for (key, committed) in offsets::fetch(&self.cluster, group, partitions).await? {
+            for (key, committed) in
+                offsets::fetch(&self.cluster, self.retry_policy(), group, partitions).await?
+            {
                 out.insert(key, committed.offset);
             }
         }
@@ -694,14 +720,14 @@ impl Consumer {
                 )
             })
             .collect();
-        offsets::commit(&self.cluster, group, member, &offsets).await
+        offsets::commit(&self.cluster, self.retry_policy(), group, member, &offsets).await
     }
 
     /// Read the group's committed positions for the current assignment.
     pub async fn committed(&self) -> Result<HashMap<(String, i32), CommittedOffset>> {
         let group = self.group()?;
         let keys: Vec<(String, i32)> = self.assignment.keys().cloned().collect();
-        offsets::fetch(&self.cluster, group, &keys).await
+        offsets::fetch(&self.cluster, self.retry_policy(), group, &keys).await
     }
 
     /// Seek every assigned partition to its committed position, where one
@@ -955,7 +981,7 @@ impl GroupConsumer {
             let topic_ids = self.inner.topic_ids().clone();
             let outcome = self
                 .membership
-                .beat(self.inner.cluster(), &topic_ids)
+                .beat(self.inner.cluster(), self.inner.retry_policy(), &topic_ids)
                 .await?;
 
             if outcome.changed {
@@ -1064,7 +1090,9 @@ impl GroupConsumer {
         if self.auto_commit {
             let _ = self.inner.commit_as(Some(self.commit_identity())).await;
         }
-        self.membership.leave(self.inner.cluster()).await
+        self.membership
+            .leave(self.inner.cluster(), self.inner.retry_policy())
+            .await
     }
 
     /// What this member commits as: the id and epoch from the live
@@ -1321,7 +1349,12 @@ impl ClassicConsumer {
             let held = self.inner.assignment();
             match self
                 .membership
-                .join(self.inner.cluster(), &sizes, &held)
+                .join(
+                    self.inner.cluster(),
+                    self.inner.retry_policy(),
+                    &sizes,
+                    &held,
+                )
                 .await
             {
                 Ok(assigned) => {
@@ -1435,7 +1468,11 @@ impl ClassicConsumer {
     /// actually moved — revoking here would throw away the stickiness that is
     /// the entire point.
     async fn heartbeat_says_rejoin(&mut self) -> Result<bool> {
-        if !self.membership.heartbeat(self.inner.cluster()).await? {
+        if !self
+            .membership
+            .heartbeat(self.inner.cluster(), self.inner.retry_policy())
+            .await?
+        {
             return Ok(false);
         }
         self.rejoin = true;

@@ -39,7 +39,7 @@ use kafka_conn::protocol::messages::offset_fetch_request::{
 };
 use kafka_conn::protocol::messages::{GroupId, OffsetCommitRequest, OffsetFetchRequest, TopicName};
 use kafka_conn::{Error, ErrorCode, Result};
-use kafka_meta::Cluster;
+use kafka_meta::{Cluster, RetryPolicy};
 
 /// The sentinel that says "I am not a member of this group".
 ///
@@ -79,6 +79,7 @@ pub(crate) struct CommitAs<'a> {
 /// Commit positions for a group, as a member or anonymously.
 pub(crate) async fn commit(
     cluster: &Cluster,
+    policy: RetryPolicy,
     group_id: &str,
     member: Option<CommitAs<'_>>,
     offsets: &HashMap<(String, i32), CommittedOffset>,
@@ -94,14 +95,15 @@ pub(crate) async fn commit(
     // whole-request condition even so — the coordinator is wrong for the
     // group, so every partition carries it — which is why re-asking is right
     // and why the first partition's code is enough to decide.
-    let response = crate::coordinator::send_retrying(cluster, group_id, request, |response| {
-        response
-            .topics
-            .iter()
-            .flat_map(|topic| topic.partitions.iter())
-            .find_map(|partition| ErrorCode::from_code(partition.error_code))
-    })
-    .await?;
+    let response =
+        crate::coordinator::send_retrying(cluster, policy, group_id, request, |response| {
+            response
+                .topics
+                .iter()
+                .flat_map(|topic| topic.partitions.iter())
+                .find_map(|partition| ErrorCode::from_code(partition.error_code))
+        })
+        .await?;
 
     // Per-partition results, per rule 4: one partition rejected must not hide
     // eleven that committed.
@@ -165,6 +167,7 @@ fn commit_request(
 /// Read a group's committed positions.
 pub(crate) async fn fetch(
     cluster: &Cluster,
+    policy: RetryPolicy,
     group_id: &str,
     partitions: &[(String, i32)],
 ) -> Result<HashMap<(String, i32), CommittedOffset>> {
@@ -209,16 +212,17 @@ pub(crate) async fn fetch(
             ))
     };
 
-    let response = crate::coordinator::send_retrying(cluster, group_id, request, |response| {
-        // v8+ answers inside `groups`, older versions at the top level —
-        // the same two shapes the decoding below has to straddle.
-        response
-            .groups
-            .first()
-            .and_then(|group| ErrorCode::from_code(group.error_code))
-            .or_else(|| ErrorCode::from_code(response.error_code))
-    })
-    .await?;
+    let response =
+        crate::coordinator::send_retrying(cluster, policy, group_id, request, |response| {
+            // v8+ answers inside `groups`, older versions at the top level —
+            // the same two shapes the decoding below has to straddle.
+            response
+                .groups
+                .first()
+                .and_then(|group| ErrorCode::from_code(group.error_code))
+                .or_else(|| ErrorCode::from_code(response.error_code))
+        })
+        .await?;
 
     let mut out = HashMap::new();
 

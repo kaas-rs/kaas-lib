@@ -21,10 +21,14 @@
 use std::time::Instant;
 
 use kafka_conn::{ErrorCode, Result, Rpc};
-use kafka_meta::{Cluster, CoordinatorKind, Verdict};
+use kafka_meta::{Cluster, CoordinatorKind, RetryPolicy, Verdict};
 
 /// Send to the group coordinator, re-asking while the decoded response says we
 /// asked the wrong broker.
+///
+/// `policy` is the consumer's resolved retry policy — [`ConsumerConfig::retry`]
+/// when set, the cluster's otherwise (#24) — so a caller-configured posture
+/// reaches every coordinator re-ask.
 ///
 /// `code_of` pulls the code out of the decoded response. On give-up the
 /// response is returned **unchanged** rather than converted to an error, so
@@ -32,6 +36,7 @@ use kafka_meta::{Cluster, CoordinatorKind, Verdict};
 /// untouched — this only decides whether to ask again.
 pub(crate) async fn send_retrying<R, F>(
     cluster: &Cluster,
+    policy: RetryPolicy,
     group_id: &str,
     request: R,
     code_of: F,
@@ -40,7 +45,7 @@ where
     R: Rpc + Clone,
     F: Fn(&R::Response) -> Option<ErrorCode>,
 {
-    send_retrying_until(cluster, group_id, request, None, code_of).await
+    send_retrying_until(cluster, policy, group_id, request, None, code_of).await
 }
 
 /// [`send_retrying`], with a deadline for the RPCs that block on purpose.
@@ -52,6 +57,7 @@ where
 /// The deadline *replaces* the policy budget — see [`kafka_meta::reask`].
 pub(crate) async fn send_retrying_until<R, F>(
     cluster: &Cluster,
+    policy: RetryPolicy,
     group_id: &str,
     request: R,
     deadline: Option<Instant>,
@@ -61,7 +67,6 @@ where
     R: Rpc + Clone,
     F: Fn(&R::Response) -> Option<ErrorCode>,
 {
-    let policy = cluster.retry();
     kafka_meta::reask(&policy, deadline, |_attempt| {
         let request = request.clone();
         let code_of = &code_of;

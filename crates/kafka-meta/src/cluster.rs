@@ -30,7 +30,11 @@ use crate::snapshot::{BrokerInfo, MetadataSnapshot, PartitionInfo, TopicId, Topi
 pub struct ClusterConfig {
     /// Per-connection settings.
     pub connection: ConnectionConfig,
-    /// Retry behaviour for routed requests.
+    /// Retry behaviour for routed requests — and for reconnect pacing, which
+    /// deliberately shares this policy rather than having its own knobs; the
+    /// pool keeps a separate per-endpoint failure counter, so the two uses
+    /// never feed each other. The reasoning lives with the backoff in
+    /// `pool.rs` (#24).
     pub retry: RetryPolicy,
     /// How often the background task refreshes metadata.
     ///
