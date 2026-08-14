@@ -21,10 +21,6 @@ ignore = [
     # only, transitive; no runtime code ships. Revisit if a maintained fork
     # becomes the ecosystem default.
     "RUSTSEC-2024-0436",
-    # `rustls-pemfile` is unmaintained (RUSTSEC-2025-0134). Parses
-    # operator-supplied PEM, not peer bytes. The migration to the maintained
-    # rustls-pki-types PEM API is tracked in #34; remove this when it lands.
-    "RUSTSEC-2025-0134",
 ]
 
 [licenses]

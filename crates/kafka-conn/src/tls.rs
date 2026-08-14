@@ -360,30 +360,33 @@ pub(crate) fn handshake_error(
 }
 
 fn parse_certs(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
-    let mut reader = io::BufReader::new(pem);
-    rustls_pemfile::certs(&mut reader)
+    use rustls::pki_types::pem::PemObject as _;
+    CertificateDer::pem_slice_iter(pem)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| Error::InvalidRequest(format!("could not parse certificate PEM: {e}")))
 }
 
 fn parse_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>> {
-    let mut reader = io::BufReader::new(pem);
-    let parsed = rustls_pemfile::private_key(&mut reader);
+    use rustls::pki_types::pem::{Error as PemError, PemObject as _};
+    let parsed = PrivateKeyDer::from_pem_slice(pem);
     // Checked before the underlying result is rendered, because an encrypted
     // key reaches here as either arm depending on which of the two forms it is
     // in, and "your key has a passphrase" is the useful sentence in both.
     if let Some(message) = encrypted_key_message(pem) {
         return Err(Error::InvalidRequest(message));
     }
-    parsed
-        .map_err(|e| Error::InvalidRequest(format!("could not parse private key PEM: {e}")))?
-        .ok_or_else(|| Error::InvalidRequest("private key PEM contained no key".to_owned()))
+    parsed.map_err(|e| match e {
+        PemError::NoItemsFound => {
+            Error::InvalidRequest("private key PEM contained no key".to_owned())
+        }
+        other => Error::InvalidRequest(format!("could not parse private key PEM: {other}")),
+    })
 }
 
 /// Say *why* there is no usable key, when the bytes can tell us.
 ///
-/// `rustls_pemfile::private_key` skips the sections it cannot use and reports
-/// the absence, not the reason — so a passphrase-protected key, which is what
+/// The PEM parser skips the sections it cannot use and reports the absence,
+/// not the reason — so a passphrase-protected key, which is what
 /// `openssl genpkey -aes-256-cbc` produces and what a careful operator is most
 /// likely to be holding, arrives as "contained no key" and sends them off to
 /// look for a missing file.
