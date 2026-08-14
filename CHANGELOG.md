@@ -64,7 +64,11 @@ Three changes alter existing behaviour — read those first.
 - `ConsumerConfig::retry` — retry pacing for the consumer's own re-ask loops,
   inheriting the cluster's policy when unset (#24).
 - Admin calls re-ask the retriable slice of per-item responses instead of
-  handing a transient error back as a final per-item result (#23).
+  handing a transient error back as a final per-item result (#23). A code that
+  is not retriable for a named resource but does call for a metadata refresh —
+  `UNKNOWN_TOPIC_OR_PARTITION` on a partition created seconds ago — buys
+  exactly one refresh and re-ask, because a refresh is new information. A name
+  that genuinely does not exist costs one extra round trip and never spins.
 - `NegotiatedConsumer` downgrades to the classic protocol when a broker
   advertises KIP-848 and then refuses the first heartbeat — the case no
   `ApiVersions` probe can see (#28).
