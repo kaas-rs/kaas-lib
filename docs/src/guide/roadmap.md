@@ -56,6 +56,14 @@ joined them.
 version — see [RELEASING.md](https://github.com/kaas-rs/kaas-lib/blob/main/RELEASING.md).
 `kafka-consume` joins the published set at 0.3.0.
 
+**What changed between versions** lives in
+[CHANGELOG.md](https://github.com/kaas-rs/kaas-lib/blob/main/CHANGELOG.md),
+starting at 0.9.0. It records the changes that alter what existing code
+*does* — a new API is discoverable from these pages, a changed meaning is
+not. 0.9.0 has three of them: the producer's delivery deadline, the retry
+pacing of coordinator and leader re-asks, and SCRAM's refusal of an
+out-of-range iteration count.
+
 ## Next
 
 Nothing here is structural. These are ordinary gaps with no blocker beyond
