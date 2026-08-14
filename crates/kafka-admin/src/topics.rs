@@ -55,42 +55,70 @@ impl Admin {
         topics: impl IntoIterator<Item = NewTopic>,
         validate_only: bool,
     ) -> Result<PerItem<String, CreatedTopic>> {
-        let mut names = Vec::new();
-        let mut creatable = Vec::new();
-        for topic in topics {
-            names.push(topic.name.clone());
-            creatable.push(to_creatable(&topic)?);
+        // Validate every spec before anything is sent, as before.
+        let topics: Vec<NewTopic> = topics.into_iter().collect();
+        for topic in &topics {
+            to_creatable(topic)?;
         }
-        if creatable.is_empty() {
+        if topics.is_empty() {
             return Ok(Vec::new());
         }
 
-        let request = CreateTopicsRequest::default()
-            .with_topics(creatable)
-            .with_timeout_ms(self.request_timeout_ms())
-            .with_validate_only(validate_only);
-        // Controller-routed: see the routing table. A CreateTopics sent to a
-        // random broker is a NOT_CONTROLLER retry loop.
-        let response = self.cluster().send_to_controller(request).await?;
+        // Per-item retriable codes (a topic mid-election, THROTTLING) are
+        // narrowed and re-asked (#23); the result key is the topic name.
+        let results = crate::reask::per_item_retrying(
+            self.cluster(),
+            crate::reask::Axis::Metadata,
+            topics,
+            |subset| async move {
+                let request = CreateTopicsRequest::default()
+                    .with_topics(
+                        subset
+                            .iter()
+                            .map(to_creatable)
+                            .collect::<Result<Vec<_>>>()?,
+                    )
+                    .with_timeout_ms(self.request_timeout_ms())
+                    .with_validate_only(validate_only);
+                // Controller-routed: see the routing table. A CreateTopics
+                // sent to a random broker is a NOT_CONTROLLER retry loop.
+                let response = self.cluster().send_to_controller(request).await?;
 
-        Ok(response
-            .topics
+                let mut by_name: std::collections::HashMap<String, _> = response
+                    .topics
+                    .into_iter()
+                    .map(|result| (result.name.0.to_string(), result))
+                    .collect();
+                Ok(subset
+                    .into_iter()
+                    .map(|topic| {
+                        let outcome = match by_name.remove(&topic.name) {
+                            None => Err(Error::from_code(
+                                ErrorCode::UnknownServerError,
+                                Some("the response did not mention this topic".to_owned()),
+                            )),
+                            Some(result) => match ErrorCode::from_code(result.error_code) {
+                                Some(code) => Err(Error::from_code(
+                                    code,
+                                    result.error_message.map(|m| m.to_string()),
+                                )),
+                                None => Ok(CreatedTopic {
+                                    name: topic.name.clone(),
+                                    partitions: result.num_partitions,
+                                    replication_factor: result.replication_factor,
+                                }),
+                            },
+                        };
+                        (topic, outcome)
+                    })
+                    .collect())
+            },
+        )
+        .await?;
+
+        Ok(results
             .into_iter()
-            .map(|result| {
-                let name = result.name.0.to_string();
-                let outcome = match ErrorCode::from_code(result.error_code) {
-                    Some(code) => Err(Error::from_code(
-                        code,
-                        result.error_message.map(|m| m.to_string()),
-                    )),
-                    None => Ok(CreatedTopic {
-                        name: name.clone(),
-                        partitions: result.num_partitions,
-                        replication_factor: result.replication_factor,
-                    }),
-                };
-                (name, outcome)
-            })
+            .map(|(topic, outcome)| (topic.name, outcome))
             .collect())
     }
 
@@ -108,42 +136,54 @@ impl Admin {
         // both is *not* harmless: the codec bails on a field set outside its
         // own version range, so the two shapes have to be chosen between.
         let version = self.negotiated_for::<DeleteTopicsRequest>().await?;
-        let request = DeleteTopicsRequest::default().with_timeout_ms(self.request_timeout_ms());
-        let request = if version >= 6 {
-            request.with_topics(
-                names
-                    .iter()
-                    .map(|name| {
-                        DeleteTopicState::default()
-                            .with_name(Some(TopicName(StrBytes::from_string(name.clone()))))
-                    })
-                    .collect(),
-            )
-        } else {
-            request.with_topic_names(
-                names
-                    .iter()
-                    .map(|name| TopicName(StrBytes::from_string(name.clone())))
-                    .collect(),
-            )
-        };
 
-        let response = self.cluster().send_to_controller(request).await?;
-        Ok(response
-            .responses
-            .into_iter()
-            .map(|result| {
-                let name = result.name.map(|n| n.0.to_string()).unwrap_or_default();
-                let outcome = match ErrorCode::from_code(result.error_code) {
-                    Some(code) => Err(Error::from_code(
-                        code,
-                        result.error_message.map(|m| m.to_string()),
-                    )),
-                    None => Ok(()),
+        // A topic mid-deletion or mid-election answers with a retriable code
+        // per item; narrow and re-ask those (#23).
+        crate::reask::per_item_retrying(
+            self.cluster(),
+            crate::reask::Axis::Metadata,
+            names,
+            |subset| async move {
+                let request =
+                    DeleteTopicsRequest::default().with_timeout_ms(self.request_timeout_ms());
+                let request = if version >= 6 {
+                    request.with_topics(
+                        subset
+                            .iter()
+                            .map(|name| {
+                                DeleteTopicState::default()
+                                    .with_name(Some(TopicName(StrBytes::from_string(name.clone()))))
+                            })
+                            .collect(),
+                    )
+                } else {
+                    request.with_topic_names(
+                        subset
+                            .iter()
+                            .map(|name| TopicName(StrBytes::from_string(name.clone())))
+                            .collect(),
+                    )
                 };
-                (name, outcome)
-            })
-            .collect())
+
+                let response = self.cluster().send_to_controller(request).await?;
+                Ok(response
+                    .responses
+                    .into_iter()
+                    .map(|result| {
+                        let name = result.name.map(|n| n.0.to_string()).unwrap_or_default();
+                        let outcome = match ErrorCode::from_code(result.error_code) {
+                            Some(code) => Err(Error::from_code(
+                                code,
+                                result.error_message.map(|m| m.to_string()),
+                            )),
+                            None => Ok(()),
+                        };
+                        (name, outcome)
+                    })
+                    .collect())
+            },
+        )
+        .await
     }
 
     /// Grow topics to a larger partition count.
@@ -154,45 +194,72 @@ impl Admin {
         &self,
         counts: impl IntoIterator<Item = (String, i32)>,
     ) -> Result<PerItem<String, ()>> {
-        let topics: Vec<CreatePartitionsTopic> = counts
-            .into_iter()
-            .map(|(name, count)| {
-                CreatePartitionsTopic::default()
-                    .with_name(TopicName(StrBytes::from_string(name)))
-                    .with_count(count)
-                    // The second instance of the trap CLAUDE.md names for
-                    // `allow_auto_topic_creation`: a *nullable* field defaults
-                    // to `Some(empty)`, not `None`. Null means "broker, place
-                    // the new replicas"; an empty list means "here are your
-                    // assignments, there are none of them", and the broker
-                    // rejects it with INVALID_REPLICA_ASSIGNMENT.
-                    .with_assignments(None)
-            })
-            .collect();
-        if topics.is_empty() {
+        let counts: Vec<(String, i32)> = counts.into_iter().collect();
+        if counts.is_empty() {
             return Ok(Vec::new());
         }
 
-        let request = CreatePartitionsRequest::default()
-            .with_topics(topics)
-            .with_timeout_ms(self.request_timeout_ms())
-            .with_validate_only(false);
-        let response = self.cluster().send_to_controller(request).await?;
+        // Retriable per-topic codes are narrowed and re-asked (#23).
+        let results = crate::reask::per_item_retrying(
+            self.cluster(),
+            crate::reask::Axis::Metadata,
+            counts,
+            |subset| async move {
+                let request = CreatePartitionsRequest::default()
+                    .with_topics(
+                        subset
+                            .iter()
+                            .map(|(name, count)| {
+                                CreatePartitionsTopic::default()
+                                    .with_name(TopicName(StrBytes::from_string(name.clone())))
+                                    .with_count(*count)
+                                    // The second instance of the trap CLAUDE.md
+                                    // names for `allow_auto_topic_creation`: a
+                                    // *nullable* field defaults to `Some(empty)`,
+                                    // not `None`. Null means "broker, place the
+                                    // new replicas"; an empty list means "here
+                                    // are your assignments, there are none of
+                                    // them", and the broker rejects it with
+                                    // INVALID_REPLICA_ASSIGNMENT.
+                                    .with_assignments(None)
+                            })
+                            .collect(),
+                    )
+                    .with_timeout_ms(self.request_timeout_ms())
+                    .with_validate_only(false);
+                let response = self.cluster().send_to_controller(request).await?;
 
-        Ok(response
-            .results
+                let mut by_name: std::collections::HashMap<String, _> = response
+                    .results
+                    .into_iter()
+                    .map(|result| (result.name.0.to_string(), result))
+                    .collect();
+                Ok(subset
+                    .into_iter()
+                    .map(|item| {
+                        let outcome = match by_name.remove(&item.0) {
+                            None => Err(Error::from_code(
+                                ErrorCode::UnknownServerError,
+                                Some("the response did not mention this topic".to_owned()),
+                            )),
+                            Some(result) => match ErrorCode::from_code(result.error_code) {
+                                Some(code) => Err(Error::from_code(
+                                    code,
+                                    result.error_message.map(|m| m.to_string()),
+                                )),
+                                None => Ok(()),
+                            },
+                        };
+                        (item, outcome)
+                    })
+                    .collect())
+            },
+        )
+        .await?;
+
+        Ok(results
             .into_iter()
-            .map(|result| {
-                let name = result.name.0.to_string();
-                let outcome = match ErrorCode::from_code(result.error_code) {
-                    Some(code) => Err(Error::from_code(
-                        code,
-                        result.error_message.map(|m| m.to_string()),
-                    )),
-                    None => Ok(()),
-                };
-                (name, outcome)
-            })
+            .map(|((name, _count), outcome)| (name, outcome))
             .collect())
     }
 

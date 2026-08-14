@@ -817,57 +817,86 @@ impl Admin {
             }
         };
 
-        let mut by_topic: HashMap<String, Vec<OffsetCommitRequestPartition>> = HashMap::new();
-        for reset in &offsets {
-            by_topic.entry(reset.topic.clone()).or_default().push(
-                OffsetCommitRequestPartition::default()
-                    .with_partition_index(reset.partition)
-                    .with_committed_offset(reset.offset)
-                    .with_committed_leader_epoch(-1)
-                    .with_committed_metadata(
-                        reset
-                            .metadata
-                            .as_ref()
-                            .map(|m| StrBytes::from_string(m.clone())),
-                    ),
-            );
-        }
+        // Per-partition retriable codes — the coordinator mid-move, the
+        // offsets topic mid-load — are narrowed and re-asked (#23).
+        let committed = crate::reask::per_item_retrying(
+            self.cluster(),
+            crate::reask::Axis::Coordinator(CoordinatorKind::Group, group_id),
+            offsets,
+            |subset| async move {
+                let mut by_topic: HashMap<String, Vec<OffsetCommitRequestPartition>> =
+                    HashMap::new();
+                for reset in &subset {
+                    by_topic.entry(reset.topic.clone()).or_default().push(
+                        OffsetCommitRequestPartition::default()
+                            .with_partition_index(reset.partition)
+                            .with_committed_offset(reset.offset)
+                            .with_committed_leader_epoch(-1)
+                            .with_committed_metadata(
+                                reset
+                                    .metadata
+                                    .as_ref()
+                                    .map(|m| StrBytes::from_string(m.clone())),
+                            ),
+                    );
+                }
 
-        let request = OffsetCommitRequest::default()
-            .with_group_id(GroupId(StrBytes::from_string(group_id.to_owned())))
-            .with_generation_id_or_member_epoch(generation_or_epoch)
-            // An empty member id is what a non-member commit uses; a made-up
-            // one is rejected as UNKNOWN_MEMBER_ID.
-            .with_member_id(StrBytes::from_static_str(""))
-            .with_topics(
-                by_topic
+                let request = OffsetCommitRequest::default()
+                    .with_group_id(GroupId(StrBytes::from_string(group_id.to_owned())))
+                    .with_generation_id_or_member_epoch(generation_or_epoch)
+                    // An empty member id is what a non-member commit uses; a
+                    // made-up one is rejected as UNKNOWN_MEMBER_ID.
+                    .with_member_id(StrBytes::from_static_str(""))
+                    .with_topics(
+                        by_topic
+                            .into_iter()
+                            .map(|(name, partitions)| {
+                                OffsetCommitRequestTopic::default()
+                                    .with_name(TopicName(StrBytes::from_string(name)))
+                                    .with_partitions(partitions)
+                            })
+                            .collect(),
+                    );
+
+                let response = self
+                    .cluster()
+                    .send_to_coordinator(CoordinatorKind::Group, group_id, request)
+                    .await?;
+
+                let mut answered: HashMap<(String, i32), _> = response
+                    .topics
                     .into_iter()
-                    .map(|(name, partitions)| {
-                        OffsetCommitRequestTopic::default()
-                            .with_name(TopicName(StrBytes::from_string(name)))
-                            .with_partitions(partitions)
+                    .flat_map(|topic| {
+                        let name = topic.name.0.to_string();
+                        topic.partitions.into_iter().map(move |partition| {
+                            ((name.clone(), partition.partition_index), partition)
+                        })
                     })
-                    .collect(),
-            );
+                    .collect();
+                Ok(subset
+                    .into_iter()
+                    .map(|reset| {
+                        let outcome = match answered.remove(&(reset.topic.clone(), reset.partition))
+                        {
+                            None => Err(Error::from_code(
+                                ErrorCode::UnknownServerError,
+                                Some("the response did not mention this partition".to_owned()),
+                            )),
+                            Some(answer) => match ErrorCode::from_code(answer.error_code) {
+                                Some(code) => Err(Error::from_code(code, None)),
+                                None => Ok(()),
+                            },
+                        };
+                        (reset, outcome)
+                    })
+                    .collect())
+            },
+        )
+        .await?;
 
-        let response = self
-            .cluster()
-            .send_to_coordinator(CoordinatorKind::Group, group_id, request)
-            .await?;
-
-        Ok(response
-            .topics
+        Ok(committed
             .into_iter()
-            .flat_map(|topic| {
-                let name = topic.name.0.to_string();
-                topic.partitions.into_iter().map(move |partition| {
-                    let outcome = match ErrorCode::from_code(partition.error_code) {
-                        Some(code) => Err(Error::from_code(code, None)),
-                        None => Ok(()),
-                    };
-                    ((name.clone(), partition.partition_index), outcome)
-                })
-            })
+            .map(|(reset, outcome)| ((reset.topic, reset.partition), outcome))
             .collect())
     }
 
@@ -877,52 +906,73 @@ impl Admin {
         group_id: &str,
         partitions: impl IntoIterator<Item = (String, i32)>,
     ) -> Result<PerItem<(String, i32), ()>> {
-        let mut by_topic: HashMap<String, Vec<OffsetDeleteRequestPartition>> = HashMap::new();
-        for (topic, partition) in partitions {
-            by_topic
-                .entry(topic)
-                .or_default()
-                .push(OffsetDeleteRequestPartition::default().with_partition_index(partition));
-        }
-        if by_topic.is_empty() {
+        let partitions: Vec<(String, i32)> = partitions.into_iter().collect();
+        if partitions.is_empty() {
             return Ok(Vec::new());
         }
 
-        let request = OffsetDeleteRequest::default()
-            .with_group_id(GroupId(StrBytes::from_string(group_id.to_owned())))
-            .with_topics(
-                by_topic
+        // Coordinator-routed with per-partition codes: retriable ones are
+        // narrowed and re-asked (#23). A retriable *top-level* code — the
+        // coordinator mid-move — is spread over every item so the same loop
+        // covers it; a terminal one stays a whole-call error, as before.
+        crate::reask::per_item_retrying(
+            self.cluster(),
+            crate::reask::Axis::Coordinator(CoordinatorKind::Group, group_id),
+            partitions,
+            |subset| async move {
+                let mut by_topic: HashMap<String, Vec<OffsetDeleteRequestPartition>> =
+                    HashMap::new();
+                for (topic, partition) in &subset {
+                    by_topic.entry(topic.clone()).or_default().push(
+                        OffsetDeleteRequestPartition::default().with_partition_index(*partition),
+                    );
+                }
+                let request = OffsetDeleteRequest::default()
+                    .with_group_id(GroupId(StrBytes::from_string(group_id.to_owned())))
+                    .with_topics(
+                        by_topic
+                            .into_iter()
+                            .map(|(name, partitions)| {
+                                OffsetDeleteRequestTopic::default()
+                                    .with_name(TopicName(StrBytes::from_string(name)))
+                                    .with_partitions(partitions)
+                            })
+                            .collect(),
+                    );
+
+                let response = self
+                    .cluster()
+                    .send_to_coordinator(CoordinatorKind::Group, group_id, request)
+                    .await?;
+                if let Some(code) = ErrorCode::from_code(response.error_code) {
+                    if code.retriable_for_named_resource() {
+                        return Ok(subset
+                            .into_iter()
+                            .map(|item| {
+                                (item, Err(Error::from_code(code, Some(group_id.to_owned()))))
+                            })
+                            .collect());
+                    }
+                    return Err(Error::from_code(code, Some(group_id.to_owned())));
+                }
+
+                Ok(response
+                    .topics
                     .into_iter()
-                    .map(|(name, partitions)| {
-                        OffsetDeleteRequestTopic::default()
-                            .with_name(TopicName(StrBytes::from_string(name)))
-                            .with_partitions(partitions)
+                    .flat_map(|topic| {
+                        let name = topic.name.0.to_string();
+                        topic.partitions.into_iter().map(move |partition| {
+                            let outcome = match ErrorCode::from_code(partition.error_code) {
+                                Some(code) => Err(Error::from_code(code, None)),
+                                None => Ok(()),
+                            };
+                            ((name.clone(), partition.partition_index), outcome)
+                        })
                     })
-                    .collect(),
-            );
-
-        let response = self
-            .cluster()
-            .send_to_coordinator(CoordinatorKind::Group, group_id, request)
-            .await?;
-        if let Some(code) = ErrorCode::from_code(response.error_code) {
-            return Err(Error::from_code(code, Some(group_id.to_owned())));
-        }
-
-        Ok(response
-            .topics
-            .into_iter()
-            .flat_map(|topic| {
-                let name = topic.name.0.to_string();
-                topic.partitions.into_iter().map(move |partition| {
-                    let outcome = match ErrorCode::from_code(partition.error_code) {
-                        Some(code) => Err(Error::from_code(code, None)),
-                        None => Ok(()),
-                    };
-                    ((name.clone(), partition.partition_index), outcome)
-                })
-            })
-            .collect())
+                    .collect())
+            },
+        )
+        .await
     }
 
     /// Delete groups.

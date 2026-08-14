@@ -48,6 +48,7 @@ mod configs;
 mod groups;
 mod offsets;
 mod partitions;
+mod reask;
 mod security;
 mod tokens;
 pub(crate) mod topics;

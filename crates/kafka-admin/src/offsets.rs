@@ -67,7 +67,7 @@ impl Admin {
         // it and letting the broker return something surprising.
         let negotiated = self.negotiated_version(ApiKey::ListOffsets).await;
 
-        let mut by_leader: HashMap<i32, Vec<(String, i32, OffsetSpec)>> = HashMap::new();
+        let mut askable = Vec::new();
         for (topic, partition, spec) in requests {
             if let Some(version) = negotiated
                 && spec.min_version() > version
@@ -82,74 +82,116 @@ impl Admin {
                 ));
                 continue;
             }
-            match self.cluster().leader_for(&topic, partition).await {
-                Ok(leader) => by_leader
-                    .entry(leader)
-                    .or_default()
-                    .push((topic, partition, spec)),
-                Err(error) => results.push(((topic, partition), Err(error))),
-            }
+            askable.push((topic, partition, spec));
         }
 
-        for (leader, group) in by_leader {
-            let mut topics: HashMap<String, Vec<ListOffsetsPartition>> = HashMap::new();
-            for (topic, partition, spec) in &group {
-                topics.entry(topic.clone()).or_default().push(
-                    ListOffsetsPartition::default()
-                        .with_partition_index(*partition)
-                        // -1: we are not fencing on a specific leader epoch.
-                        // The dispatcher already refreshes metadata and retries
-                        // when the leader moves.
-                        .with_current_leader_epoch(-1)
-                        .with_timestamp(spec.timestamp()),
-                );
-            }
+        // Leader resolution lives *inside* the round, so a re-ask after a
+        // leader move resolves the new one. This is the issue #23 example:
+        // a per-partition NOT_LEADER_OR_FOLLOWER inside a successful response
+        // used to reach the caller as a final per-item result.
+        let asked = crate::reask::per_item_retrying(
+            self.cluster(),
+            crate::reask::Axis::Metadata,
+            askable,
+            |subset| async move {
+                let mut round: PerItem<(String, i32, OffsetSpec), ListedOffset> = Vec::new();
+                let mut by_leader: HashMap<i32, Vec<(String, i32, OffsetSpec)>> = HashMap::new();
+                for (topic, partition, spec) in subset {
+                    match self.cluster().leader_for(&topic, partition).await {
+                        Ok(leader) => by_leader
+                            .entry(leader)
+                            .or_default()
+                            .push((topic, partition, spec)),
+                        Err(error) => round.push(((topic, partition, spec), Err(error))),
+                    }
+                }
 
-            let request = ListOffsetsRequest::default()
-                .with_replica_id(kafka_conn::protocol::messages::BrokerId(
-                    CONSUMER_REPLICA_ID,
-                ))
-                .with_isolation_level(isolation.code())
-                .with_topics(
-                    topics
-                        .into_iter()
-                        .map(|(name, partitions)| {
-                            ListOffsetsTopic::default()
-                                .with_name(TopicName(StrBytes::from_string(name)))
-                                .with_partitions(partitions)
-                        })
-                        .collect(),
-                );
+                for (leader, group) in by_leader {
+                    let mut topics: HashMap<String, Vec<ListOffsetsPartition>> = HashMap::new();
+                    for (topic, partition, spec) in &group {
+                        topics.entry(topic.clone()).or_default().push(
+                            ListOffsetsPartition::default()
+                                .with_partition_index(*partition)
+                                // -1: we are not fencing on a specific leader
+                                // epoch. Leader moves are re-resolved by the
+                                // re-ask loop around this round.
+                                .with_current_leader_epoch(-1)
+                                .with_timestamp(spec.timestamp()),
+                        );
+                    }
 
-            match self.cluster().send_to_node(leader, request).await {
-                Ok(response) => {
-                    for topic in response.topics {
-                        let name = topic.name.0.to_string();
-                        for partition in topic.partitions {
-                            let key = (name.clone(), partition.partition_index);
-                            let outcome = match ErrorCode::from_code(partition.error_code) {
-                                Some(code) => Err(Error::from_code(code, None)),
-                                None => Ok(ListedOffset {
-                                    partition: partition.partition_index,
-                                    // -1 means "no such offset" — an empty
-                                    // partition, or a timestamp past the end.
-                                    offset: Some(partition.offset).filter(|o| *o >= 0),
-                                    timestamp: Some(partition.timestamp).filter(|t| *t >= 0),
-                                    leader_epoch: Some(partition.leader_epoch).filter(|e| *e >= 0),
-                                }),
-                            };
-                            results.push((key, outcome));
+                    let request = ListOffsetsRequest::default()
+                        .with_replica_id(kafka_conn::protocol::messages::BrokerId(
+                            CONSUMER_REPLICA_ID,
+                        ))
+                        .with_isolation_level(isolation.code())
+                        .with_topics(
+                            topics
+                                .into_iter()
+                                .map(|(name, partitions)| {
+                                    ListOffsetsTopic::default()
+                                        .with_name(TopicName(StrBytes::from_string(name)))
+                                        .with_partitions(partitions)
+                                })
+                                .collect(),
+                        );
+
+                    match self.cluster().send_to_node(leader, request).await {
+                        Ok(response) => {
+                            let mut answered: HashMap<(String, i32), _> = response
+                                .topics
+                                .into_iter()
+                                .flat_map(|topic| {
+                                    let name = topic.name.0.to_string();
+                                    topic.partitions.into_iter().map(move |partition| {
+                                        ((name.clone(), partition.partition_index), partition)
+                                    })
+                                })
+                                .collect();
+                            for (topic, partition, spec) in group {
+                                let outcome = match answered.remove(&(topic.clone(), partition)) {
+                                    None => Err(Error::from_code(
+                                        ErrorCode::UnknownServerError,
+                                        Some(
+                                            "the response did not mention this partition"
+                                                .to_owned(),
+                                        ),
+                                    )),
+                                    Some(answer) => match ErrorCode::from_code(answer.error_code) {
+                                        Some(code) => Err(Error::from_code(code, None)),
+                                        None => Ok(ListedOffset {
+                                            partition: answer.partition_index,
+                                            // -1 means "no such offset" — an
+                                            // empty partition, or a timestamp
+                                            // past the end.
+                                            offset: Some(answer.offset).filter(|o| *o >= 0),
+                                            timestamp: Some(answer.timestamp).filter(|t| *t >= 0),
+                                            leader_epoch: Some(answer.leader_epoch)
+                                                .filter(|e| *e >= 0),
+                                        }),
+                                    },
+                                };
+                                round.push(((topic, partition, spec), outcome));
+                            }
+                        }
+                        Err(error) => {
+                            for item in group {
+                                round.push((item, Err(clone_error(&error))));
+                            }
                         }
                     }
                 }
-                Err(error) => {
-                    for (topic, partition, _) in group {
-                        results.push(((topic, partition), Err(clone_error(&error))));
-                    }
-                }
-            }
-        }
 
+                Ok(round)
+            },
+        )
+        .await?;
+
+        results.extend(
+            asked
+                .into_iter()
+                .map(|((topic, partition, _spec), outcome)| ((topic, partition), outcome)),
+        );
         Ok(results)
     }
 
