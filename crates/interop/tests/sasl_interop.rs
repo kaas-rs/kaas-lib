@@ -167,17 +167,9 @@ async fn round_trip(mechanism: SaslMechanism, topic: &str) {
 /// It asserts that both clients authenticate over OAUTHBEARER and that the
 /// records one writes are the records the other reads.
 ///
-/// It does **not** assert that the two derive the same principal, which this
-/// issue asked for. That was attempted, with the authorizer enabled and
-/// `User:interop` — the `sub` both clients send — as the only permitted
-/// principal. Ours was admitted; librdkafka's produce came back
-/// `TopicAuthorizationFailed`, so the broker resolved its connection to some
-/// other principal. Both tokens carry `sub` (librdkafka's
-/// `principal_claim_name` defaults to `"sub"`, confirmed in
-/// `rdkafka_sasl_oauthbearer.c`), so the cause is not obvious from the client
-/// side and guessing at it would make this test assert something it had not
-/// established. Left as an open question rather than papered over — see the
-/// follow-up issue.
+// The principal-equality half lives in its own case below (#35), because it
+// needs the authorizer and reports its diagnosis from the broker's own log
+// rather than from what the client can see.
 #[testkit::integration_test]
 async fn oauthbearer_agrees_with_librdkafka() {
     let topic = "interop-oauthbearer";
@@ -252,6 +244,108 @@ async fn oauthbearer_agrees_with_librdkafka() {
         }
     }
     assert_eq!(payloads, vec!["written by rdkafka".to_owned()]);
+}
+
+/// #35: do both clients resolve to the *same principal*?
+///
+/// The round trip above proves the framing. This proves the identity, which
+/// is the part that actually decides whether a mixed fleet can share ACLs.
+///
+/// The mechanism: the authorizer is on and `User:interop` — the `sub` both
+/// clients send — is the only permitted non-broker principal, so anything
+/// that resolves to a different principal is denied rather than quietly
+/// succeeding. A previous attempt at this failed with librdkafka's produce
+/// returning `TopicAuthorizationFailed` and no way to see *which* principal
+/// the broker had settled on, which is the whole difficulty: the client is
+/// told it is not allowed, never who it is.
+///
+/// So on failure this reads the broker's own authorizer log, which names the
+/// principal in the denial. That turns "some other principal" into a fact,
+/// and it is the reason this case is worth its own fixture.
+#[testkit::integration_test]
+async fn both_clients_resolve_to_the_same_oauthbearer_principal() {
+    let topic = "interop-oauthbearer-principal";
+    let fixture = testkit::single_broker_with(
+        BrokerConfig::new()
+            .with_security(Security::SaslPlaintext)
+            .with_mechanism(testkit::SaslMechanism::OauthBearer)
+            .with_authorizer(true)
+            .with_super_user(format!("User:{USER}")),
+    )
+    .await
+    .unwrap();
+    let bootstrap = fixture.bootstrap()[0].clone();
+
+    // Ours is the control: it must be admitted, or the fixture is wrong about
+    // which principal is privileged and nothing below means anything.
+    let admin = Admin::connect(
+        fixture.bootstrap().to_vec(),
+        ClusterConfig {
+            connection: ConnectionConfig::new().with_sasl(
+                SaslConfig::oauth_bearer_token(testkit::unsecured_jws(USER, TOKEN_LIFETIME))
+                    .allow_plaintext_password(),
+            ),
+            ..ClusterConfig::default()
+        },
+    )
+    .await
+    .expect("our client authenticates");
+    admin
+        .create_topics([NewTopic::new(topic, 1, 1)])
+        .await
+        .unwrap();
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &bootstrap)
+        .set("security.protocol", "SASL_PLAINTEXT")
+        .set("sasl.mechanism", "OAUTHBEARER")
+        .set("enable.sasl.oauthbearer.unsecure.jwt", "true")
+        .set("sasl.oauthbearer.config", format!("principal={USER}"))
+        .set("message.timeout.ms", "10000")
+        .create()
+        .expect("rdkafka producer");
+
+    let sent = producer
+        .send(
+            FutureRecord::to(topic).key("k").payload("principal check"),
+            Duration::from_secs(10),
+        )
+        .await;
+
+    if let Err((error, _)) = sent {
+        panic!(
+            "librdkafka authenticated but was not authorized as User:{USER}, so the two \
+             clients do not resolve to the same principal.\n\
+             error: {error}\n\
+             the broker's authorizer log says:\n{}",
+            authorizer_denials(&fixture).await
+        );
+    }
+}
+
+/// What the broker logged about denied operations, for the failure message
+/// above.
+///
+/// Best-effort by design: this runs only on a path that is already failing,
+/// so a log this cannot find must degrade into a note rather than into a
+/// second, more confusing error.
+async fn authorizer_denials(fixture: &testkit::KafkaCluster) -> String {
+    const CANDIDATES: [&str; 3] = [
+        "/opt/kafka/logs/kafka-authorizer.log",
+        "/opt/kafka/logs/server.log",
+        "/tmp/kaas-testkit/kafka-authorizer.log",
+    ];
+    for path in CANDIDATES {
+        let script = format!("grep -i 'denied' {path} | tail -20");
+        if let Ok(out) = testkit::exec_ok(fixture, 0, ["bash", "-lc", script.as_str()]).await
+            && !out.stdout.trim().is_empty()
+        {
+            return format!("  (from {path})\n{}", out.stdout);
+        }
+    }
+    "  <no authorizer log found; the broker may log denials to stdout only, \
+     in which case `docker logs` on the fixture container has them>"
+        .to_owned()
 }
 
 #[testkit::integration_test]
