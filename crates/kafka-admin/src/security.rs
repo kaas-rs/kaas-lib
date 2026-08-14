@@ -321,6 +321,13 @@ pub struct QuotaEntity {
 /// A quota key and its value, or `None` to remove it.
 pub type QuotaOp = (String, Option<f64>);
 
+/// A quota entity and the quota values recorded against it.
+///
+/// The entity travels with the values because it is half the answer: the same
+/// `producer_byte_rate` means one thing on a `user` entity and another on a
+/// `user` + `client-id` one.
+pub type QuotaAssignment = (QuotaEntity, Vec<(String, f64)>);
+
 /// A filter for describing quotas.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QuotaFilter {

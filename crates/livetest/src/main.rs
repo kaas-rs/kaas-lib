@@ -19,6 +19,7 @@
     )
 )]
 
+mod principal;
 mod probe;
 mod produce;
 mod read;
@@ -57,6 +58,9 @@ async fn main() -> Result<()> {
         // Notes to stderr, facts to stdout, so `livetest probe > out.txt`
         // captures exactly the diffable body and nothing else.
         "probe" => emit(report::Outcome::ok(probe::probe(&target).await?)),
+        "principal" => emit(report::Outcome::ok(
+            principal::principal(&target, &rest).await?,
+        )),
         "smoke" => emit(smoke::smoke(&target).await?),
         "produce" => {
             let options = produce::Options::parse(&rest)?;
@@ -98,12 +102,17 @@ fn print_help() {
         "livetest — run kaas-lib against a real Kafka cluster
 
 USAGE
-    livetest <probe|smoke|produce|read|sweep> [options]
+    livetest <probe|principal|smoke|produce|read|sweep> [options]
 
 COMMANDS
     probe    Read-only inventory and negotiated version table. Touches
              nothing. Output is a sorted, diffable report — run it against two
              clusters and diff the results for a conformance check.
+    principal
+             Read-only: how each listener authenticates, and what that plus
+             the cluster's stored credentials say about a principal. Names
+             principals as arguments (`User:alice`, or a bare name);
+             defaults to the anonymous principal.
     smoke    Admin round trip: create, describe, alter, verify, delete. Creates
              only prefixed resources and removes them again.
     produce  Write path round trip: produce with every codec, an explicit

@@ -43,11 +43,13 @@
 )]
 
 mod admin;
+mod authentication;
 mod cluster_info;
 mod configs;
 mod groups;
 mod offsets;
 mod partitions;
+mod principal;
 mod reask;
 mod security;
 mod tokens;
@@ -56,15 +58,21 @@ mod transactions;
 pub mod types;
 
 pub use admin::Admin;
+pub use authentication::{
+    AuthMechanism, ClientAuth, ClusterAuthentication, ListenerAuth, MechanismVerdict,
+    SecurityProtocol, VerdictBasis,
+};
 pub use groups::{
     ClassicGroupMember, CommittedOffset, ConsumerGroupMember, GroupDescription, GroupListing,
     GroupState, OffsetReset, ShareGroupMember,
 };
 pub use offsets::IsolationLevel;
 pub use partitions::{ElectionType, OngoingReassignment, PartitionReassignment};
+pub use principal::{PrincipalDescription, PrincipalToken};
 pub use security::{
-    AclBinding, AclFilter, AclOperation, AclPermission, AclResourceType, PatternType, QuotaEntity,
-    QuotaFilter, QuotaOp, ScramCredentialInfo, ScramMechanism, ScramUpsert,
+    AclBinding, AclFilter, AclOperation, AclPermission, AclResourceType, PatternType,
+    QuotaAssignment, QuotaEntity, QuotaFilter, QuotaOp, ScramCredentialInfo, ScramMechanism,
+    ScramUpsert,
 };
 pub use tokens::{DelegationToken, NewDelegationToken, Principal};
 pub use transactions::{ProducerState, TransactionDescription, TransactionListing};

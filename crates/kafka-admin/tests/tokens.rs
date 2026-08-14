@@ -17,7 +17,9 @@
 
 use std::time::{Duration, Instant};
 
-use kafka_admin::{Admin, ClusterConfig, DelegationToken, NewDelegationToken, Principal};
+use kafka_admin::{
+    Admin, ClusterConfig, DelegationToken, NewDelegationToken, Principal, ScramMechanism,
+};
 use kafka_conn::{
     Connection, ConnectionConfig, Error, ErrorCode, SaslConfig, SaslMechanism, ScramHash,
 };
@@ -316,4 +318,46 @@ async fn tokens_are_refused_when_the_broker_has_no_master_key() {
         Some(ErrorCode::DelegationTokenAuthDisabled),
         "{err:?}"
     );
+}
+
+/// A token is a credential that authenticates *as* its owner, so an audit of
+/// "who can be alice" that stops at her password is incomplete by one live
+/// SCRAM login per outstanding token. `describe_principal` reports both, and
+/// this is the half that needs a master key.
+#[testkit::integration_test]
+async fn describe_principal_reports_a_principals_delegation_tokens() {
+    let broker = testkit::single_broker_with(broker_config()).await.unwrap();
+    let admin = Admin::connect(
+        broker.bootstrap().to_vec(),
+        ClusterConfig {
+            connection: alice(),
+            ..ClusterConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let token = admin
+        .create_delegation_token(&NewDelegationToken::new())
+        .await
+        .expect("a token for the authenticated principal");
+    await_token_visible(&admin, &token.token_id).await;
+
+    let alice = Principal::user("alice");
+    let described = admin.describe_principal(&alice).await.unwrap();
+
+    let tokens = described.tokens.as_ref().expect("tokens are readable");
+    let found = tokens
+        .iter()
+        .find(|candidate| candidate.token_id == token.token_id)
+        .unwrap_or_else(|| panic!("the created token is missing from {tokens:?}"));
+    assert_eq!(found.requester, alice);
+    assert_eq!(found.expiry_timestamp_ms, token.expiry_timestamp_ms);
+
+    // The fixture authenticates alice with SCRAM-SHA-256, so both credential
+    // stores answer for her — and a principal with a token is not
+    // credential-less even before the SCRAM entry is counted.
+    assert!(described.has_stored_credentials());
+    assert!(!described.is_unrecorded());
+    assert_eq!(described.scram_mechanisms(), vec![ScramMechanism::Sha256]);
 }
