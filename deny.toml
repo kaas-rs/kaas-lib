@@ -1,0 +1,66 @@
+# cargo-deny configuration — the supply-chain policy for the six published
+# crates. Checked in CI (.github/workflows/audit.yml) on a weekly schedule as
+# well as on dependency changes, because an advisory published the day after a
+# release still needs surfacing.
+#
+# The interop harness is deliberately OUTSIDE this policy: it exists to link
+# librdkafka, whose C toolchain expectations this workspace refuses, and its
+# lockfile is checked by the same workflow with its own working directory.
+
+[graph]
+# What we publish is what we police. Dev-only and xtask dependencies still ride
+# along in the workspace graph; that is fine — stricter, and they ship to
+# contributors even if not to crates.io.
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # `paste` is unmaintained (RUSTSEC-2024-0436). Proc-macro, compile-time
+    # only, transitive; no runtime code ships. Revisit if a maintained fork
+    # becomes the ecosystem default.
+    "RUSTSEC-2024-0436",
+    # `rustls-pemfile` is unmaintained (RUSTSEC-2025-0134). Parses
+    # operator-supplied PEM, not peer bytes. The migration to the maintained
+    # rustls-pki-types PEM API is tracked in #34; remove this when it lands.
+    "RUSTSEC-2025-0134",
+]
+
+[licenses]
+version = 2
+# Everything in the tree today. Additions to this list are a review event, not
+# a chore: a new license in the graph means a new obligation for every
+# downstream user of the published crates.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[[licenses.clarify]]
+# ring bundles multiple licenses in one file; this is the standard clarify
+# stanza the cargo-deny book recommends for it.
+crate = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+# Duplicate versions are a size/compile-time cost, not a security event; warn.
+multiple-versions = "warn"
+# Wildcards are how an unpinned dependency sneaks in — but a bare `path`
+# dev-dependency inside the workspace is not that, it is how the crates test
+# against each other.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
