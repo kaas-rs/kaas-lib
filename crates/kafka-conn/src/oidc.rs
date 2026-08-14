@@ -208,13 +208,27 @@ impl OidcConfig {
 }
 
 /// A cached token, and the two moments that matter about it.
-#[derive(Debug)]
 struct Cached {
     token: String,
     /// When to go and get a new one.
     refresh_after: Instant,
     /// When this one stops working. Only consulted when a refresh *failed*.
     expires_at: Instant,
+}
+
+impl std::fmt::Debug for Cached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The token is a live bearer credential. `OidcTokenProvider`'s manual
+        // Debug already omits the cache, so a derive here was unreachable —
+        // but it was the only secret-holding type in the workspace one
+        // `.field(...)` refactor away from logging tokens, and the test below
+        // is what keeps it that way.
+        f.debug_struct("Cached")
+            .field("token", &"<redacted>")
+            .field("refresh_after", &self.refresh_after)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// An OAUTHBEARER token source backed by a `client_credentials` exchange.
@@ -303,11 +317,17 @@ impl OidcTokenProvider {
         // installed one, which is not a failure mode to inherit for a token
         // fetch.
         let tls = config.tls.clone().unwrap_or_else(TlsConfig::system);
-        let connector = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_tls_config(tls.rustls_config()?)
-            .https_or_http()
-            .enable_http1()
-            .build();
+        // The scheme gate above already refuses http unless opted in, and
+        // nothing follows redirects — but the connector should not be more
+        // permissive than the policy it serves. Without the opt-in, http is
+        // impossible at both layers.
+        let builder =
+            hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls.rustls_config()?);
+        let connector = if config.allow_plaintext_endpoint {
+            builder.https_or_http().enable_http1().build()
+        } else {
+            builder.https_only().enable_http1().build()
+        };
 
         Ok(Self {
             config,
@@ -546,6 +566,12 @@ fn parse_token_response(endpoint: &str, body: &[u8]) -> Result<(String, Duration
 /// description is usually the only place the real cause appears — Entra's
 /// `AADSTS7000215: Invalid client secret provided`, for one.
 fn describe_failure(body: &[u8]) -> String {
+    // Every path is bounded and escaped: the body is authored by whatever
+    // answered — a hostile or merely echoing IdP, a proxy — and the JSON
+    // fields were previously relayed verbatim while only the non-JSON path
+    // was truncated. An error detail is a log line, not a document.
+    let bounded =
+        |s: &str| -> String { crate::sanitize::control_safe(s).chars().take(200).collect() };
     let text = String::from_utf8_lossy(body);
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
         let field = |name: &str| {
@@ -554,9 +580,11 @@ fn describe_failure(body: &[u8]) -> String {
                 .map(str::to_owned)
         };
         match (field("error"), field("error_description")) {
-            (Some(error), Some(description)) => return format!("{error}: {description}"),
-            (Some(error), None) => return error,
-            (None, Some(description)) => return description,
+            (Some(error), Some(description)) => {
+                return bounded(&format!("{error}: {description}"));
+            }
+            (Some(error), None) => return bounded(&error),
+            (None, Some(description)) => return bounded(&description),
             (None, None) => {}
         }
     }
@@ -564,8 +592,7 @@ fn describe_failure(body: &[u8]) -> String {
     if trimmed.is_empty() {
         "with an empty body".to_owned()
     } else {
-        // Bounded: an html error page from a reverse proxy is not a log line.
-        trimmed.chars().take(200).collect()
+        bounded(trimmed)
     }
 }
 
@@ -583,6 +610,42 @@ mod tests {
         assert!(!rendered.contains("s3cret"), "{rendered}");
         let provider = OidcTokenProvider::new(config()).unwrap();
         assert!(!format!("{provider:?}").contains("s3cret"));
+    }
+
+    /// The one secret-holding type in the workspace that had a derived Debug.
+    /// Unreachable today — the provider's manual Debug omits the cache — but
+    /// one `.field(&self.cached)` refactor from logging live bearer tokens,
+    /// and this assertion is what makes that refactor fail loudly.
+    #[test]
+    fn a_cached_token_never_renders_in_debug() {
+        let cached = Cached {
+            token: "live-bearer-token".to_owned(),
+            refresh_after: Instant::now(),
+            expires_at: Instant::now(),
+        };
+        let rendered = format!("{cached:?}");
+        assert!(!rendered.contains("live-bearer-token"), "{rendered}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    /// #34 INFO: the JSON path used to relay `error_description` verbatim
+    /// with no length cap, while only the non-JSON path truncated. A hostile
+    /// or echoing IdP writes this text into shipped logs.
+    #[test]
+    fn idp_error_fields_are_truncated_and_escaped() {
+        // Built with serde_json so the ESC arrives as a *decoded* control
+        // character on the JSON path (raw controls are not legal JSON, so a
+        // hand-written string would fall through to the non-JSON path and
+        // test nothing).
+        let body = serde_json::json!({
+            "error": "invalid_client",
+            "error_description": format!("\u{1b}[2J{}", "x".repeat(5000)),
+        })
+        .to_string();
+        let described = describe_failure(body.as_bytes());
+        assert!(described.chars().count() <= 200, "{}", described.len());
+        assert!(described.chars().all(|c| !c.is_control()), "{described}");
+        assert!(described.starts_with("invalid_client"), "{described}");
     }
 
     #[test]
