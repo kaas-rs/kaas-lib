@@ -270,7 +270,12 @@ async fn both_clients_resolve_to_the_same_oauthbearer_principal() {
             .with_security(Security::SaslPlaintext)
             .with_mechanism(testkit::SaslMechanism::OauthBearer)
             .with_authorizer(true)
-            .with_super_user(format!("User:{USER}")),
+            // A *bare* name: `with_super_user` adds the `User:` prefix, and
+            // passing it ready-prefixed yields `User:User:interop`, which
+            // matches nothing and denies everything. The setter's own doc
+            // warns about this, and the first version of this test did it
+            // anyway — see the assertion on the create below for how it hid.
+            .with_super_user(USER),
     )
     .await
     .unwrap();
@@ -290,10 +295,23 @@ async fn both_clients_resolve_to_the_same_oauthbearer_principal() {
     )
     .await
     .expect("our client authenticates");
-    admin
+    // Checked per item, not just as an outer `Result`. A multi-resource admin
+    // call reports authorization per resource (rule 4), so `.unwrap()` on the
+    // outer Result is `Ok` even when every item was denied — which is exactly
+    // how a misconfigured super user hid here once, and sent the diagnosis
+    // chasing librdkafka's principal instead of the fixture's.
+    let created = admin
         .create_topics([NewTopic::new(topic, 1, 1)])
         .await
         .unwrap();
+    for (name, outcome) in &created {
+        outcome.as_ref().unwrap_or_else(|error| {
+            panic!(
+                "our own client could not create {name}, so the fixture's privileged \
+                 principal is not the one we authenticate as: {error}"
+            )
+        });
+    }
 
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &bootstrap)
