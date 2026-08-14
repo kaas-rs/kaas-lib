@@ -69,8 +69,51 @@ pub(crate) const WORK_DIR: &str = "/tmp/kaas-testkit";
 pub(crate) const KEYSTORE_PATH: &str = "/tmp/kaas-testkit/kafka.keystore.jks";
 /// Path of the PEM-encoded test CA, readable via [`crate::KafkaCluster::ca_pem`].
 pub(crate) const CA_PEM_PATH: &str = "/tmp/kaas-testkit/ca.pem";
+/// Path of the *clients* CA certificate, the anchor the broker verifies client
+/// certificates against. A different CA from the one above on purpose — see
+/// [`crate::certs`].
+pub(crate) const CLIENTS_CA_PEM_PATH: &str = "/tmp/kaas-testkit/clients-ca.pem";
+/// Path of the truststore holding the clients CA, when client auth is on.
+pub(crate) const TRUSTSTORE_PATH: &str = "/tmp/kaas-testkit/kafka.truststore.p12";
 /// Password for every generated keystore. Test fixtures only.
 pub(crate) const KEYSTORE_PASSWORD: &str = "kaas-testkit";
+
+/// Whether the TLS listener asks connecting clients for a certificate.
+///
+/// Maps directly onto Kafka's `ssl.client.auth`. The fixture generates the
+/// client half — a separate clients CA and one certificate signed by it — for
+/// anything other than [`ClientAuth::None`]; see [`crate::certs`] for why the
+/// two CAs point in opposite directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClientAuth {
+    /// No certificate is asked for. The default, and what every fixture
+    /// predating mTLS support gets.
+    #[default]
+    None,
+    /// A certificate is requested and accepted if offered, but a client
+    /// without one still connects. Kafka's `requested`.
+    Requested,
+    /// A certificate is mandatory: a client without one is refused at the
+    /// handshake.
+    Required,
+}
+
+impl ClientAuth {
+    /// The `ssl.client.auth` value.
+    pub(crate) const fn property(self) -> &'static str {
+        match self {
+            ClientAuth::None => "none",
+            ClientAuth::Requested => "requested",
+            ClientAuth::Required => "required",
+        }
+    }
+
+    /// Whether the fixture must generate a client certificate and a
+    /// truststore to verify it with.
+    pub(crate) const fn needs_client_pki(self) -> bool {
+        !matches!(self, ClientAuth::None)
+    }
+}
 
 /// Wire security for the *external* listener — the one tests connect to.
 ///
@@ -204,6 +247,7 @@ pub struct BrokerConfig {
     super_users: Vec<String>,
     auto_create_topics: bool,
     share_groups: bool,
+    client_auth: ClientAuth,
     properties: Vec<(String, String)>,
     features: Vec<String>,
     startup_timeout: Duration,
@@ -227,6 +271,7 @@ impl Default for BrokerConfig {
             // explicitly.
             auto_create_topics: false,
             share_groups: false,
+            client_auth: ClientAuth::None,
             properties: Vec::new(),
             features: Vec::new(),
             startup_timeout: Duration::from_secs(180),
@@ -317,6 +362,18 @@ impl BrokerConfig {
         self
     }
 
+    /// Whether the TLS listener asks connecting clients for a certificate.
+    ///
+    /// Anything other than [`ClientAuth::None`] makes the fixture generate a
+    /// clients CA and one client certificate signed by it, reachable through
+    /// [`crate::KafkaCluster::client_certificate`]. Only meaningful alongside
+    /// a TLS [`Security`]; a plaintext listener has no handshake to ask in.
+    #[must_use]
+    pub fn with_client_auth(mut self, client_auth: ClientAuth) -> Self {
+        self.client_auth = client_auth;
+        self
+    }
+
     /// Set an arbitrary `server.properties` entry. Later calls win.
     #[must_use]
     pub fn with_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -355,6 +412,11 @@ impl BrokerConfig {
     /// External listener security.
     pub fn security(&self) -> Security {
         self.security
+    }
+
+    /// Whether the TLS listener asks clients for a certificate.
+    pub fn client_auth(&self) -> ClientAuth {
+        self.client_auth
     }
 
     /// Configured users.
@@ -559,7 +621,14 @@ impl BrokerConfig {
             set("ssl.keystore.password", KEYSTORE_PASSWORD.to_owned());
             set("ssl.key.password", KEYSTORE_PASSWORD.to_owned());
             set("ssl.keystore.type", "PKCS12".to_owned());
-            set("ssl.client.auth", "none".to_owned());
+            set("ssl.client.auth", self.client_auth.property().to_owned());
+            if self.client_auth.needs_client_pki() {
+                // The anchor for *client* certificates, which is not the CA
+                // the broker's own certificate chains to — see `crate::certs`.
+                set("ssl.truststore.location", TRUSTSTORE_PATH.to_owned());
+                set("ssl.truststore.password", KEYSTORE_PASSWORD.to_owned());
+                set("ssl.truststore.type", "PKCS12".to_owned());
+            }
         }
 
         if self.security.needs_sasl() {

@@ -49,6 +49,13 @@ pub enum Error {
     /// A configuration the harness cannot express.
     #[error("invalid fixture configuration: {0}")]
     Config(String),
+
+    /// The fixture could not generate the client certificate mTLS needs.
+    #[error("could not generate the fixture client certificate: {detail}")]
+    ClientCertificate {
+        /// What the certificate generator said.
+        detail: String,
+    },
 }
 
 impl Error {

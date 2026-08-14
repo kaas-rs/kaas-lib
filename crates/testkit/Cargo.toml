@@ -16,6 +16,7 @@ tracing        = { workspace = true }
 futures        = { workspace = true }
 # base64url, for minting the unsecured JWS the OAUTHBEARER fixtures present.
 base64         = { workspace = true }
+rcgen = { version = "0.14", default-features = false, features = ["pem", "crypto", "ring"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

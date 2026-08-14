@@ -26,7 +26,8 @@ use testcontainers::{
 };
 
 use crate::config::{
-    BrokerConfig, CA_PEM_PATH, EXTERNAL_PORT, KEYSTORE_PASSWORD, KEYSTORE_PATH, WORK_DIR,
+    BrokerConfig, CA_PEM_PATH, CLIENTS_CA_PEM_PATH, EXTERNAL_PORT, KEYSTORE_PASSWORD,
+    KEYSTORE_PATH, TRUSTSTORE_PATH, WORK_DIR,
 };
 
 /// Where the generated start script lands inside the container.
@@ -49,6 +50,11 @@ pub(crate) struct KafkaImage {
     node_id: i32,
     hostname: String,
     voters: String,
+    /// The clients CA certificate, when this fixture verifies client
+    /// certificates. Generated once per cluster so every node trusts the same
+    /// client — a per-node CA would make a certificate work against whichever
+    /// broker happened to answer first.
+    clients_ca_pem: Option<String>,
     cmd: Vec<String>,
     env: Vec<(String, String)>,
     ports: Vec<ContainerPort>,
@@ -60,12 +66,14 @@ impl KafkaImage {
         node_id: i32,
         hostname: String,
         voters: String,
+        clients_ca_pem: Option<String>,
     ) -> Self {
         Self {
             config,
             node_id,
             hostname,
             voters,
+            clients_ca_pem,
             cmd: vec![
                 "-c".to_owned(),
                 format!(
@@ -129,6 +137,7 @@ impl KafkaImage {
     fn tls_setup(&self) -> String {
         let san = format!("DNS:localhost,DNS:{},IP:127.0.0.1", self.hostname);
         let pw = KEYSTORE_PASSWORD;
+        let truststore = self.truststore_setup();
         format!(
             "KEYTOOL=keytool\n\
              command -v keytool >/dev/null 2>&1 || KEYTOOL=\"${{JAVA_HOME:-/opt/java/openjdk}}/bin/keytool\"\n\
@@ -148,7 +157,29 @@ impl KafkaImage {
              \"$KEYTOOL\" -importcert -noprompt -alias ca -keystore {KEYSTORE_PATH} \
              -storepass {pw} -file {CA_PEM_PATH}\n\
              \"$KEYTOOL\" -importcert -noprompt -alias broker -keystore {KEYSTORE_PATH} \
-             -storepass {pw} -file {WORK_DIR}/broker.pem\n"
+             -storepass {pw} -file {WORK_DIR}/broker.pem\n\
+             {truststore}"
+        )
+    }
+
+    /// Import the clients CA into a truststore, so the broker will verify a
+    /// client certificate that CA issued.
+    ///
+    /// The certificate is written from here rather than generated in the
+    /// container: `keytool` cannot export a private key and the test process
+    /// needs one, so the whole client half is generated in Rust and only its
+    /// CA certificate crosses over. See [`crate::certs`].
+    fn truststore_setup(&self) -> String {
+        let Some(clients_ca) = &self.clients_ca_pem else {
+            return String::new();
+        };
+        let pw = KEYSTORE_PASSWORD;
+        format!(
+            "cat > {CLIENTS_CA_PEM_PATH} <<'KAAS_CLIENTS_CA_EOF'\n\
+             {clients_ca}\n\
+             KAAS_CLIENTS_CA_EOF\n\
+             \"$KEYTOOL\" -importcert -noprompt -alias clients-ca -keystore {TRUSTSTORE_PATH} \
+             -storetype PKCS12 -storepass {pw} -file {CLIENTS_CA_PEM_PATH}\n"
         )
     }
 }
@@ -228,7 +259,59 @@ mod tests {
     use crate::config::{SaslMechanism, Security};
 
     fn image(config: BrokerConfig) -> KafkaImage {
-        KafkaImage::new(config, 1, "node-1".to_owned(), "1@node-1:9094".to_owned())
+        KafkaImage::new(
+            config,
+            1,
+            "node-1".to_owned(),
+            "1@node-1:9094".to_owned(),
+            None,
+        )
+    }
+
+    fn image_with_clients_ca(config: BrokerConfig) -> KafkaImage {
+        KafkaImage::new(
+            config,
+            1,
+            "node-1".to_owned(),
+            "1@node-1:9094".to_owned(),
+            Some("-----BEGIN CERTIFICATE-----\nfixture\n-----END CERTIFICATE-----".to_owned()),
+        )
+    }
+
+    /// #27: the truststore the broker verifies *client* certificates with is
+    /// built from a CA the container never generates — it arrives from the
+    /// Rust side, because keytool cannot export the private key the test
+    /// process needs.
+    #[test]
+    fn client_auth_imports_the_clients_ca_into_a_truststore() {
+        let cfg = BrokerConfig::new()
+            .with_security(Security::Ssl)
+            .with_client_auth(crate::config::ClientAuth::Required);
+        let script = image_with_clients_ca(cfg).start_script("127.0.0.1:1");
+
+        assert!(script.contains("ssl.client.auth=required"), "{script}");
+        assert!(script.contains(&format!("ssl.truststore.location={TRUSTSTORE_PATH}")));
+        assert!(script.contains("-alias clients-ca"), "{script}");
+        assert!(
+            script.contains("-----BEGIN CERTIFICATE-----"),
+            "the clients CA must reach the container: {script}"
+        );
+        // The two anchors must stay distinct, which is the mix-up the whole
+        // fixture exists to catch.
+        assert_ne!(CA_PEM_PATH, CLIENTS_CA_PEM_PATH);
+        assert!(script.contains(CA_PEM_PATH));
+        assert!(script.contains(CLIENTS_CA_PEM_PATH));
+    }
+
+    /// And the default stays exactly as it was: no truststore, no client
+    /// certificate asked for.
+    #[test]
+    fn without_client_auth_the_listener_asks_for_nothing() {
+        let cfg = BrokerConfig::new().with_security(Security::Ssl);
+        let script = image(cfg).start_script("127.0.0.1:1");
+        assert!(script.contains("ssl.client.auth=none"), "{script}");
+        assert!(!script.contains("ssl.truststore.location"), "{script}");
+        assert!(!script.contains("clients-ca"), "{script}");
     }
 
     #[test]

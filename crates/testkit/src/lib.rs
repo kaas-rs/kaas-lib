@@ -43,13 +43,15 @@
 pub mod config;
 pub mod harness;
 
+mod certs;
 mod error;
 mod image;
 mod kafka;
 mod token;
 
 pub use config::{
-    BrokerConfig, DEFAULT_IMAGE, DEFAULT_TAG, INTERNAL_BOOTSTRAP, SaslMechanism, SaslUser, Security,
+    BrokerConfig, ClientAuth, DEFAULT_IMAGE, DEFAULT_TAG, INTERNAL_BOOTSTRAP, SaslMechanism,
+    SaslUser, Security,
 };
 pub use error::{Error, Result};
 pub use harness::{Cluster, ExecOutput, ExternalCluster, exec_ok};

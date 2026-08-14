@@ -22,7 +22,17 @@ use crate::image::KafkaImage;
 pub struct KafkaCluster {
     containers: Vec<ContainerAsync<KafkaImage>>,
     bootstrap: Vec<String>,
+    /// The client certificate this cluster's brokers will authenticate, when
+    /// the fixture was configured to ask for one.
+    client_pki: Option<crate::certs::ClientPki>,
 }
+
+/// The common name the fixture's client certificate carries.
+///
+/// Chosen to match the live Strimzi fixture's `KafkaUser`, so a test asserting
+/// on the principal is asserting on the same shape either place: Kafka derives
+/// `User:CN=bob-mtls` from this, not a bare username.
+pub const CLIENT_PRINCIPAL_CN: &str = "bob-mtls";
 
 /// Boot a single PLAINTEXT broker.
 pub async fn single_broker() -> Result<KafkaCluster> {
@@ -51,6 +61,17 @@ impl KafkaCluster {
     async fn start(config: BrokerConfig) -> Result<Self> {
         config.validate()?;
 
+        // Generated once for the whole cluster, not per node: a client
+        // certificate has to be accepted by whichever broker answers, and a
+        // per-node clients CA would make mTLS work against one and fail
+        // against the next (#27).
+        let client_pki = if config.security().needs_tls() && config.client_auth().needs_client_pki()
+        {
+            Some(crate::certs::client_pki(CLIENT_PRINCIPAL_CN)?)
+        } else {
+            None
+        };
+
         let run = run_id();
         let network = format!("kaas-net-{run}");
         let hostnames: Vec<String> = (1..=config.nodes())
@@ -77,6 +98,7 @@ impl KafkaCluster {
                 node_id(index)?,
                 host.clone(),
                 voters.clone(),
+                client_pki.as_ref().map(|pki| pki.ca_pem.clone()),
             );
             let request = image
                 .with_network(network.clone())
@@ -104,6 +126,7 @@ impl KafkaCluster {
         Ok(Self {
             containers,
             bootstrap,
+            client_pki,
         })
     }
 
@@ -126,6 +149,21 @@ impl KafkaCluster {
     pub async fn ca_pem(&self, index: usize) -> Result<String> {
         let out = crate::harness::exec_ok(self, index, ["cat", CA_PEM_PATH]).await?;
         Ok(out.stdout)
+    }
+
+    /// The client certificate and key this cluster's brokers will accept.
+    ///
+    /// `(chain_pem, key_pem)`, ready for
+    /// `TlsConfig::with_client_certificate`. `None` unless the fixture was
+    /// built with a [`crate::ClientAuth`] other than `None` — and note the
+    /// certificate chains to the *clients* CA, which is deliberately not the
+    /// CA [`KafkaCluster::ca_pem`] returns for verifying the broker. Both
+    /// halves of one handshake, pointing opposite ways, exactly as Strimzi
+    /// arranges them.
+    pub fn client_certificate(&self) -> Option<(String, String)> {
+        self.client_pki
+            .as_ref()
+            .map(|pki| (pki.cert_pem.clone(), pki.key_pem.clone()))
     }
 
     /// Kill a node.
