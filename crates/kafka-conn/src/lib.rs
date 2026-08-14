@@ -54,6 +54,7 @@ mod oauth;
 #[cfg(feature = "oidc")]
 mod oidc;
 mod rpc;
+mod sanitize;
 mod sasl;
 mod scram;
 mod stats;
@@ -71,6 +72,7 @@ pub use oauth::{TokenFuture, TokenProvider};
 #[cfg(feature = "oidc")]
 pub use oidc::{OidcConfig, OidcTokenProvider};
 pub use rpc::Rpc;
+pub use sanitize::control_safe;
 pub use sasl::{SaslConfig, SaslMechanism};
 pub use scram::{ScramHash, random_salt, salted_password};
 pub use stats::{ConnectionStats, StatsSnapshot};

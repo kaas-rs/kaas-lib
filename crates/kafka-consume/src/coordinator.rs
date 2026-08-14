@@ -112,7 +112,7 @@ where
         }
 
         cluster.invalidate_coordinator(CoordinatorKind::Group, group_id);
-        tracing::debug!(group_id, %code, "coordinator moved; re-asking");
+        tracing::debug!(group_id = %kafka_conn::control_safe(group_id), %code, "coordinator moved; re-asking");
         tokio::time::sleep(BACKOFF).await;
     }
 }

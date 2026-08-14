@@ -171,10 +171,12 @@ impl ScramClient {
                 Some(("s=", value)) => salt = Some(value),
                 Some(("i=", value)) => iterations = Some(value),
                 // `e=` is the server rejecting us; anything else is an
-                // extension we are allowed to ignore.
+                // extension we are allowed to ignore. The value is
+                // server-authored text bound for logs, hence the escaping.
                 Some(("e=", value)) => {
                     return Err(Error::Authentication(format!(
-                        "server rejected SCRAM: {value}"
+                        "server rejected SCRAM: {}",
+                        crate::sanitize::control_safe(value)
                     )));
                 }
                 _ => {}
@@ -251,7 +253,8 @@ impl ScramClient {
             match field.split_at_checked(2) {
                 Some(("e=", value)) => {
                     return Err(Error::Authentication(format!(
-                        "server rejected SCRAM: {value}"
+                        "server rejected SCRAM: {}",
+                        crate::sanitize::control_safe(value)
                     )));
                 }
                 Some(("v=", value)) => {

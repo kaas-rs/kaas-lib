@@ -558,7 +558,7 @@ impl Consumer {
                 Err(error) => {
                     // One partition without a leader must not stop the other
                     // eleven; the next round re-resolves it.
-                    tracing::debug!(topic = %key.0, partition = key.1, %error, "no leader yet");
+                    tracing::debug!(topic = %kafka_conn::control_safe(&key.0), partition = key.1, %error, "no leader yet");
                     continue;
                 }
             };
@@ -619,7 +619,7 @@ impl Consumer {
                 if let Some(error) = partition.error {
                     // Per-partition, and not fatal: a leader that just moved
                     // is resolved again on the next round.
-                    tracing::debug!(topic = %key.0, partition = key.1, %error, "partition error");
+                    tracing::debug!(topic = %kafka_conn::control_safe(&key.0), partition = key.1, %error, "partition error");
                     if error.needs_metadata_refresh() {
                         self.cluster.invalidate();
                     }

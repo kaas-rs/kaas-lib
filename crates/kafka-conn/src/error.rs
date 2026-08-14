@@ -168,6 +168,11 @@ impl Error {
     /// [`Error::Broker`] here rather than at every call site, because a caller
     /// that forgets renders "not authorized" as a generic failure.
     pub fn from_code(code: ErrorCode, message: Option<String>) -> Self {
+        // The broker's message is unconstrained bytes and this constructor is
+        // the funnel every decoded error_message passes through, which makes
+        // it the one place terminal-escape injection can be stopped for all
+        // of them. See `crate::sanitize`.
+        let message = message.map(|m| crate::sanitize::control_safe(&m).into_owned());
         if code.is_authentication() {
             Error::Authentication(message.unwrap_or_else(|| code.to_string()))
         } else if code.is_authorization() {
@@ -327,6 +332,26 @@ mod tests {
         let err = Error::transport("connect", std::io::Error::other("boom"));
         assert!(err.retriable());
         assert!(err.needs_metadata_refresh());
+    }
+
+    /// Audit #32: `error_message` is unconstrained broker bytes and every
+    /// decoded one funnels through `from_code`, so this is where a hostile
+    /// ANSI sequence has to die — before `%error` puts it on a terminal.
+    #[test]
+    fn broker_messages_reach_display_with_control_bytes_escaped() {
+        for (variant, code) in [
+            ("broker", ErrorCode::UnknownServerError),
+            ("authentication", ErrorCode::SaslAuthenticationFailed),
+            ("authorization", ErrorCode::TopicAuthorizationFailed),
+        ] {
+            let err = Error::from_code(code, Some("bad\x1b[2J\nthing".to_owned()));
+            let rendered = format!("{err}");
+            assert!(
+                rendered.chars().all(|c| !c.is_control()),
+                "{variant}: {rendered:?}"
+            );
+            assert!(rendered.contains("bad"), "{variant}: {rendered:?}");
+        }
     }
 
     #[test]

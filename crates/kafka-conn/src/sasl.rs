@@ -415,9 +415,17 @@ async fn oauth_bearer_exchange<T: SaslTransport>(
         Ok(_) => None,
     };
 
-    let mut message = format!("broker rejected the OAUTHBEARER token: {rejection}");
+    // Both halves are broker-authored: the RFC 7628 JSON challenge and the
+    // final error message. Escaped before they can reach a terminal.
+    let mut message = format!(
+        "broker rejected the OAUTHBEARER token: {}",
+        crate::sanitize::control_safe(&rejection.to_string())
+    );
     if let Some(broker) = broker_message.filter(|m| !m.is_empty()) {
-        message.push_str(&format!("; broker said: {broker}"));
+        message.push_str(&format!(
+            "; broker said: {}",
+            crate::sanitize::control_safe(&broker)
+        ));
     }
 
     // `insufficient_scope` is not an authentication failure. The token

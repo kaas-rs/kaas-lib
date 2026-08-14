@@ -609,9 +609,15 @@ fn decode_metadata(response: kafka_conn::protocol::messages::MetadataResponse) -
         .into_iter()
         .map(|broker| BrokerInfo {
             node_id: broker.node_id.0,
-            host: broker.host.to_string(),
+            // Advertised by the broker with no charset constraint, and logged
+            // as `%peer` / `%address` all over the pool. A control character
+            // in a hostname can never resolve anyway, so escaping here loses
+            // nothing and disarms terminal-escape injection at the source.
+            host: kafka_conn::control_safe(&broker.host).into_owned(),
             port: broker.port,
-            rack: broker.rack.map(|r| r.to_string()),
+            rack: broker
+                .rack
+                .map(|r| kafka_conn::control_safe(&r).into_owned()),
         })
         .collect();
 
