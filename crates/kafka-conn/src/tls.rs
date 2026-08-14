@@ -414,6 +414,15 @@ mod tests {
         assert!(cfg.connector().is_err());
     }
 
+    /// The other half of the #34 IPv6 fix: once the brackets are stripped,
+    /// rustls must actually accept the bare literal as a name to verify.
+    #[test]
+    fn an_ipv6_literal_is_a_valid_server_name() {
+        let cfg = TlsConfig::system();
+        let name = cfg.server_name("::1").expect("IPv6 literal");
+        assert!(matches!(name, ServerName::IpAddress(_)), "{name:?}");
+    }
+
     #[test]
     fn the_server_name_override_wins() {
         let cfg = TlsConfig::system().with_server_name("broker.internal");

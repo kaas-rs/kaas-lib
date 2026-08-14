@@ -469,7 +469,7 @@ async fn open(addr: &str, config: &ConnectionConfig) -> Result<Transport> {
     match &config.tls {
         None => Ok(Transport::Plain(tcp)),
         Some(tls) => {
-            let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+            let host = host_of(addr);
             let connector = tls.connector()?;
             let server_name = tls.server_name(host)?;
             let stream = connector.connect(server_name, tcp).await.map_err(|e| {
@@ -478,6 +478,26 @@ async fn open(addr: &str, config: &ConnectionConfig) -> Result<Transport> {
             Ok(Transport::Tls(Box::new(stream)))
         }
     }
+}
+
+/// The host half of a `host:port` address, IPv6 literals included.
+///
+/// `rsplit_once(':')` alone mis-parsed `[::1]:9092` into `[::1` — a name
+/// `ServerName` can never accept, so TLS to an IPv6-literal listener always
+/// failed (#34; fail-closed, but still a bug). Brackets are stripped because
+/// `ServerName::try_from` wants the bare literal, and a bare bracketless IPv6
+/// literal is returned whole rather than amputated at its last group.
+fn host_of(addr: &str) -> &str {
+    if let Some(rest) = addr.strip_prefix('[')
+        && let Some((host, _)) = rest.split_once(']')
+    {
+        return host;
+    }
+    // More than one colon and no brackets: an IPv6 literal without a port.
+    if addr.matches(':').count() > 1 {
+        return addr;
+    }
+    addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr)
 }
 
 /// Split the framed stream into reader and writer tasks.
@@ -901,6 +921,23 @@ mod tests {
     use super::*;
     use kafka_protocol::messages::ResponseHeader;
     use kafka_protocol::protocol::Encodable;
+
+    /// #34: `[::1]:9092` used to become the impossible name `[::1`, so TLS to
+    /// an IPv6-literal listener always failed. Every form a metadata response
+    /// or bootstrap list can carry, in one table.
+    #[test]
+    fn the_host_half_of_an_address_survives_every_address_family() {
+        for (addr, host) in [
+            ("broker.example:9092", "broker.example"),
+            ("10.0.0.1:9092", "10.0.0.1"),
+            ("[::1]:9092", "::1"),
+            ("[2001:db8::2]:9093", "2001:db8::2"),
+            ("2001:db8::2", "2001:db8::2"),
+            ("broker.example", "broker.example"),
+        ] {
+            assert_eq!(host_of(addr), host, "{addr}");
+        }
+    }
 
     /// The regression test for a bug a live cluster found and every fixture
     /// missed.

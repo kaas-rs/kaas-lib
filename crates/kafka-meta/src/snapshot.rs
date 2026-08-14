@@ -72,8 +72,16 @@ pub struct BrokerInfo {
 
 impl BrokerInfo {
     /// `host:port`, as the connection layer wants it.
+    ///
+    /// An IPv6 literal is bracketed, because `::1:9092` parses as nothing —
+    /// neither `TcpStream::connect` nor a TLS name check can read it — while
+    /// `[::1]:9092` is the form every socket API agrees on.
     pub fn address(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
     }
 }
 
@@ -265,6 +273,16 @@ mod tests {
             port: 9092,
             rack: None,
         }
+    }
+
+    /// #34: `::1:9092` parses as nothing anywhere in the socket APIs; an IPv6
+    /// host has to leave here bracketed or the pool can never dial it.
+    #[test]
+    fn an_ipv6_host_is_bracketed_in_the_address() {
+        let mut b = broker(1);
+        b.host = "2001:db8::2".to_owned();
+        assert_eq!(b.address(), "[2001:db8::2]:9092");
+        assert_eq!(broker(2).address(), "broker-2:9092");
     }
 
     fn topic(name: &str, leaders: &[i32]) -> TopicInfo {
