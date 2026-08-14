@@ -89,11 +89,31 @@ impl BrokerPool {
     }
 
     /// Learn broker addresses from a metadata snapshot.
+    ///
+    /// A metadata response's `brokers` array is the full live-broker set — it
+    /// is not filtered by the topics asked about — so a non-empty set
+    /// *replaces* what the pool knew, and slots for node ids that have left
+    /// the cluster are dropped with it (closing their connections once the
+    /// last in-flight user lets go). The map used to be insert-only, which
+    /// let a hostile broker cycling node ids across refreshes grow it — and
+    /// the slot map behind it — for the life of the process.
+    ///
+    /// An empty set changes nothing: it is what installing the empty
+    /// invalidation snapshot produces, and forgetting every address there
+    /// would cut the pool back to bootstrap for no reason.
     pub fn learn_addresses(&self, addresses: impl IntoIterator<Item = (i32, String)>) {
+        let fresh: HashMap<i32, String> = addresses.into_iter().collect();
+        if fresh.is_empty() {
+            return;
+        }
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.retain(|endpoint, _| match endpoint {
+                Endpoint::Node(id) => fresh.contains_key(id),
+                Endpoint::Bootstrap(_) => true,
+            });
+        }
         if let Ok(mut map) = self.addresses.lock() {
-            for (node_id, address) in addresses {
-                map.insert(node_id, address);
-            }
+            *map = fresh;
         }
     }
 
@@ -345,6 +365,29 @@ mod tests {
         // rather than at address resolution.
         let err = pool.get(1).await.unwrap_err();
         assert!(!matches!(err, Error::InvalidRequest(_)), "{err:?}");
+    }
+
+    /// Audit #31: the address map used to be insert-only, so a broker cycling
+    /// node ids across metadata refreshes grew it monotonically. A metadata
+    /// response carries the *complete* live-broker set, so learning replaces.
+    #[tokio::test]
+    async fn fresh_metadata_replaces_the_address_map_rather_than_merging() {
+        let pool = pool();
+        pool.learn_addresses([(1, "127.0.0.1:1".to_owned())]);
+        pool.learn_addresses([(2, "127.0.0.1:2".to_owned())]);
+
+        // Broker 1 left the cluster; asking for it is stale metadata again.
+        let err = pool.get(1).await.unwrap_err();
+        assert_eq!(err.code(), Some(kafka_conn::ErrorCode::LeaderNotAvailable));
+
+        // An empty set is the invalidation snapshot, not a cluster with no
+        // brokers — it must not wipe what the pool knows.
+        pool.learn_addresses(Vec::<(i32, String)>::new());
+        let err = pool.get(2).await.unwrap_err();
+        assert!(
+            !format!("{err}").contains("no known address"),
+            "broker 2's address was forgotten: {err:?}"
+        );
     }
 
     #[tokio::test]

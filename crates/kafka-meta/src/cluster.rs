@@ -269,7 +269,7 @@ impl Cluster {
         }
 
         if let Ok(mut map) = self.inner.coordinators.lock() {
-            map.insert(cache_key, node_id);
+            cache_coordinator(&mut map, cache_key, node_id);
         }
         Ok(node_id)
     }
@@ -293,7 +293,14 @@ impl Cluster {
     }
 
     /// Discard the snapshot, forcing the next access to refetch.
+    ///
+    /// The coordinator cache goes with it: "my view of the cluster is wrong"
+    /// has no reason to exempt the one lookup table that routes every
+    /// group- and transaction-shaped request.
     pub fn invalidate(&self) {
+        if let Ok(mut map) = self.inner.coordinators.lock() {
+            map.clear();
+        }
         self.install(Arc::new(MetadataSnapshot::empty()));
     }
 
@@ -525,6 +532,30 @@ impl Cluster {
     }
 }
 
+/// The most coordinator entries the cache will hold.
+///
+/// The key is a caller-chosen string, and `FindCoordinator` succeeds for any
+/// group id whether or not the group exists (the answer is a hash of the id) —
+/// so a downstream app that lets users query groups by name lets those users
+/// mint cache entries. 1024 covers every group a real client works with at
+/// once; past it the cache is flushed whole rather than evicted piecemeal,
+/// because the cache is an optimisation (a miss is one `FindCoordinator`
+/// round trip) and O(1)-and-obviously-bounded beats an eviction queue that
+/// itself has to be audited for growth.
+const COORDINATOR_CACHE_CAP: usize = 1024;
+
+/// Insert into the coordinator cache without letting it grow past the cap.
+fn cache_coordinator(
+    map: &mut HashMap<(CoordinatorKind, String), i32>,
+    key: (CoordinatorKind, String),
+    node_id: i32,
+) {
+    if map.len() >= COORDINATOR_CACHE_CAP && !map.contains_key(&key) {
+        map.clear();
+    }
+    map.insert(key, node_id);
+}
+
 /// Where a request is going.
 #[derive(Debug, Clone)]
 enum Target {
@@ -648,6 +679,26 @@ mod tests {
             .filter_map(|t| t.name.map(|n| n.0.to_string()))
             .collect();
         assert_eq!(names, vec!["orders".to_owned(), "events".to_owned()]);
+    }
+
+    /// Audit #31: the cache key is an attacker-mintable string, so the map
+    /// must stay bounded under an adversarial stream of distinct names —
+    /// while never evicting the entry that was just asked for.
+    #[test]
+    fn the_coordinator_cache_cannot_grow_past_its_cap() {
+        let mut map = HashMap::new();
+        for i in 0..10 * COORDINATOR_CACHE_CAP {
+            cache_coordinator(&mut map, (CoordinatorKind::Group, format!("group-{i}")), 1);
+            assert!(map.len() <= COORDINATOR_CACHE_CAP, "at insert {i}");
+        }
+        // Refreshing a key the cache already holds is not an occasion to
+        // flush everything else.
+        let full: Vec<_> = map.keys().cloned().collect();
+        let population = map.len();
+        for key in full {
+            cache_coordinator(&mut map, key, 2);
+        }
+        assert_eq!(map.len(), population, "re-inserts must not flush");
     }
 
     #[test]
