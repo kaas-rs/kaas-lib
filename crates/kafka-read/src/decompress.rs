@@ -127,13 +127,6 @@ fn read_bounded<R: Read>(reader: R, limit: usize, codec: &str) -> anyhow::Result
     Ok(Bytes::from(out))
 }
 
-/// A decompressor closure for `decode_with_custom_compression`.
-pub(crate) fn decompressor(
-    limit: usize,
-) -> impl Fn(&mut Bytes, Compression) -> anyhow::Result<Bytes> {
-    move |compressed, compression| bounded(compressed, compression, limit)
-}
-
 /// Compress with a codec, for tests that need a real compressed batch.
 #[cfg(test)]
 pub(crate) fn compress_for_test(data: &[u8], compression: Compression) -> Vec<u8> {

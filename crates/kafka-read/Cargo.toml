@@ -31,6 +31,10 @@ zstd           = { workspace = true }
 snap           = "1.1"
 
 [dev-dependencies]
+# To re-seal a deliberately corrupted batch: upstream verifies the batch CRC
+# before it decodes anything, so a test forging a hostile `recordsCount` has to
+# recompute the checksum the way a hostile broker would.
+crc32c             = "0.6"
 testkit            = { path = "../testkit" }
 kafka-admin        = { path = "../kafka-admin" }
 tokio              = { workspace = true }

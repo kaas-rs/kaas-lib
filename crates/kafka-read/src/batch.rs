@@ -181,6 +181,13 @@ pub enum Visibility {
 #[derive(Debug, Clone)]
 pub struct DecodeOptions {
     /// Ceiling on a single batch's decompressed size.
+    ///
+    /// This is a bound on decompressed *bytes*, not on total transient heap:
+    /// the decoded `Record` representation costs roughly 30x the 6-byte wire
+    /// minimum per record, so a pathological batch of empty records can
+    /// transiently occupy ~30x this value while it decodes. Size the limit
+    /// for the memory the process can actually spare, not for the largest
+    /// batch it might meet.
     pub max_decompressed_bytes: usize,
     /// Whether aborted records are visible.
     pub visibility: Visibility,
@@ -347,9 +354,28 @@ pub(crate) fn decode_partition(
         }
 
         let raw = batch.clone();
+        // The pre-decode ceiling above can only price a *compressed* batch at
+        // the configured decompression maximum, and upstream reserves
+        // `record_count * sizeof(Record)` (~30x the 6-byte wire floor) after
+        // the decompress hook returns. So the tight bound lives inside the
+        // hook, where the actual decompressed length is known and an error
+        // still arrives before the reservation.
+        let claimed = header.record_count;
+        let limit = options.max_decompressed_bytes;
         let decoded = RecordBatchDecoder::decode_with_custom_compression(
             &mut batch,
-            Some(decompress::decompressor(options.max_decompressed_bytes)),
+            Some(move |buf: &mut Bytes, compression: Compression| {
+                let out = decompress::bounded(buf, compression, limit)?;
+                let ceiling = out.len() / MIN_RECORD_BYTES;
+                if claimed > ceiling {
+                    anyhow::bail!(
+                        "batch claims {claimed} records; {} decompressed bytes can hold \
+                         at most {ceiling}",
+                        out.len()
+                    );
+                }
+                Ok(out)
+            }),
         );
 
         match decoded {
@@ -396,6 +422,13 @@ pub(crate) fn decode_partition(
 /// payload; compressed, the decompression ceiling `DecodeOptions` already
 /// promises. Either way the demand becomes proportional to bytes we have
 /// already accepted, rather than to a number the sender chose freely.
+///
+/// For a compressed batch this is only the *coarse* filter: pricing every
+/// compressed batch at the configured maximum leaves a gap (a tiny wire
+/// payload may claim `limit / 6` records — ~11M at the 64 MiB default — and
+/// upstream reserves ~30x that in heap before parsing). The exact bound —
+/// the *actual* decompressed length — is enforced inside the decompress hook
+/// in [`decode_partition`], which runs before upstream's reservation.
 fn max_plausible_records(header: &BatchHeader, options: &DecodeOptions) -> usize {
     let payload = match header.compression {
         Compression::None => header.total_len.saturating_sub(header::MIN_LEN),
@@ -626,6 +659,42 @@ mod tests {
                 assert_eq!(decoded.outcomes.len(), count, "{compression:?}");
             }
         }
+    }
+
+    /// The compressed sibling of the fuzz finding above, from the security
+    /// audit (#30): the header-level ceiling prices a compressed batch at the
+    /// configured decompression maximum (64 MiB / 6 ≈ 11.18M records), but
+    /// upstream reserves ~180 heap bytes per claimed record *after*
+    /// decompression — so a tiny wire batch claiming 11M records passed the
+    /// coarse check and reserved ~2 GB before failing to parse. The tight
+    /// check runs inside the decompress hook against the actual decompressed
+    /// length; this pins that it fires. A hostile broker computes a valid
+    /// CRC over its forged header, so the test must too — otherwise the CRC
+    /// check rejects the batch first and the ceiling is never exercised.
+    #[test]
+    fn a_compressed_batch_cannot_claim_more_records_than_it_decompresses_to() {
+        let honest = encode(&[sample_record(0, "payload")], Compression::Gzip);
+        let mut buf = BytesMut::from(&honest[..]);
+        let claimed = 11_000_000i32;
+        if let Some(slot) = buf.get_mut(header::RECORD_COUNT..header::RECORD_COUNT + 4) {
+            slot.copy_from_slice(&claimed.to_be_bytes());
+        }
+        // Re-seal: crc (bytes 17..21) covers attributes (21) to the end.
+        let crc = crc32c::crc32c(&buf[21..]);
+        if let Some(slot) = buf.get_mut(17..21) {
+            slot.copy_from_slice(&crc.to_be_bytes());
+        }
+
+        let header = peek_header(&buf).expect("the header itself is still well formed");
+        assert_eq!(header.record_count, 11_000_000);
+        assert!(
+            header.record_count <= max_plausible_records(&header, &DecodeOptions::default()),
+            "this count must slip past the coarse ceiling, or the test proves nothing"
+        );
+
+        let decoded = decode_partition("orders", 0, buf.freeze(), &[], &DecodeOptions::default());
+        assert_eq!(decoded.outcomes.len(), 1, "{decoded:?}");
+        assert!(decoded.outcomes[0].is_malformed(), "{decoded:?}");
     }
 
     #[test]
