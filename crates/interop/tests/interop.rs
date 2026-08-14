@@ -27,11 +27,11 @@ use std::time::Duration;
 use futures::StreamExt;
 use kafka_admin::{Admin, ClusterConfig, NewTopic};
 use kafka_read::{ScanEvent, ScanSpec};
+use rdkafka::Message;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::Message;
 use testkit::Cluster as _;
 
 async fn producer(bootstrap: &str, compression: &str) -> FutureProducer {
@@ -91,15 +91,19 @@ async fn produce_with_rdkafka_read_with_ours(compression: &str, topic: &str) {
         .expect("tombstone produced");
 
     let cluster = admin.cluster().clone();
-    let mut stream = Box::pin(kafka_read::scan(&cluster, ScanSpec::new(topic)).await.unwrap());
+    let mut stream = Box::pin(
+        kafka_read::scan(&cluster, ScanSpec::new(topic))
+            .await
+            .unwrap(),
+    );
 
     let mut by_key: HashMap<String, (Option<Vec<u8>>, Vec<(String, Option<Vec<u8>>)>)> =
         HashMap::new();
     while let Some(event) = stream.next().await {
         match event.expect("no scan failure") {
             ScanEvent::Record(record) => {
-                let key = String::from_utf8_lossy(record.key.as_deref().unwrap_or_default())
-                    .into_owned();
+                let key =
+                    String::from_utf8_lossy(record.key.as_deref().unwrap_or_default()).into_owned();
                 by_key.insert(
                     key,
                     (
@@ -138,10 +142,16 @@ async fn produce_with_rdkafka_read_with_ours(compression: &str, topic: &str) {
     // A null header value is distinct from an empty one, and rdkafka can write
     // both.
     assert_eq!(headers[1].0, "empty");
-    assert!(headers[1].1.is_none(), "{compression}: null header became empty");
+    assert!(
+        headers[1].1.is_none(),
+        "{compression}: null header became empty"
+    );
 
     let (value, _) = by_key.get("tombstone").expect("tombstone");
-    assert!(value.is_none(), "{compression}: tombstone became an empty value");
+    assert!(
+        value.is_none(),
+        "{compression}: tombstone became an empty value"
+    );
 }
 
 #[tokio::test]

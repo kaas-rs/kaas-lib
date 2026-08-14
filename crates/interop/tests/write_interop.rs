@@ -145,7 +145,11 @@ async fn a_tombstone_we_write_is_a_tombstone_to_rdkafka() {
 
     let producer = Producer::new(cluster, ProducerConfig::new());
     producer
-        .send(ProducerRecord::new(TOPIC).with_partition(0).with_key("gone"))
+        .send(
+            ProducerRecord::new(TOPIC)
+                .with_partition(0)
+                .with_key("gone"),
+        )
         .await
         .expect("tombstone");
     producer
