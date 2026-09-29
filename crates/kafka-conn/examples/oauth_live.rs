@@ -11,7 +11,7 @@
 //! A token the caller already has:
 //!
 //! ```sh
-//! export KAAS_TEST_BOOTSTRAP=kafka-cluster-kafka-internal-bootstrap.strimzi.svc.cluster.local:9094
+//! export KAAS_TEST_BOOTSTRAP=kafka-cluster-kafka-bootstrap.strimzi.svc.cluster.local:9096
 //! export KAAS_TEST_CA_FILE=/tmp/ca.crt
 //! export KAAS_TEST_OAUTH_TOKEN="$(cat token.jwt)"
 //! cargo run -q -p kafka-conn --example oauth_live
