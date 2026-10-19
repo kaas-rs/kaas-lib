@@ -21,9 +21,9 @@ So a downstream build needs a C compiler (but never cmake, which is the toolchai
 
 ## Why it exists: the kaas initiative
 
-kaas-lib was written to support the **kaas initiative** — the broker (`kaas-rs/kaas`), the UI (`kaas-rs/kaas-ui`), and the tooling around them. That is its origin, not its boundary. Nothing in the public API assumes a kaas component on either end, the crates publish to crates.io for anyone, and "a kaas component does not need this" is not a reason to reject a general-purpose feature.
+kaas-lib was written to support the **kaas initiative** — the broker (`kaas-rs/kaas-broker`), the UI (`kaas-rs/kaas-ui`), and the tooling around them. That is its origin, not its boundary. Nothing in the public API assumes a kaas component on either end, the crates publish to crates.io for anyone, and "a kaas component does not need this" is not a reason to reject a general-purpose feature.
 
-**This repo is a client. `kaas` (kaas-rs/kaas) is a broker.** They speak the same protocol from opposite ends. If you are carrying context from the kaas repo, none of its architecture applies here.
+**This repo is a client. `kaas` (kaas-rs/kaas-broker) is a broker.** They speak the same protocol from opposite ends. If you are carrying context from the kaas repo, none of its architecture applies here.
 
 Do not import `kaas-codec` or reuse its wire code, and do not treat "kaas already does this" as a reason to skip work. Concretely, it doesn't:
 

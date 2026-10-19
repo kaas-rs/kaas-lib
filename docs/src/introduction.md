@@ -7,7 +7,7 @@ crate. Admin, produce and consume are all first-class, configuration is
 built by chaining `with_*` builders, and there is no librdkafka underneath.
 
 It was written to support the **kaas initiative** — the
-[kaas](https://github.com/kaas-rs/kaas) broker, kaas-ui, and the tooling
+[kaas](https://github.com/kaas-rs/kaas-broker) broker, kaas-ui, and the tooling
 around them. That is its origin rather than its boundary: the crates are
 published for any Rust program that talks to a Kafka 4.x cluster, and no
 public API assumes a kaas component on either end. The library began
@@ -25,7 +25,7 @@ the normal case, and [an entire chapter](architecture/version-negotiation.md).
 ## This is a client. `kaas` is a broker.
 
 The two projects speak the same protocol from opposite ends and share no
-code. [kaas](https://github.com/kaas-rs/kaas) decodes requests and encodes
+code. [kaas](https://github.com/kaas-rs/kaas-broker) decodes requests and encodes
 responses; kaas-lib does the mirror. Nothing in kaas's architecture carries
 over, and its codec is deliberately not a dependency here.
 

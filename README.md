@@ -129,7 +129,7 @@ every milestone is verified against a real broker in a container.
 ## Relationship to the kaas initiative
 
 kaas-lib exists to support the kaas initiative — the
-[`kaas`](https://github.com/kaas-rs/kaas) broker, kaas-ui, and the tooling
+[`kaas`](https://github.com/kaas-rs/kaas-broker) broker, kaas-ui, and the tooling
 around them. That is where it came from, not what limits it: the crates are
 published for any Rust program that speaks to a Kafka 4.x cluster, and no
 public API assumes a kaas component on either end.

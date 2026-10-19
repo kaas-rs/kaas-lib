@@ -121,7 +121,7 @@ implemented"; they are not ours to send.
 
 Stated as a non-goal because it looks like obvious reuse and is not.
 
-[kaas](https://github.com/kaas-rs/kaas) is a Kafka-compatible broker by the
+[kaas](https://github.com/kaas-rs/kaas-broker) is a Kafka-compatible broker by the
 same author, and it has a codec. Using it here would be a mistake: kaas-lib
 is the natural conformance harness for kaas, and **two implementations
 sharing a codec share its bugs**. A mutual misreading of the spec encodes and

@@ -49,7 +49,7 @@ This is the crate's most important design decision and it is not abstraction
 for its own sake.
 
 kaas-lib is the natural conformance harness for the
-[`kaas` broker](https://github.com/kaas-rs/kaas), and that only works if the
+[`kaas` broker](https://github.com/kaas-rs/kaas-broker), and that only works if the
 acceptance suite can be pointed at something other than `apache/kafka:4.3.1`
 **without touching a single test**. A hardcoded image in the fixtures would
 quietly foreclose that — not with an error, but by making the alternative
