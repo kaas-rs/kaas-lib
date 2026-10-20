@@ -39,6 +39,7 @@ pub async fn probe(target: &Target) -> Result<Report> {
         .with_context(|| format!("connecting to {bootstrap}"))?;
 
     api_versions(&connection, &mut report);
+    tls_session(&connection, &mut report);
     mtls_negative(&bootstrap, target, &mut report).await;
 
     // 2. Everything above the wire, through the routed client.
@@ -81,6 +82,24 @@ async fn mtls_negative(bootstrap: &str, target: &Target, report: &mut Report) {
             );
             report.set("mtls.negative.error", one_line(&error.to_string()));
         }
+    }
+}
+
+/// What the handshake agreed on and what the broker presented — the DER
+/// lengths only, because the chain is what a caller parses and the report is
+/// for diffing, not for reading certificates.
+fn tls_session(connection: &Connection, report: &mut Report) {
+    let Some(session) = connection.tls_session() else {
+        report.set("tls.encrypted", false);
+        return;
+    };
+    report.set("tls.encrypted", true);
+    report.set("tls.protocol", session.protocol_version());
+    report.set("tls.cipher_suite", session.cipher_suite());
+    report.set("tls.server_name", session.server_name());
+    report.set("tls.chain.len", session.peer_certificates().len());
+    for (index, cert) in session.peer_certificates().iter().enumerate() {
+        report.set(format!("tls.chain.{index}.der_bytes"), cert.len());
     }
 }
 

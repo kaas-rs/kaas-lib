@@ -59,6 +59,14 @@ async fn a_client_certificate_authenticates_against_a_broker_that_requires_one()
     conn.send(metadata_request())
         .await
         .expect("and the authenticated principal must be able to work");
+
+    // The session the handshake left behind: what a UI shows as "the broker's
+    // certificate". Verified against the overridden name, not the dialled
+    // host, and the chain is non-empty because the connection exists at all.
+    let session = conn.tls_session().expect("a TLS connection has a session");
+    assert_eq!(session.server_name(), "localhost");
+    assert!(!session.peer_certificates().is_empty());
+    assert!(session.protocol_version().starts_with("TLSv1."));
 }
 
 /// The negative half, and the reason it is worth a test of its own: a refused

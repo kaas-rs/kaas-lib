@@ -9,6 +9,16 @@ What belongs here: anything that changes what existing code *does*. A new API
 is discoverable from the docs; a changed meaning is not, and that is what a
 reader of this file is looking for.
 
+## Unreleased
+
+Additive. `Connection::tls_session` returns what the handshake agreed on — protocol
+version, cipher suite, the name the certificate was verified against — and the
+chain the broker presented, as DER, leaf first. It is per connection, like the
+version table, because each broker presents its own certificate. The chain is
+not parsed: an X.509 parser is a second ASN.1 implementation in the crate every
+other crate sits on, and a caller who wants the fields brings one. `livetest
+probe` reports the session under `tls.*`.
+
 ## 0.10.0
 
 Purely additive, which by this file's own rule means there is nothing here to

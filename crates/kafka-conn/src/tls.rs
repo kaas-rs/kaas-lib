@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig as RustlsConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
@@ -313,6 +314,97 @@ impl TlsConfig {
             ));
         }
         Ok(store)
+    }
+}
+
+/// What one TLS handshake agreed on, and what the broker presented.
+///
+/// Recorded once, at connect, and kept for the life of the [`Connection`]:
+/// a session does not renegotiate, so there is nothing to refresh. Read it
+/// with [`Connection::tls_session`].
+///
+/// This is per *connection*, for the same reason the version table is. There
+/// is no cluster certificate — every broker presents its own, the brokers in
+/// one cluster can disagree mid-rotation, and a client only ever sees the
+/// certificate on the listener it dialled.
+///
+/// The chain is DER, not parsed fields. Reading subject, SANs and validity
+/// out of it wants an X.509 parser, which is another ASN.1 implementation in
+/// the crate every other crate sits on — the same trade the PKCS#12 note at
+/// the top of this module declines. A caller who wants the fields brings the
+/// parser; the bytes are exactly what the broker sent.
+///
+/// [`Connection`]: crate::Connection
+/// [`Connection::tls_session`]: crate::Connection::tls_session
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsSession {
+    protocol_version: String,
+    cipher_suite: String,
+    server_name: String,
+    peer_certificates: Vec<Bytes>,
+}
+
+impl TlsSession {
+    /// Read the agreed parameters off a completed client handshake.
+    pub(crate) fn from_handshake(
+        connection: &rustls::ClientConnection,
+        server_name: &ServerName<'_>,
+    ) -> Self {
+        let protocol_version = match connection.protocol_version() {
+            Some(rustls::ProtocolVersion::TLSv1_2) => "TLSv1.2".to_owned(),
+            Some(rustls::ProtocolVersion::TLSv1_3) => "TLSv1.3".to_owned(),
+            Some(other) => format!("{other:?}"),
+            None => "unknown".to_owned(),
+        };
+        let cipher_suite = connection
+            .negotiated_cipher_suite()
+            .map(|suite| {
+                let suite = suite.suite();
+                suite
+                    .as_str()
+                    .map_or_else(|| format!("{suite:?}"), str::to_owned)
+            })
+            .unwrap_or_else(|| "unknown".to_owned());
+        let peer_certificates = connection
+            .peer_certificates()
+            .unwrap_or_default()
+            .iter()
+            .map(|cert| Bytes::copy_from_slice(cert.as_ref()))
+            .collect();
+        Self {
+            protocol_version,
+            cipher_suite,
+            server_name: server_name.to_str().into_owned(),
+            peer_certificates,
+        }
+    }
+
+    /// The negotiated protocol version: `TLSv1.2` or `TLSv1.3`.
+    pub fn protocol_version(&self) -> &str {
+        &self.protocol_version
+    }
+
+    /// The negotiated cipher suite, by its IANA name.
+    pub fn cipher_suite(&self) -> &str {
+        &self.cipher_suite
+    }
+
+    /// The name the certificate was verified against.
+    ///
+    /// Usually the advertised host, but not always — see
+    /// [`TlsConfig::with_server_name`] and [`TlsConfig::with_server_name_for`].
+    /// A UI comparing SANs against the advertised host gets a false alarm on
+    /// every overridden broker unless it compares against this instead.
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    /// The broker's certificate chain as it sent it, DER encoded, leaf first.
+    ///
+    /// Verified: the connection would not exist otherwise. Whether the root
+    /// is included is the broker's choice, and most do not send it.
+    pub fn peer_certificates(&self) -> &[Bytes] {
+        &self.peer_certificates
     }
 }
 

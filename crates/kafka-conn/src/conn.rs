@@ -48,6 +48,7 @@ use crate::error_code::ErrorCode;
 use crate::rpc::Rpc;
 use crate::sasl::{AuthOutcome, SaslTransport};
 use crate::stats::{ConnectionStats, StatsSnapshot};
+use crate::tls::TlsSession;
 use crate::transport::Transport;
 use crate::versions::{ApiVersions, our_range};
 
@@ -133,6 +134,7 @@ struct Inner {
     node_id: Option<i32>,
     config: ConnectionConfig,
     versions: ApiVersions,
+    tls: Option<TlsSession>,
     stats: Arc<ConnectionStats>,
     commands: mpsc::Sender<BytesMut>,
     pending: Arc<Pending>,
@@ -179,12 +181,13 @@ impl Connection {
     ) -> Result<Self> {
         let span = tracing::debug_span!("kafka.connect", peer = addr, node_id);
         async move {
-            let transport = tokio::time::timeout(config.connect_timeout, open(addr, &config))
-                .await
-                .map_err(|_| Error::Timeout {
-                    api_key: ApiKey::ApiVersions,
-                    elapsed: config.connect_timeout,
-                })??;
+            let (transport, tls) =
+                tokio::time::timeout(config.connect_timeout, open(addr, &config))
+                    .await
+                    .map_err(|_| Error::Timeout {
+                        api_key: ApiKey::ApiVersions,
+                        elapsed: config.connect_timeout,
+                    })??;
 
             let encrypted = transport.is_encrypted();
             if let Some(sasl) = &config.sasl {
@@ -212,7 +215,15 @@ impl Connection {
                 session_lifetime_ms = crate::sasl::authenticate(&sasl, &mut raw).await?;
             }
 
-            let connection = spawn(addr.to_owned(), node_id, config, versions, stats, framed);
+            let connection = spawn(
+                addr.to_owned(),
+                node_id,
+                config,
+                versions,
+                tls,
+                stats,
+                framed,
+            );
 
             if let Some(delay) = crate::sasl::reauth_delay(session_lifetime_ms) {
                 connection.spawn_reauth(delay);
@@ -373,6 +384,12 @@ impl Connection {
             .and_then(|e| e.negotiated())
     }
 
+    /// What the TLS handshake agreed on and the certificate chain the broker
+    /// presented. `None` on a plaintext connection.
+    pub fn tls_session(&self) -> Option<&TlsSession> {
+        self.inner.tls.as_ref()
+    }
+
     /// Traffic counters for this connection.
     pub fn stats(&self) -> &Arc<ConnectionStats> {
         &self.inner.stats
@@ -459,7 +476,11 @@ impl Connection {
 }
 
 /// Open the socket and, if configured, wrap it in TLS.
-async fn open(addr: &str, config: &ConnectionConfig) -> Result<Transport> {
+///
+/// The session is read here rather than off the [`Transport`] later because
+/// the actor splits the stream, and after that nothing can reach rustls'
+/// connection state.
+async fn open(addr: &str, config: &ConnectionConfig) -> Result<(Transport, Option<TlsSession>)> {
     let tcp = TcpStream::connect(addr)
         .await
         .map_err(|e| Error::transport("connecting to broker", e))?;
@@ -467,15 +488,23 @@ async fn open(addr: &str, config: &ConnectionConfig) -> Result<Transport> {
         .map_err(|e| Error::transport("disabling Nagle", e))?;
 
     match &config.tls {
-        None => Ok(Transport::Plain(tcp)),
+        None => Ok((Transport::Plain(tcp), None)),
         Some(tls) => {
             let host = host_of(addr);
             let connector = tls.connector()?;
             let server_name = tls.server_name(host)?;
-            let stream = connector.connect(server_name, tcp).await.map_err(|e| {
-                crate::tls::handshake_error("TLS handshake", e, tls.client_certificate.is_some())
-            })?;
-            Ok(Transport::Tls(Box::new(stream)))
+            let stream = connector
+                .connect(server_name.clone(), tcp)
+                .await
+                .map_err(|e| {
+                    crate::tls::handshake_error(
+                        "TLS handshake",
+                        e,
+                        tls.client_certificate.is_some(),
+                    )
+                })?;
+            let session = TlsSession::from_handshake(stream.get_ref().1, &server_name);
+            Ok((Transport::Tls(Box::new(stream)), Some(session)))
         }
     }
 }
@@ -506,6 +535,7 @@ fn spawn(
     node_id: Option<i32>,
     config: ConnectionConfig,
     versions: ApiVersions,
+    tls: Option<TlsSession>,
     stats: Arc<ConnectionStats>,
     framed: Framed<Transport, tokio_util::codec::LengthDelimitedCodec>,
 ) -> Connection {
@@ -597,6 +627,7 @@ fn spawn(
             node_id,
             config,
             versions,
+            tls,
             stats,
             commands: commands_tx,
             pending,
