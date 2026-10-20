@@ -9,7 +9,7 @@ What belongs here: anything that changes what existing code *does*. A new API
 is discoverable from the docs; a changed meaning is not, and that is what a
 reader of this file is looking for.
 
-## Unreleased
+## 0.11.0
 
 Additive. `Connection::tls_session` returns what the handshake agreed on — protocol
 version, cipher suite, the name the certificate was verified against — and the
