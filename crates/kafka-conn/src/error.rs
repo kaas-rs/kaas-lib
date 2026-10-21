@@ -92,9 +92,11 @@ pub enum Error {
         source: Box<dyn StdError + Send + Sync>,
     },
 
-    /// A read-only client refused a mutating request before touching the
-    /// network. See [`ApiKey::is_mutating`].
-    #[error("client is read-only and {api_key} mutates cluster state")]
+    /// A mutating request refused before touching the network: the client is
+    /// read-only, or its mutation ceiling or a scoped handle does not admit
+    /// this key. See [`ApiKey::is_mutating`] and
+    /// [`ConnectionConfig::with_allowed_mutations`](crate::ConnectionConfig::with_allowed_mutations).
+    #[error("{api_key} mutates cluster state, and this client may not send it")]
     ReadOnly {
         /// The key that was refused.
         api_key: ApiKey,

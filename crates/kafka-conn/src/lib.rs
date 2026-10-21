@@ -62,7 +62,7 @@ mod tls;
 mod transport;
 mod versions;
 
-pub use api_key::ApiKey;
+pub use api_key::{ApiKey, ApiKeySet};
 pub use codec::DEFAULT_MAX_FRAME_BYTES;
 pub use config::ConnectionConfig;
 pub use conn::Connection;

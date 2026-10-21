@@ -152,6 +152,7 @@ impl std::fmt::Debug for Inner {
             .field("peer", &self.peer)
             .field("node_id", &self.node_id)
             .field("read_only", &self.config.read_only)
+            .field("allowed_mutations", &self.config.allowed_mutations)
             .field("stats", &self.stats.snapshot())
             .finish()
     }
@@ -266,7 +267,9 @@ impl Connection {
 
         // Before the socket, before the semaphore, before anything. M8's
         // property is that a read-only client never emits a mutating byte.
-        if self.inner.config.read_only && api_key.is_mutating() {
+        // The ceiling is the same check, finer: `permits` refuses what
+        // `read_only` refuses, and every mutation an allowed set omits.
+        if !self.inner.config.permits(api_key) {
             return Err(Error::ReadOnly { api_key });
         }
 

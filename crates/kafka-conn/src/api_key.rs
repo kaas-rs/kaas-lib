@@ -17,6 +17,7 @@
 //! schemas). Regenerate by hand on an upstream bump — the list is short and
 //! append-only.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 /// A Kafka protocol API key.
@@ -655,6 +656,79 @@ const KNOWN: [ApiKey; 87] = [
     ApiKey::DeleteShareGroupOffsets,
 ];
 
+/// A set of api keys: what a mutation ceiling admits.
+///
+/// Ordered by code, so a set renders the same way every time it is printed.
+/// Built by collecting keys, or from one of `kafka_admin::ops`' per-operation
+/// slices. An empty set admits no mutation at all — the read-only ceiling.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct ApiKeySet {
+    codes: BTreeSet<i16>,
+}
+
+impl ApiKeySet {
+    /// The empty set: admits no mutation.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether `key` is in the set.
+    pub fn contains(&self, key: ApiKey) -> bool {
+        self.codes.contains(&key.code())
+    }
+
+    /// The keys in both sets — how a narrower scope is laid over a ceiling
+    /// without ever widening it.
+    #[must_use]
+    pub fn intersection(&self, other: &ApiKeySet) -> ApiKeySet {
+        ApiKeySet {
+            codes: self.codes.intersection(&other.codes).copied().collect(),
+        }
+    }
+
+    /// Whether the set admits nothing.
+    pub fn is_empty(&self) -> bool {
+        self.codes.is_empty()
+    }
+
+    /// How many keys the set holds.
+    pub fn len(&self) -> usize {
+        self.codes.len()
+    }
+
+    /// The keys, in code order.
+    pub fn iter(&self) -> impl Iterator<Item = ApiKey> + '_ {
+        self.codes.iter().map(|code| ApiKey::from_code(*code))
+    }
+}
+
+impl FromIterator<ApiKey> for ApiKeySet {
+    fn from_iter<I: IntoIterator<Item = ApiKey>>(keys: I) -> Self {
+        ApiKeySet {
+            codes: keys.into_iter().map(ApiKey::code).collect(),
+        }
+    }
+}
+
+impl<const N: usize> From<[ApiKey; N]> for ApiKeySet {
+    fn from(keys: [ApiKey; N]) -> Self {
+        keys.into_iter().collect()
+    }
+}
+
+impl From<&[ApiKey]> for ApiKeySet {
+    fn from(keys: &[ApiKey]) -> Self {
+        keys.iter().copied().collect()
+    }
+}
+
+impl fmt::Display for ApiKeySet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<String> = self.iter().map(|key| key.to_string()).collect();
+        write!(f, "{{{}}}", names.join(", "))
+    }
+}
+
 #[cfg(test)]
 mod phase_two_gate_tests {
     use super::*;
@@ -738,5 +812,32 @@ mod phase_two_gate_tests {
             "most of the protocol mutates; a classification where reads \
              dominate means the wildcard arm has been flipped to false"
         );
+    }
+
+    #[test]
+    fn a_set_narrows_and_never_widens() {
+        let ceiling = ApiKeySet::from([ApiKey::CreateTopics, ApiKey::OffsetCommit]);
+        let scope = ApiKeySet::from([ApiKey::OffsetCommit, ApiKey::DeleteTopics]);
+        let both = ceiling.intersection(&scope);
+        assert!(both.contains(ApiKey::OffsetCommit));
+        assert!(
+            !both.contains(ApiKey::DeleteTopics),
+            "a scope cannot add to its ceiling"
+        );
+        assert!(
+            !both.contains(ApiKey::CreateTopics),
+            "nor keep what it omits"
+        );
+        assert_eq!(both.len(), 1);
+        assert!(ApiKeySet::new().is_empty());
+    }
+
+    #[test]
+    fn a_set_holds_keys_this_build_cannot_name() {
+        // A key from a newer Kafka survives a round trip through the set,
+        // as it does through the version table.
+        let set: ApiKeySet = [ApiKey::from_code(999)].into_iter().collect();
+        assert!(set.contains(ApiKey::Unknown(999)));
+        assert_eq!(set.to_string(), "{Unknown(999)}");
     }
 }

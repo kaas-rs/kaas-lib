@@ -41,6 +41,35 @@ impl Admin {
         Self::connect(bootstrap, config).await
     }
 
+    /// Connect a client whose connections admit only these mutating keys.
+    ///
+    /// The ceiling sits where [`connect_read_only`](Self::connect_read_only)'s
+    /// does — in the connection, before the socket — and refuses every
+    /// mutation it does not name, including ones a future release adds. Build
+    /// it from [`ops`](crate::ops): `connect_with_mutations(bootstrap, config,
+    /// ops::RESET_OFFSETS.iter().copied())`. An empty set is read-only.
+    pub async fn connect_with_mutations(
+        bootstrap: impl IntoIterator<Item = impl Into<String>>,
+        mut config: ClusterConfig,
+        keys: impl IntoIterator<Item = ApiKey>,
+    ) -> Result<Self> {
+        config.connection = config.connection.with_allowed_mutations(keys);
+        Self::connect(bootstrap, config).await
+    }
+
+    /// A handle over the same pool that may send only these mutating keys.
+    ///
+    /// For least privilege per operation: a caller about to reset a group's
+    /// offsets takes `admin.scoped(ops::RESET_OFFSETS.iter().copied())` and
+    /// that handle cannot delete a topic, whatever the code around it does.
+    /// Narrows and never widens — the connection's ceiling still applies
+    /// beneath it, and scoping a scoped handle intersects. See
+    /// [`Cluster::scoped`](kafka_meta::Cluster::scoped).
+    #[must_use]
+    pub fn scoped(&self, keys: impl IntoIterator<Item = ApiKey>) -> Self {
+        Self::new(self.cluster.scoped(keys))
+    }
+
     /// The underlying cluster handle.
     pub fn cluster(&self) -> &Cluster {
         &self.cluster

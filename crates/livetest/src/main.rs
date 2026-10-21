@@ -19,6 +19,7 @@
     )
 )]
 
+mod gate;
 mod principal;
 mod probe;
 mod produce;
@@ -62,6 +63,7 @@ async fn main() -> Result<()> {
             principal::principal(&target, &rest).await?,
         )),
         "smoke" => emit(smoke::smoke(&target).await?),
+        "gate" => emit(gate::gate(&target).await?),
         "produce" => {
             let options = produce::Options::parse(&rest)?;
             emit(produce::produce(&target, &options).await?)
@@ -102,7 +104,7 @@ fn print_help() {
         "livetest — run kaas-lib against a real Kafka cluster
 
 USAGE
-    livetest <probe|principal|smoke|produce|read|sweep> [options]
+    livetest <probe|principal|gate|smoke|produce|read|sweep> [options]
 
 COMMANDS
     probe    Read-only inventory and negotiated version table. Touches
@@ -113,6 +115,10 @@ COMMANDS
              the cluster's stored credentials say about a principal. Names
              principals as arguments (`User:alice`, or a bare name);
              defaults to the anonymous principal.
+    gate     The mutation ceiling and scoped handles: a connection admitting
+             only CreateTopics, and scopes laid over it. Changes nothing — the
+             one admitted write is validate_only, every other is refused
+             before it is sent.
     smoke    Admin round trip: create, describe, alter, verify, delete. Creates
              only prefixed resources and removes them again.
     produce  Write path round trip: produce with every codec, an explicit

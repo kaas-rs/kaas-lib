@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::api_key::{ApiKey, ApiKeySet};
 use crate::codec::DEFAULT_MAX_FRAME_BYTES;
 use crate::sasl::SaslConfig;
 use crate::tls::TlsConfig;
@@ -38,6 +39,15 @@ pub struct ConnectionConfig {
     /// not over the admin method surface, so a new admin method cannot bypass
     /// it by construction.
     pub read_only: bool,
+    /// Admit only these mutating api keys, refusing every other one before
+    /// opening a socket — a ceiling finer than [`read_only`](Self::read_only).
+    ///
+    /// `None` admits every mutation (unless `read_only` is set); an empty set
+    /// admits none, which is `read_only` by another spelling. Enforced at the
+    /// same place and in the same way: in `Connection::send`, against
+    /// [`crate::ApiKey::is_mutating`], so a key this build cannot name is
+    /// mutating and refused unless the set names it.
+    pub allowed_mutations: Option<ApiKeySet>,
     /// TLS settings, or `None` for a plaintext socket.
     pub tls: Option<Arc<TlsConfig>>,
     /// SASL settings, or `None` for an unauthenticated connection.
@@ -55,6 +65,7 @@ impl Default for ConnectionConfig {
             max_in_flight: 5,
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
             read_only: false,
+            allowed_mutations: None,
             tls: None,
             sasl: None,
         }
@@ -102,6 +113,33 @@ impl ConnectionConfig {
         self
     }
 
+    /// Admit only these mutating api keys; every other mutation is refused
+    /// before a socket is opened.
+    ///
+    /// Replaces any set given before. Reads are never affected, and
+    /// [`read_only`](Self::read_only) still refuses everything that mutates.
+    #[must_use]
+    pub fn with_allowed_mutations(mut self, keys: impl IntoIterator<Item = ApiKey>) -> Self {
+        self.allowed_mutations = Some(keys.into_iter().collect());
+        self
+    }
+
+    /// Whether a request with this api key may be sent at all.
+    ///
+    /// The whole gate in one predicate: a key that does not mutate always
+    /// may; one that does may unless `read_only` is set or a ceiling omits it.
+    pub fn permits(&self, api_key: ApiKey) -> bool {
+        if !api_key.is_mutating() {
+            return true;
+        }
+        if self.read_only {
+            return false;
+        }
+        self.allowed_mutations
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(api_key))
+    }
+
     /// Connect over TLS.
     #[must_use]
     pub fn with_tls(mut self, tls: TlsConfig) -> Self {
@@ -126,6 +164,31 @@ mod tests {
         let cfg = ConnectionConfig::new();
         assert!(!cfg.read_only);
         assert_eq!(cfg.max_in_flight, 5);
+    }
+
+    #[test]
+    fn a_ceiling_admits_its_keys_and_every_read() {
+        let cfg = ConnectionConfig::new().with_allowed_mutations([ApiKey::OffsetCommit]);
+        assert!(cfg.permits(ApiKey::OffsetCommit));
+        assert!(!cfg.permits(ApiKey::DeleteTopics));
+        assert!(cfg.permits(ApiKey::Fetch), "reads are never gated");
+        assert!(cfg.permits(ApiKey::Metadata));
+        // A key this build cannot name is mutating, and refused unless named.
+        assert!(!cfg.permits(ApiKey::Unknown(999)));
+    }
+
+    #[test]
+    fn read_only_outranks_a_ceiling_and_no_ceiling_admits_everything() {
+        let both = ConnectionConfig::new()
+            .with_allowed_mutations([ApiKey::OffsetCommit])
+            .read_only();
+        assert!(!both.permits(ApiKey::OffsetCommit));
+        assert!(ConnectionConfig::new().permits(ApiKey::DeleteTopics));
+        let empty = ConnectionConfig::new().with_allowed_mutations([]);
+        assert!(
+            !empty.permits(ApiKey::CreateTopics),
+            "an empty ceiling is read-only"
+        );
     }
 
     #[test]

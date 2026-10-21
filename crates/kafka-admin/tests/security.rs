@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use kafka_admin::{
     AclBinding, AclFilter, AclOperation, AclResourceType, Admin, ClusterConfig, ElectionType,
-    NewTopic, PartitionReassignment, QuotaEntity, QuotaFilter, ScramMechanism, ScramUpsert,
+    NewTopic, PartitionReassignment, QuotaEntity, QuotaFilter, ScramMechanism, ScramUpsert, ops,
 };
 use kafka_conn::{ApiKey, Connection, ConnectionConfig, Error};
 use testkit::{BrokerConfig, Cluster as _};
@@ -409,4 +409,86 @@ async fn a_read_only_admin_client_can_still_read() {
 
     let listed = writer.list_topics().await.unwrap();
     assert!(!listed.contains(&"should-not-exist".to_owned()));
+}
+
+/// Whether a per-item admin call was refused by a gate — as a whole, or item
+/// by item, which is how a per-item method reports a refusal it hit late.
+fn refused<T: std::fmt::Debug>(
+    outcome: &kafka_admin::Result<Vec<(String, kafka_admin::Result<T>)>>,
+) -> bool {
+    match outcome {
+        Err(Error::ReadOnly { .. }) => true,
+        Ok(items) => {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .all(|(_, item)| matches!(item, Err(Error::ReadOnly { .. })))
+        }
+        Err(_) => false,
+    }
+}
+
+#[testkit::integration_test]
+async fn a_mutation_ceiling_admits_its_keys_and_refuses_the_rest() {
+    let fixture = testkit::single_broker().await.unwrap();
+    let admin = Admin::connect_with_mutations(
+        fixture.bootstrap().to_vec(),
+        ClusterConfig::default(),
+        ops::CREATE_TOPICS.iter().copied(),
+    )
+    .await
+    .unwrap();
+
+    // CreateTopics is admitted: the broker answers the validation.
+    let validated = admin
+        .validate_topics([NewTopic::new("ceiling-ok", 1, 1)])
+        .await
+        .unwrap();
+    assert!(validated[0].1.is_ok(), "{validated:?}");
+
+    // DeleteTopics is not: refused before the socket, like read-only.
+    let deleted = admin.delete_topics(["ceiling-ok"]).await;
+    assert!(refused(&deleted), "{deleted:?}");
+
+    // And reads are untouched.
+    assert!(admin.list_topics().await.is_ok());
+}
+
+#[testkit::integration_test]
+async fn a_scoped_admin_cannot_reach_past_its_scope() {
+    let fixture = testkit::single_broker().await.unwrap();
+    let admin = Admin::connect(fixture.bootstrap().to_vec(), ClusterConfig::default())
+        .await
+        .unwrap();
+    admin
+        .create_topics([NewTopic::new("scoped-victim", 1, 1)])
+        .await
+        .unwrap();
+
+    // Scoped to resetting offsets, it cannot delete a topic...
+    let resetter = admin.scoped(ops::RESET_OFFSETS.iter().copied());
+    let deleted = resetter.delete_topics(["scoped-victim"]).await;
+    assert!(refused(&deleted), "{deleted:?}");
+    assert!(
+        admin
+            .list_topics()
+            .await
+            .unwrap()
+            .contains(&"scoped-victim".to_owned())
+    );
+
+    // ...one scoped to creating topics can validate one...
+    let creator = admin.scoped(ops::CREATE_TOPICS.iter().copied());
+    let validated = creator
+        .validate_topics([NewTopic::new("scoped-new", 1, 1)])
+        .await
+        .unwrap();
+    assert!(validated[0].1.is_ok(), "{validated:?}");
+
+    // ...and scoping again intersects: nothing is left to create with.
+    let neither = creator.scoped(ops::DELETE_TOPICS.iter().copied());
+    let validated = neither
+        .validate_topics([NewTopic::new("scoped-new", 1, 1)])
+        .await;
+    assert!(refused(&validated), "{validated:?}");
 }

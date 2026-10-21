@@ -18,7 +18,7 @@ use arc_swap::ArcSwap;
 use kafka_conn::protocol::StrBytes;
 use kafka_conn::protocol::messages::metadata_request::MetadataRequestTopic;
 use kafka_conn::protocol::messages::{FindCoordinatorRequest, MetadataRequest, TopicName};
-use kafka_conn::{ApiKey, Connection, ConnectionConfig, Error, ErrorCode, Result, Rpc};
+use kafka_conn::{ApiKey, ApiKeySet, Connection, ConnectionConfig, Error, ErrorCode, Result, Rpc};
 
 use crate::pool::BrokerPool;
 use crate::retry::RetryPolicy;
@@ -58,9 +58,15 @@ impl Default for ClusterConfig {
 }
 
 /// A connected Kafka cluster: metadata, routing, connections and retries.
+///
+/// Clones share everything — the pool, the metadata, the coordinator cache —
+/// except a [scope](Cluster::scoped), which belongs to the handle.
 #[derive(Debug, Clone)]
 pub struct Cluster {
     inner: Arc<Inner>,
+    /// The mutating api keys this handle may send, where it is narrower than
+    /// the connections' own ceiling. `None` defers to the connections.
+    scope: Option<ApiKeySet>,
 }
 
 #[derive(Debug)]
@@ -79,6 +85,7 @@ impl Cluster {
     ) -> Result<Self> {
         let pool = BrokerPool::new(bootstrap, config.connection.clone(), config.retry);
         let cluster = Cluster {
+            scope: None,
             inner: Arc::new(Inner {
                 pool,
                 config,
@@ -89,6 +96,44 @@ impl Cluster {
         cluster.refresh().await?;
         cluster.spawn_refresh_task();
         Ok(cluster)
+    }
+
+    /// A handle over the same pool that may send only these mutating keys.
+    ///
+    /// Narrows and never widens: the result admits the keys in both this
+    /// handle's scope and `keys`, and the connections' own ceiling still
+    /// applies beneath it. Checked in the dispatch every `send_*` goes
+    /// through, before a broker is resolved, and refused as
+    /// [`Error::ReadOnly`] — the same answer the connection gate gives, one
+    /// layer up. Reads are never affected.
+    ///
+    /// The point is per-operation least privilege over one shared pool: a
+    /// caller holding a handle scoped to `OffsetCommit` cannot send
+    /// `DeleteTopics` through it, whatever its code does.
+    #[must_use]
+    pub fn scoped(&self, keys: impl IntoIterator<Item = ApiKey>) -> Cluster {
+        let keys: ApiKeySet = keys.into_iter().collect();
+        Cluster {
+            inner: Arc::clone(&self.inner),
+            scope: Some(match &self.scope {
+                Some(current) => current.intersection(&keys),
+                None => keys,
+            }),
+        }
+    }
+
+    /// The scope this handle sends within, where it has one.
+    pub fn scope(&self) -> Option<&ApiKeySet> {
+        self.scope.as_ref()
+    }
+
+    /// Whether this handle's scope admits a request with this api key.
+    fn in_scope(&self, api_key: ApiKey) -> bool {
+        !api_key.is_mutating()
+            || self
+                .scope
+                .as_ref()
+                .is_none_or(|scope| scope.contains(api_key))
     }
 
     /// The current snapshot. Never blocks.
@@ -423,6 +468,13 @@ impl Cluster {
         request: R,
         deadline: Option<Instant>,
     ) -> Result<R::Response> {
+        // Before a broker is resolved, let alone dialled: a scoped handle
+        // that may not send this key never gets as far as a connection.
+        if !self.in_scope(R::API_KEY) {
+            return Err(Error::ReadOnly {
+                api_key: R::API_KEY,
+            });
+        }
         let policy = self.inner.config.retry;
         let started = Instant::now();
         let mut attempt = 1;
@@ -537,7 +589,7 @@ impl Cluster {
                 let Some(inner) = Weak::upgrade(&weak) else {
                     return;
                 };
-                let cluster = Cluster { inner };
+                let cluster = Cluster { inner, scope: None };
                 if let Err(error) = cluster.refresh().await {
                     tracing::debug!(%error, "background metadata refresh failed");
                 }
@@ -733,5 +785,58 @@ mod tests {
             routing(ApiKey::DescribeLogDirs),
             Routing::Specific(BrokerSelector::Caller)
         );
+    }
+
+    /// A cluster handle over a pool nobody is listening on. Nothing here
+    /// connects until a request is sent.
+    fn unconnected() -> Cluster {
+        let config = ClusterConfig::default();
+        Cluster {
+            scope: None,
+            inner: Arc::new(Inner {
+                pool: BrokerPool::new(["127.0.0.1:1"], config.connection.clone(), config.retry),
+                config,
+                snapshot: ArcSwap::from_pointee(MetadataSnapshot::empty()),
+                coordinators: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_scope_narrows_and_never_widens() {
+        let cluster = unconnected();
+        assert!(cluster.scope().is_none());
+        let reset = cluster.scoped([ApiKey::OffsetCommit, ApiKey::DescribeGroups]);
+        assert!(reset.in_scope(ApiKey::OffsetCommit));
+        assert!(!reset.in_scope(ApiKey::DeleteTopics));
+        assert!(reset.in_scope(ApiKey::Metadata), "reads are never scoped");
+        // A second scope is laid over the first: it cannot add DeleteTopics.
+        let narrower = reset.scoped([ApiKey::DeleteTopics, ApiKey::OffsetCommit]);
+        assert!(narrower.in_scope(ApiKey::OffsetCommit));
+        assert!(!narrower.in_scope(ApiKey::DeleteTopics));
+        // And the original handle is untouched.
+        assert!(cluster.in_scope(ApiKey::DeleteTopics));
+    }
+
+    #[tokio::test]
+    async fn an_out_of_scope_request_is_refused_before_a_broker_is_resolved() {
+        use kafka_conn::protocol::messages::DeleteTopicsRequest;
+
+        let scoped = unconnected().scoped([ApiKey::OffsetCommit]);
+        let started = std::time::Instant::now();
+        let refused = scoped
+            .send_to_controller(DeleteTopicsRequest::default())
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(Error::ReadOnly {
+                    api_key: ApiKey::DeleteTopics
+                })
+            ),
+            "{refused:?}"
+        );
+        // Refused at once: no controller lookup, no dial to the dead address.
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
     }
 }

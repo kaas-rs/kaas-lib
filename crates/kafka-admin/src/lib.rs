@@ -48,6 +48,7 @@ mod cluster_info;
 mod configs;
 mod groups;
 mod offsets;
+pub mod ops;
 mod partitions;
 mod principal;
 mod reask;
@@ -82,5 +83,5 @@ pub use types::{
     OffsetSpec, PartitionSize, PerItem, ReplicaSize, TopicSize, errs, oks,
 };
 
-pub use kafka_conn::{ApiKey, Error, ErrorCode, Result};
+pub use kafka_conn::{ApiKey, ApiKeySet, Error, ErrorCode, Result};
 pub use kafka_meta::{Cluster, ClusterConfig, TopicInfo};

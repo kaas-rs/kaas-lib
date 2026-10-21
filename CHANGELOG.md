@@ -9,6 +9,30 @@ What belongs here: anything that changes what existing code *does*. A new API
 is discoverable from the docs; a changed meaning is not, and that is what a
 reader of this file is looking for.
 
+## Unreleased
+
+Additive. A mutation ceiling finer than read-only, at two layers:
+
+- `ConnectionConfig::with_allowed_mutations(keys)` admits only the named
+  mutating api keys and refuses every other one in `Connection::send`, before
+  the socket — the same place and the same deny-by-default rule as
+  `read_only`, which still outranks it. `Admin::connect_with_mutations` is the
+  admin spelling. `ConnectionConfig::permits(key)` is the whole predicate.
+- `Cluster::scoped(keys)` and `Admin::scoped(keys)` hand out a handle over the
+  same pool that may send only those mutating keys, checked in the dispatch
+  every `send_*` goes through. A scope narrows and never widens: it
+  intersects with any scope before it, and the connection's ceiling still
+  applies beneath it.
+- `kafka_admin::ops` names the mutating keys each admin operation sends —
+  `ops::RESET_OFFSETS`, `ops::CREATE_TOPICS`, … — so a caller builds a ceiling
+  or a scope without knowing the protocol.
+- `ApiKeySet`, in `kafka-conn` and re-exported by `kafka-admin`.
+
+One changed string: `Error::ReadOnly`'s message no longer says the client *is*
+read-only, because a ceiling or a scope refuses the same way. The variant and
+its field are unchanged. `livetest gate` checks both layers against a live
+cluster and changes nothing on it.
+
 ## 0.11.0
 
 Additive. `Connection::tls_session` returns what the handshake agreed on — protocol
