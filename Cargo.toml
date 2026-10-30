@@ -130,7 +130,7 @@ form_urlencoded = "1.2"
 uuid   = "1"
 flate2 = "1.1"
 lz4    = "1.28"
-zstd   = "0.13"
+zstd   = "0.14"
 
 # errors / observability
 thiserror          = "2.0"
