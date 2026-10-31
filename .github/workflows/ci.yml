@@ -59,7 +59,7 @@ jobs:
             gcc libc6-dev pkg-config ca-certificates
           echo "cc → $(command -v cc || echo MISSING)"
 
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Before the toolchain, because it is seconds and catches a class of bug
       # nothing else here can. A workflow expression error is not a runtime
@@ -78,12 +78,12 @@ jobs:
           /tmp/actionlint -color
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # The ARC runners intermittently start a job with the toolchain
       # installed but not on PATH: `cargo: command not found` from a step whose
       # "Install Rust toolchain" reported success. It has hit `interop` and
@@ -190,14 +190,14 @@ jobs:
             gcc libc6-dev pkg-config ca-certificates
           echo "cc → $(command -v cc || echo MISSING)"
 
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # The ARC runners intermittently start a job with the toolchain
       # installed but not on PATH: `cargo: command not found` from a step whose
       # "Install Rust toolchain" reported success. It has hit `interop` and
@@ -264,14 +264,14 @@ jobs:
           echo "cc  → $(command -v cc || echo MISSING)"
           echo "c++ → $(command -v c++ || echo MISSING)"
 
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install nightly
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: nightly
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # The ARC runners intermittently start a job with the toolchain
       # installed but not on PATH: `cargo: command not found` from a step whose
       # "Install Rust toolchain" reported success. It has hit `interop` and
@@ -327,7 +327,7 @@ jobs:
       MDBOOK_MERMAID_VERSION: v0.16.2
       MDBOOK_LINKCHECK_VERSION: v0.7.7
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install mdbook + mdbook-mermaid + mdbook-linkcheck (pinned)
         # Pinned release binaries via curl rather than `cargo install`:
@@ -386,14 +386,14 @@ jobs:
           docker info || true
           exit 1
 
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain (honours rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # The ARC runners intermittently start a job with the toolchain
       # installed but not on PATH: `cargo: command not found` from a step whose
       # "Install Rust toolchain" reported success. It has hit `interop` and
