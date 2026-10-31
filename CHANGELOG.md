@@ -9,7 +9,7 @@ What belongs here: anything that changes what existing code *does*. A new API
 is discoverable from the docs; a changed meaning is not, and that is what a
 reader of this file is looking for.
 
-## Unreleased
+## 0.12.0
 
 **Breaking, at compile time only.** The last 32 setters without the `with_`
 prefix have it now, so every optional setting in the workspace is spelled
