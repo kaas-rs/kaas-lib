@@ -8,9 +8,10 @@
 # security decisions taken one advisory at a time (#36), not a monthly sweep.
 # The audit workflow (cargo-deny) is what notices them.
 #
-# Two pins Dependabot cannot see: `dtolnay/rust-toolchain`, which has no
-# release tags (the `# master` comment is a branch), and the cargo-deny
-# binary audit.yml downloads by URL. Both are bumped by hand.
+# `dtolnay/rust-toolchain` has no release tags, but Dependabot follows the
+# `# master` comment as a branch pin and moves the SHA to master's head (#37
+# did). The one pin it cannot see is the cargo-deny binary audit.yml
+# downloads by URL; that is bumped by hand.
 #
 # Dependabot PRs run CI on GitHub-hosted runners, not ARC — see the routing
 # comment at the top of ci.yml.
