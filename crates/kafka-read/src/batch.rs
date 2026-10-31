@@ -508,14 +508,34 @@ mod tests {
 
     fn encode(records: &[kafka_protocol::records::Record], compression: Compression) -> Bytes {
         let mut buf = BytesMut::new();
-        RecordBatchEncoder::encode(
-            &mut buf,
-            records.iter(),
-            &RecordEncodeOptions {
-                version: 2,
-                compression,
-            },
-        )
+        let options = RecordEncodeOptions {
+            version: 2,
+            compression,
+        };
+        // The workspace builds `kafka-protocol` without its zstd feature (see
+        // the root manifest), so a zstd batch is compressed here, the way
+        // `kafka-produce` writes one.
+        if compression == Compression::Zstd {
+            RecordBatchEncoder::encode_with_custom_compression(
+                &mut buf,
+                records.iter(),
+                &options,
+                Some(
+                    |records: &mut BytesMut,
+                     out: &mut BytesMut,
+                     _: Compression|
+                     -> anyhow::Result<()> {
+                        out.put_slice(&crate::decompress::compress_for_test(
+                            records,
+                            Compression::Zstd,
+                        ));
+                        Ok(())
+                    },
+                ),
+            )
+        } else {
+            RecordBatchEncoder::encode(&mut buf, records.iter(), &options)
+        }
         .expect("encodes");
         buf.freeze()
     }

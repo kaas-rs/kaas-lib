@@ -154,8 +154,8 @@ main reason to reach for this library over
 and is the right answer when maturity matters more than toolchain.
 
 One honest exception, because it would be easy to imply otherwise: two
-compression codecs reach C. `kafka-protocol`'s `lz4` and `zstd` features pull
-`lz4-sys` and `zstd-sys`, which `cc` builds from source, so a downstream
+compression codecs reach C. `lz4` and `zstd` pull `lz4-sys` and `zstd-sys`,
+which `cc` builds from source, so a downstream
 build wants a C compiler for those. `gzip` (miniz_oxide) and `snappy` (snap)
 are pure Rust. Closing the gap would mean dropping codecs that real clusters
 use — zstd especially — or hand-rolling compression, and hand-rolling wire

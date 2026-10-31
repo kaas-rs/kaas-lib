@@ -33,6 +33,14 @@ read-only, because a ceiling or a scope refuses the same way. The variant and
 its field are unchanged. `livetest gate` checks both layers against a live
 cluster and changes nothing on it.
 
+Dependencies, for advisories (#36). The floors are now `tokio` 1.53.3,
+`rustls` 0.23.46 and `zstd` 0.14.3, the first releases with the fixes, so a
+crate depending on this one can no longer resolve the vulnerable versions.
+And `kafka-protocol`'s `zstd` feature is off, which takes zstd 0.13 out of the
+graph: `kafka-produce` now compresses zstd batches itself, with the `zstd`
+crate `kafka-read` already decompressed with, at the same level 3 upstream
+used. Nothing a caller configures changes.
+
 ## 0.11.0
 
 Additive. `Connection::tls_session` returns what the handshake agreed on — protocol

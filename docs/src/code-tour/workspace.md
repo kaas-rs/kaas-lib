@@ -98,7 +98,7 @@ is the easiest one to write by accident.
 ```toml
 kafka-protocol = { version = "0.17", default-features = false,
                    features = ["client", "messages_enums",
-                               "gzip", "snappy", "lz4", "zstd"] }
+                               "gzip", "snappy", "lz4"] }
 ```
 
 Every part of that line is deliberate:
@@ -109,8 +109,13 @@ Every part of that line is deliberate:
 - **`messages_enums` is not in `default`.** We need it: `RequestKind` and
   `ResponseKind` are what the read-only gate and the generic dispatch layer
   match on.
-- **The four compression features are already in `default`.** Naming them
+- **The three compression features are already in `default`.** Naming them
   matters only because defaults are off.
+- **`zstd` is left out on purpose.** Upstream builds it on `zstd` 0.13, whose
+  advisories are fixed only on 0.14, so both directions use the workspace's
+  own `zstd` crate through upstream's custom-compression hooks:
+  `decode_with_custom_compression` in `kafka-read`,
+  `encode_with_custom_compression` in `kafka-produce`.
 
 It is declared once in `[workspace.dependencies]` so an upstream bump is a
 one-line change rather than a five-manifest change.

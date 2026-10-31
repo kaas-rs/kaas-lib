@@ -5,7 +5,7 @@
 //! `Produce` versions we negotiate anyway, so the fallback would be dead code
 //! that still had to be kept correct.
 
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use kafka_conn::protocol::StrBytes;
 use kafka_conn::protocol::indexmap::IndexMap;
 use kafka_conn::protocol::records::{
@@ -20,6 +20,11 @@ use crate::record::ProducerRecord;
 
 /// The record batch version. 2 is the only one we write.
 const RECORD_BATCH_V2: i8 = 2;
+
+/// The zstd level: the default of Kafka's own `compression.zstd.level`, and
+/// the level `kafka-protocol`'s compressor wrote before this crate took zstd
+/// over from it.
+const ZSTD_LEVEL: i32 = 3;
 
 impl Compression {
     fn wire(self) -> WireCompression {
@@ -103,11 +108,44 @@ pub(crate) fn encode_batch(
     };
 
     let mut buffer = BytesMut::new();
-    RecordBatchEncoder::encode(&mut buffer, wire.iter(), &options).map_err(|error| {
+    // Zstd is compressed here rather than by `kafka-protocol`, whose zstd
+    // feature the workspace leaves off: upstream builds it on zstd 0.13, and
+    // the fixes for RUSTSEC-2026-0391, -0398 and -0403 exist only on 0.14
+    // (#36). Every other codec is upstream's, unchanged.
+    let encoded = if compression == Compression::Zstd {
+        RecordBatchEncoder::encode_with_custom_compression(
+            &mut buffer,
+            wire.iter(),
+            &options,
+            Some(compress_zstd),
+        )
+    } else {
+        RecordBatchEncoder::encode(&mut buffer, wire.iter(), &options)
+    };
+    encoded.map_err(|error| {
         Error::InvalidRequest(format!("could not encode a record batch: {error}"))
     })?;
 
     Ok(buffer.freeze())
+}
+
+/// Compress a batch's encoded records with zstd, for `encode_batch`.
+///
+/// `kafka-protocol` hands over the records already encoded and writes the
+/// batch header around whatever this leaves in `out`. `encode_batch` passes it
+/// only for a zstd batch, so another codec here is a bug there — and refusing
+/// it beats writing zstd under a header that names something else.
+fn compress_zstd(
+    records: &mut BytesMut,
+    out: &mut BytesMut,
+    compression: WireCompression,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        compression == WireCompression::Zstd,
+        "the zstd compressor was handed a {compression:?} batch"
+    );
+    zstd::stream::copy_encode(&records[..], out.writer(), ZSTD_LEVEL)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -150,6 +188,26 @@ mod tests {
                 "{compression:?} produced a batch too short to be one"
             );
         }
+    }
+
+    #[test]
+    fn a_zstd_batch_holds_exactly_the_records_under_a_zstd_header() {
+        // Zstd is the one codec this crate compresses itself, so it is the
+        // one whose output nothing upstream vouches for.
+        let records: Vec<ProducerRecord> = (0..100)
+            .map(|i| ProducerRecord::new("t").with_value(format!("v{i}")))
+            .collect();
+        let zstd = encode_batch(&records, Compression::Zstd, 1_700_000_000_000, None).unwrap();
+        let plain = encode_batch(&records, Compression::None, 1_700_000_000_000, None).unwrap();
+
+        // `attributes` is a big-endian i16 at byte 21; its low three bits
+        // name the codec, and 4 is zstd.
+        assert_eq!(zstd.get(22).map(|attributes| attributes & 0x07), Some(4));
+
+        // The records follow the 61-byte header. Decompressed, they must be
+        // byte for byte what the uncompressed batch carries.
+        let decompressed = zstd::decode_all(zstd.get(61..).unwrap()).unwrap();
+        assert_eq!(Some(decompressed.as_slice()), plain.get(61..));
     }
 
     #[test]

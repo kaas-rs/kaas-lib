@@ -243,7 +243,7 @@ producer and applies to the whole batch; the consumer side needs no
 configuration, because the codec travels in the batch header.
 
 Note the build implication rather than a runtime one: `Lz4` and `Zstd` reach
-C through `kafka-protocol`'s `lz4-sys` and `zstd-sys`, so a downstream build
+C through `lz4-sys` and `zstd-sys`, so a downstream build
 wants a C compiler. `Gzip` and `Snappy` are pure Rust. This is the one place
 "no C in the dependency tree" is not literally true, and it is stated rather
 than papered over.

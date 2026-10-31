@@ -51,8 +51,8 @@ legible — `Unsupported`, `Unrecognized`, or an `UnsupportedApi` carrying both
 version ranges — rather than as a silently wrong answer.
 
 **Rust, not a binding.** There is no librdkafka here, and no cmake. One
-honest exception: the `lz4` and `zstd` codecs reach C through
-`kafka-protocol`'s `lz4-sys` and `zstd-sys`, so a build wants a C compiler
+honest exception: the `lz4` and `zstd` codecs reach C through `lz4-sys`
+and `zstd-sys`, so a build wants a C compiler
 for those two. `gzip` and `snappy` are pure Rust. That is a much smaller ask
 than a vendored broker client, but it is not zero and we would rather say so
 than imply otherwise.

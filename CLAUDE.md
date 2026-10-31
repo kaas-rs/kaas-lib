@@ -14,7 +14,7 @@ Three properties define the shape, and each is a rule rather than a description:
 
 Three cc-compiled components, not two — the audit (#34) caught this section undercounting:
 
-- `lz4` and `zstd` bind to C. Both come in through `kafka-protocol`'s feature list in the Stack section below: `lz4` → `lz4-sys`, `zstd` → `zstd-sys`, and `cc` compiles them at build time. `gzip` (flate2/miniz_oxide) and `snappy` (snap) are pure Rust.
+- `lz4` and `zstd` bind to C, and `cc` compiles both at build time. `lz4` → `lz4-sys` comes in through `kafka-protocol`'s feature list in the Stack section below; `zstd` → `zstd-sys` through our own `zstd` dependency, because upstream's zstd feature is deliberately off (see the Stack section). `gzip` (flate2/miniz_oxide) and `snappy` (snap) are pure Rust.
 - `ring`, chosen explicitly over `aws-lc-rs` as the rustls provider, is C/asm on the TLS path of every published crate. It is the *reason* the choice was made — `ring` builds with `cc` alone where `aws-lc-sys` wants cmake — so it is part of the honest count, not an exception to it.
 
 So a downstream build needs a C compiler (but never cmake, which is the toolchain line `rdkafka` crosses). Do not paper over this in docs or a README. Closing it means either dropping codecs real clusters use — zstd especially — or hand-rolling compression and crypto, and hand-rolling wire formats is precisely what this codebase does not do. Treat it as an honest blocker under rule 3, not a todo.
@@ -50,12 +50,13 @@ There is a second, stronger reason to keep the codecs separate: **kaas-lib is th
 ```toml
 kafka-protocol = { version = "0.17", default-features = false,
                    features = ["client", "messages_enums",
-                               "gzip", "snappy", "lz4", "zstd"] }
+                               "gzip", "snappy", "lz4"] }
 ```
 
 **Codec only** — we build every layer above the wire format ourselves. Note the feature selection is deliberate:
 
-- The four compression features are **already in `default`**; naming them only matters because we turn defaults off.
+- The three compression features are **already in `default`**; naming them only matters because we turn defaults off.
+- **`zstd` is not one of them, and that is not an oversight.** Upstream builds it on `zstd` 0.13, and RUSTSEC-2026-0391, -0398 and -0403 are fixed only on 0.14 (#36). So zstd is ours in both directions, on the workspace's own `zstd` crate: `kafka-read` decompresses through `decode_with_custom_compression` (it did already, for the bounded read), `kafka-produce` compresses through `encode_with_custom_compression`. That is wiring an existing compression crate into a hook upstream provides, not hand-rolling a format. Turning the feature back on puts the 0.13 chain back in the graph; any test that encodes a zstd batch through plain `RecordBatchEncoder::encode` fails with "Support for Zstd is not enabled", which is the tripwire.
 - `default-features = false` + `client` drops the `broker` half of the codegen — every response encoder and request decoder across 87 message types. We never act as a broker.
 - `messages_enums` is **not** in `default`. We need it: `RequestKind` / `ResponseKind` are what the read-only gate and the generic dispatch layer match on.
 

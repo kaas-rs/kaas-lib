@@ -26,6 +26,10 @@ futures        = { workspace = true }
 # The sticky partitioner's initial pick. Random rather than "always partition
 # zero", so N producers on one topic do not pile onto the same partition.
 rand           = { workspace = true }
+# Zstd batches are compressed here, not by `kafka-protocol` — see `encode.rs`.
+# `anyhow` is only the error type upstream's compression hook returns.
+zstd           = { workspace = true }
+anyhow         = { workspace = true }
 
 [dev-dependencies]
 testkit            = { path = "../testkit" }
