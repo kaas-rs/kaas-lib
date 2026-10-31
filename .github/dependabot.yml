@@ -1,0 +1,32 @@
+# GitHub Actions only. Every action in this repo is pinned to a full commit
+# SHA, which is the right supply-chain posture and also means nothing moves
+# unless something moves it — this is that something. One grouped PR a month.
+#
+# Cargo is deliberately absent. A library's Cargo.lock never reaches a
+# downstream build, so bumping it changes only what CI tests against; the
+# bumps that matter are minimum-version floors in the manifests, and those are
+# security decisions taken one advisory at a time (#36), not a monthly sweep.
+# The audit workflow (cargo-deny) is what notices them.
+#
+# Two pins Dependabot cannot see: `dtolnay/rust-toolchain`, which has no
+# release tags (the `# master` comment is a branch), and the cargo-deny
+# binary audit.yml downloads by URL. Both are bumped by hand.
+#
+# Dependabot PRs run CI on GitHub-hosted runners, not ARC — see the routing
+# comment at the top of ci.yml.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    # A release that is a day old has had a day to be noticed if it is bad.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+      include: scope

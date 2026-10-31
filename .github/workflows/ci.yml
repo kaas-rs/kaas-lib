@@ -17,7 +17,11 @@ permissions:
 # The runner pods are privileged DinD with a hostPath mount onto the node,
 # and this repo is public — a fork PR is arbitrary code from a stranger.
 # So `rust` and `docs`, the two jobs wired to `pull_request`, pick their
-# runner per event: forks go to GitHub-hosted, everything else to ARC.
+# runner per event: forks and Dependabot go to GitHub-hosted, everything else
+# to ARC. Dependabot's PRs are branches of this repo, so `fork` is false for
+# them, but their diff is an update nobody has read yet — an action at a new
+# SHA, which runs on whatever runner the job picked. The test is the PR's
+# *author*, not `github.actor`, which becomes whoever last pushed or re-ran.
 # The remaining jobs never run on `pull_request`, so a fork cannot reach
 # them and they name the scale set directly. `integration` also runs on
 # push to `main`, which is likewise unreachable from a fork: a push event
@@ -30,7 +34,7 @@ jobs:
   # fmt + clippy + unit tests. No Docker, no broker — this is the gate
   # that runs on every push.
   rust:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'arc-runner-set-lib' }}
+    runs-on: ${{ (github.event.pull_request.head.repo.fork || github.event.pull_request.user.login == 'dependabot[bot]') && 'ubuntu-latest' || 'arc-runner-set-lib' }}
     steps:
       # The ARC runner image (ghcr.io/actions/actions-runner) is minimal:
       # no cc, gcc, ld, make or pkg-config. `ring` and other build-script
@@ -317,7 +321,7 @@ jobs:
   # No toolchain step: the three tools are pinned release binaries, and the
   # ARC image already has curl, unzip and tar (verified by probing it).
   docs:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'arc-runner-set-lib' }}
+    runs-on: ${{ (github.event.pull_request.head.repo.fork || github.event.pull_request.user.login == 'dependabot[bot]') && 'ubuntu-latest' || 'arc-runner-set-lib' }}
     env:
       MDBOOK_VERSION: v0.4.52
       MDBOOK_MERMAID_VERSION: v0.16.2
