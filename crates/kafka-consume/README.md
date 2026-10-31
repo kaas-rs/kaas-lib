@@ -28,14 +28,14 @@ answer — a consumer at the log end is caught up, not broken.
 `Consumer` reads an **explicitly assigned** set of partitions. Nothing
 rebalances it, nothing heartbeats, and no broker knows it exists as a member
 of anything — which is what you want to pin a reader to a partition. It can
-still borrow a group's *offset storage*: set `ConsumerConfig::group_id` and
+still borrow a group's *offset storage*: set `ConsumerConfig::with_group_id` and
 `commit` writes under it using the non-member sentinel. Borrowing the storage
 is not joining the group.
 
 ```rust,no_run
 use kafka_consume::{Consumer, ConsumerConfig, Position};
 
-let mut consumer = Consumer::new(cluster, ConsumerConfig::new().group_id("reporting"));
+let mut consumer = Consumer::new(cluster, ConsumerConfig::new().with_group_id("reporting"));
 consumer.assign([("orders".to_owned(), 0)], Position::Earliest).await?;
 
 for record in consumer.poll().await? {

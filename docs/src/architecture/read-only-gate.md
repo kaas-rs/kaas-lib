@@ -13,7 +13,7 @@ let admin = Admin::connect_read_only(["localhost:9092"], ClusterConfig::default(
 ```
 
 Under the hood this is one flag on `ConnectionConfig`, which also means you
-can build it yourself with `ConnectionConfig::new().read_only()` and hand it
+can build it yourself with `ConnectionConfig::new().with_read_only()` and hand it
 to any layer.
 
 ## Enforced on the api key, not the method surface

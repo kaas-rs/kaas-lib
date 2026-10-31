@@ -35,7 +35,7 @@ async fn sasl_plaintext_plain_authenticates() {
     let config = ConnectionConfig::new().with_sasl(
         // PLAIN over an unencrypted socket is refused unless asked for
         // explicitly; a fixture is exactly where asking is reasonable.
-        SaslConfig::new(SaslMechanism::Plain, "alice", "alice-pw").allow_plaintext_password(),
+        SaslConfig::new(SaslMechanism::Plain, "alice", "alice-pw").with_allow_plaintext_password(),
     );
     let conn = Connection::connect(&broker.bootstrap()[0], config)
         .await
@@ -205,7 +205,7 @@ async fn a_rejected_token_fails_with_the_brokers_status_rather_than_hanging() {
         .with_connect_timeout(Duration::from_secs(20))
         // Well-formed as a bearer token, and not a JWS at all — so the broker's
         // validator rejects it deterministically instead of at a clock edge.
-        .with_sasl(SaslConfig::oauth_bearer_token("not-a-jws").allow_plaintext_password());
+        .with_sasl(SaslConfig::oauth_bearer_token("not-a-jws").with_allow_plaintext_password());
 
     let started = Instant::now();
     let err = Connection::connect(&broker.bootstrap()[0], config)
@@ -263,7 +263,7 @@ async fn reauthentication_asks_the_token_source_for_a_new_token() {
             }
         }
     })
-    .allow_plaintext_password();
+    .with_allow_plaintext_password();
 
     let conn = Connection::connect(
         &broker.bootstrap()[0],

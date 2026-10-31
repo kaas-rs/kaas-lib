@@ -187,22 +187,43 @@ impl ConsumerConfig {
 
     /// Store offsets under this group id.
     #[must_use]
-    pub fn group_id(mut self, id: impl Into<String>) -> Self {
+    pub fn with_group_id(mut self, id: impl Into<String>) -> Self {
         self.group_id = Some(id.into());
         self
     }
 
     /// Whether aborted-transaction records are visible.
     #[must_use]
-    pub fn visibility(mut self, visibility: Visibility) -> Self {
+    pub fn with_visibility(mut self, visibility: Visibility) -> Self {
         self.visibility = visibility;
         self
     }
 
     /// How long a fetch may wait before answering empty.
     #[must_use]
-    pub fn max_wait_ms(mut self, ms: i32) -> Self {
+    pub fn with_max_wait_ms(mut self, ms: i32) -> Self {
         self.max_wait_ms = ms;
+        self
+    }
+
+    /// Ceiling on one fetch response. 50 MiB unless set.
+    #[must_use]
+    pub fn with_max_bytes(mut self, bytes: i32) -> Self {
+        self.max_bytes = bytes;
+        self
+    }
+
+    /// Ceiling on one partition's share of a fetch response. 1 MiB unless set.
+    #[must_use]
+    pub fn with_partition_max_bytes(mut self, bytes: i32) -> Self {
+        self.partition_max_bytes = bytes;
+        self
+    }
+
+    /// Ceiling on a single batch's decompressed size. 64 MiB unless set.
+    #[must_use]
+    pub fn with_max_decompressed_bytes(mut self, bytes: usize) -> Self {
+        self.max_decompressed_bytes = bytes;
         self
     }
 
@@ -758,7 +779,8 @@ impl Consumer {
     fn group(&self) -> Result<&str> {
         self.config.group_id.as_deref().ok_or_else(|| {
             Error::InvalidRequest(
-                "this consumer has no group id; set one with ConsumerConfig::group_id".to_owned(),
+                "this consumer has no group id; set one with ConsumerConfig::with_group_id"
+                    .to_owned(),
             )
         })
     }
@@ -925,14 +947,14 @@ impl GroupConsumer {
     /// Join as a **static** member, so a restart inside the session timeout
     /// does not trigger a rebalance.
     #[must_use]
-    pub fn instance_id(mut self, instance_id: impl Into<String>) -> Self {
+    pub fn with_instance_id(mut self, instance_id: impl Into<String>) -> Self {
         self.membership.set_instance_id(instance_id.into());
         self
     }
 
     /// Whether to commit owned positions before revoking a partition.
     #[must_use]
-    pub fn auto_commit(mut self, enabled: bool) -> Self {
+    pub fn with_auto_commit(mut self, enabled: bool) -> Self {
         self.auto_commit = enabled;
         self
     }
@@ -944,7 +966,7 @@ impl GroupConsumer {
     /// per-partition state safely. See [`crate::rebalance`] for the ordering,
     /// the at-least-once delivery, and what an error does.
     #[must_use]
-    pub fn on_rebalance(mut self, listener: impl RebalanceListener + 'static) -> Self {
+    pub fn with_rebalance_listener(mut self, listener: impl RebalanceListener + 'static) -> Self {
         self.listener = Some(Box::new(listener));
         self
     }
@@ -1223,21 +1245,21 @@ impl ClassicConsumer {
 
     /// Register a hook that fires around every rebalance.
     ///
-    /// Same contract as [`GroupConsumer::on_rebalance`], with one protocol
+    /// Same contract as [`GroupConsumer::with_rebalance_listener`], with one protocol
     /// difference worth knowing: the classic protocol revokes **eagerly**, so
     /// every rebalance hands `on_revoke` the *whole* assignment rather than
     /// just the partitions that end up moving. That is what
     /// `RangeAssignor`-style rebalancing does — it is not this client rounding
     /// up.
     #[must_use]
-    pub fn on_rebalance(mut self, listener: impl RebalanceListener + 'static) -> Self {
+    pub fn with_rebalance_listener(mut self, listener: impl RebalanceListener + 'static) -> Self {
         self.listener = Some(Box::new(listener));
         self
     }
 
     /// Whether to commit owned positions before revoking a partition.
     #[must_use]
-    pub fn auto_commit(mut self, enabled: bool) -> Self {
+    pub fn with_auto_commit(mut self, enabled: bool) -> Self {
         self.auto_commit = enabled;
         self
     }
@@ -1250,7 +1272,7 @@ impl ClassicConsumer {
     /// that window is refused with `UNRELEASED_INSTANCE_ID` until the previous
     /// session lapses.
     #[must_use]
-    pub fn instance_id(mut self, instance_id: impl Into<String>) -> Self {
+    pub fn with_instance_id(mut self, instance_id: impl Into<String>) -> Self {
         let assignors = self.membership.assignors().to_vec();
         self.membership = crate::classic::ClassicMembership::new(
             self.membership.group_id().to_owned(),
@@ -1280,7 +1302,7 @@ impl ClassicConsumer {
     /// An empty list is ignored: a member with no assignors cannot join
     /// anything.
     #[must_use]
-    pub fn assignors(mut self, assignors: impl IntoIterator<Item = Assignor>) -> Self {
+    pub fn with_assignors(mut self, assignors: impl IntoIterator<Item = Assignor>) -> Self {
         let assignors: Vec<Assignor> = assignors.into_iter().collect();
         if !assignors.is_empty() {
             self.membership.set_assignors(assignors);
@@ -1711,12 +1733,12 @@ impl NegotiatedConsumer {
         }
     }
 
-    /// Join as a **static** member. See [`GroupConsumer::instance_id`].
+    /// Join as a **static** member. See [`GroupConsumer::with_instance_id`].
     #[must_use]
     pub fn with_instance_id(self, instance_id: impl Into<String>) -> Self {
         match self {
-            Self::Group(consumer) => Self::Group(consumer.instance_id(instance_id)),
-            Self::Classic(consumer) => Self::Classic(consumer.instance_id(instance_id)),
+            Self::Group(consumer) => Self::Group(consumer.with_instance_id(instance_id)),
+            Self::Classic(consumer) => Self::Classic(consumer.with_instance_id(instance_id)),
         }
     }
 
@@ -1724,21 +1746,21 @@ impl NegotiatedConsumer {
     #[must_use]
     pub fn with_auto_commit(self, enabled: bool) -> Self {
         match self {
-            Self::Group(consumer) => Self::Group(consumer.auto_commit(enabled)),
-            Self::Classic(consumer) => Self::Classic(consumer.auto_commit(enabled)),
+            Self::Group(consumer) => Self::Group(consumer.with_auto_commit(enabled)),
+            Self::Classic(consumer) => Self::Classic(consumer.with_auto_commit(enabled)),
         }
     }
 
     /// Register a hook that fires around every rebalance.
     ///
-    /// Same contract as [`GroupConsumer::on_rebalance`]; when the choice
+    /// Same contract as [`GroupConsumer::with_rebalance_listener`]; when the choice
     /// landed on the classic protocol, every rebalance revokes eagerly — see
-    /// [`ClassicConsumer::on_rebalance`].
+    /// [`ClassicConsumer::with_rebalance_listener`].
     #[must_use]
     pub fn with_rebalance_listener(self, listener: impl RebalanceListener + 'static) -> Self {
         match self {
-            Self::Group(consumer) => Self::Group(consumer.on_rebalance(listener)),
-            Self::Classic(consumer) => Self::Classic(consumer.on_rebalance(listener)),
+            Self::Group(consumer) => Self::Group(consumer.with_rebalance_listener(listener)),
+            Self::Classic(consumer) => Self::Classic(consumer.with_rebalance_listener(listener)),
         }
     }
 
@@ -1790,9 +1812,9 @@ impl NegotiatedConsumer {
         )
         .await?;
         if let Some(instance_id) = handoff.instance_id {
-            classic = classic.instance_id(instance_id);
+            classic = classic.with_instance_id(instance_id);
         }
-        classic = classic.auto_commit(handoff.auto_commit);
+        classic = classic.with_auto_commit(handoff.auto_commit);
         classic.listener = handoff.listener;
         *self = Self::Classic(classic);
         Ok(Vec::new())

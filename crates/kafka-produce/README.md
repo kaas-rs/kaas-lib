@@ -33,7 +33,7 @@ on the wire at a time and records accumulate into the next one on their own.
 Idempotence is on by default, which is what makes a re-send after a timeout
 safe rather than a duplicate: a rejected batch is always retriable, an
 *ambiguous* one only with a producer id. Transactions ride on the same
-machinery — set `ProducerConfig::transactional_id`, then
+machinery — set `ProducerConfig::with_transactional_id`, then
 `init_transactions`, `begin_transaction`, `commit_transaction`.
 
 For a consume-process-produce loop, `send_offsets_to_transaction` (KIP-447)

@@ -26,8 +26,8 @@ const PARTITIONS: i32 = 12;
 /// way around a default is a probe that cannot see the default misbehave.
 fn config() -> ConsumerConfig {
     ConsumerConfig::new()
-        .visibility(Visibility::All)
-        .max_wait_ms(200)
+        .with_visibility(Visibility::All)
+        .with_max_wait_ms(200)
 }
 
 /// How long one `poll` may block before this probe gives up on it.
@@ -58,7 +58,7 @@ async fn cooperative(bootstrap: &str, group: &str, topic: &str) -> ClassicConsum
     ClassicConsumer::subscribe(cluster, config(), group, [topic])
         .await
         .expect("subscribe")
-        .assignors([Assignor::CooperativeSticky])
+        .with_assignors([Assignor::CooperativeSticky])
 }
 
 #[tokio::main]

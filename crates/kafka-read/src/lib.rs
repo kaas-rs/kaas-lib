@@ -12,13 +12,13 @@
 //!
 //! * [`scan`] **browses**: it plans against the log end as it stood when it
 //!   started and finishes there. [`ScanEvent::Done`] means the window is read.
-//! * [`ScanSpec::following`] makes the same call **tail**: reaching the log end
+//! * [`ScanSpec::with_follow`] makes the same call **tail**: reaching the log end
 //!   is not an ending, the fetch long-polls for what has not been written yet,
 //!   and the stream ends when it is dropped. Without it, a scan from
 //!   [`StartPosition::Latest`] finishes immediately having emitted nothing,
 //!   which looks exactly like a working live view of an idle topic.
 //! * [`tail`] **walks backwards** from the log end — or, with
-//!   [`TailSpec::ending_at`], from an arbitrary offset or instant.
+//!   [`TailSpec::with_anchor`], from an arbitrary offset or instant.
 //!
 //! # Tolerant decoding
 //!
@@ -39,7 +39,7 @@
 //!
 //! // Browse forwards.
 //! let mut stream = Box::pin(
-//!     kafka_read::scan(cluster, ScanSpec::new("orders").from(StartPosition::Earliest)).await?,
+//!     kafka_read::scan(cluster, ScanSpec::new("orders").with_from(StartPosition::Earliest)).await?,
 //! );
 //! while let Some(event) = stream.next().await {
 //!     match event? {
@@ -54,15 +54,15 @@
 //!
 //! // Or follow the log, which is the same call that does not stop.
 //! let live = ScanSpec::new("orders")
-//!     .from(StartPosition::Latest)
-//!     .following();
+//!     .with_from(StartPosition::Latest)
+//!     .with_follow();
 //! let mut tailing = Box::pin(kafka_read::scan(cluster, live).await?);
 //!
 //! // Or read the tail — the most-used view in any Kafka UI.
 //! let tails = kafka_read::tail(cluster, &TailSpec::new("orders", 500)).await?;
 //!
 //! // The same walk, ending somewhere other than the log end.
-//! let ending_at = TailSpec::new("orders", 500).ending_at(TailAnchor::Offset(16_733));
+//! let ending_at = TailSpec::new("orders", 500).with_anchor(TailAnchor::Offset(16_733));
 //! let window = kafka_read::tail(cluster, &ending_at).await?;
 //! # Ok(())
 //! # }

@@ -169,21 +169,21 @@ impl ScanSpec {
 
     /// Restrict to specific partitions.
     #[must_use]
-    pub fn partitions(mut self, partitions: impl IntoIterator<Item = i32>) -> Self {
+    pub fn with_partitions(mut self, partitions: impl IntoIterator<Item = i32>) -> Self {
         self.partitions = Some(partitions.into_iter().collect());
         self
     }
 
     /// Start somewhere other than the beginning.
     #[must_use]
-    pub fn from(mut self, from: StartPosition) -> Self {
+    pub fn with_from(mut self, from: StartPosition) -> Self {
         self.from = from;
         self
     }
 
     /// Stop after `limit` records.
     #[must_use]
-    pub fn limit(mut self, limit: usize) -> Self {
+    pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
         self
     }
@@ -194,22 +194,58 @@ impl ScanSpec {
     /// is still not a consumer: there is no group, no membership and no commit
     /// — the stream ends when it is dropped.
     #[must_use]
-    pub fn following(mut self) -> Self {
+    pub fn with_follow(mut self) -> Self {
         self.follow = true;
         self
     }
 
     /// Filter records after decoding.
     #[must_use]
-    pub fn filter(mut self, filter: RecordFilter) -> Self {
+    pub fn with_filter(mut self, filter: RecordFilter) -> Self {
         self.filter = Some(filter);
         self
     }
 
     /// Show or hide aborted-transaction records.
     #[must_use]
-    pub fn visibility(mut self, visibility: Visibility) -> Self {
+    pub fn with_visibility(mut self, visibility: Visibility) -> Self {
         self.visibility = visibility;
+        self
+    }
+
+    /// Per-partition byte budget for a single fetch. 1 MiB unless set.
+    #[must_use]
+    pub fn with_partition_max_bytes(mut self, bytes: i32) -> Self {
+        self.partition_max_bytes = bytes;
+        self
+    }
+
+    /// Whole-response byte budget for a single fetch. 8 MiB unless set.
+    #[must_use]
+    pub fn with_fetch_max_bytes(mut self, bytes: i32) -> Self {
+        self.fetch_max_bytes = bytes;
+        self
+    }
+
+    /// How long a fetch may wait for data. 500 ms unless set.
+    #[must_use]
+    pub fn with_max_wait_ms(mut self, ms: i32) -> Self {
+        self.max_wait_ms = ms;
+        self
+    }
+
+    /// The scan's memory ceiling, in decoded records held at once. 10 000
+    /// unless set.
+    #[must_use]
+    pub fn with_max_buffered_records(mut self, records: usize) -> Self {
+        self.max_buffered_records = records;
+        self
+    }
+
+    /// Ceiling on a single batch's decompressed size. 64 MiB unless set.
+    #[must_use]
+    pub fn with_max_decompressed_bytes(mut self, bytes: usize) -> Self {
+        self.max_decompressed_bytes = bytes;
         self
     }
 
@@ -1043,7 +1079,7 @@ mod tests {
         // Additive: every caller written before `following` existed keeps
         // getting a bounded browse that ends at the log end it planned for.
         assert!(!ScanSpec::new("orders").follow);
-        assert!(ScanSpec::new("orders").following().follow);
+        assert!(ScanSpec::new("orders").with_follow().follow);
     }
 
     #[test]

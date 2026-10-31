@@ -234,8 +234,7 @@ struct ScanStats {
 }
 
 async fn scan_one(cluster: &Cluster, topic: &str, options: &Options) -> Result<ScanStats> {
-    let mut spec = ScanSpec::new(topic);
-    spec.limit = Some(options.limit);
+    let spec = ScanSpec::new(topic).with_limit(options.limit);
 
     let mut stream = Box::pin(kafka_read::scan(cluster, spec).await?);
     let mut stats = ScanStats {

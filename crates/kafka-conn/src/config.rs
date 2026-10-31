@@ -108,8 +108,33 @@ impl ConnectionConfig {
 
     /// Refuse mutating requests.
     #[must_use]
-    pub fn read_only(mut self) -> Self {
+    pub fn with_read_only(mut self) -> Self {
         self.read_only = true;
+        self
+    }
+
+    /// Set the name reported in `ApiVersions`. `kaas-lib` unless set.
+    ///
+    /// KIP-511 lets the broker refuse the handshake over this: letters, digits,
+    /// `-` and `.`, starting and ending with a letter or digit.
+    #[must_use]
+    pub fn with_client_software_name(mut self, name: impl Into<String>) -> Self {
+        self.client_software_name = name.into();
+        self
+    }
+
+    /// Set the version reported alongside the name. This crate's own version
+    /// unless set, under the same KIP-511 pattern as the name.
+    #[must_use]
+    pub fn with_client_software_version(mut self, version: impl Into<String>) -> Self {
+        self.client_software_version = version.into();
+        self
+    }
+
+    /// Set the frame ceiling. 100 MiB unless set.
+    #[must_use]
+    pub fn with_max_frame_bytes(mut self, bytes: usize) -> Self {
+        self.max_frame_bytes = bytes;
         self
     }
 
@@ -181,7 +206,7 @@ mod tests {
     fn read_only_outranks_a_ceiling_and_no_ceiling_admits_everything() {
         let both = ConnectionConfig::new()
             .with_allowed_mutations([ApiKey::OffsetCommit])
-            .read_only();
+            .with_read_only();
         assert!(!both.permits(ApiKey::OffsetCommit));
         assert!(ConnectionConfig::new().permits(ApiKey::DeleteTopics));
         let empty = ConnectionConfig::new().with_allowed_mutations([]);

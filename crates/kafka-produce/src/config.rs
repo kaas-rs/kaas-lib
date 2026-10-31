@@ -187,21 +187,21 @@ impl ProducerConfig {
 
     /// How to re-send a record the broker rejected.
     #[must_use]
-    pub fn retry(mut self, retry: RetryPolicy) -> Self {
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
         self
     }
 
     /// Require only the leader to have written the record.
     #[must_use]
-    pub fn acks(mut self, acks: Acks) -> Self {
+    pub fn with_acks(mut self, acks: Acks) -> Self {
         self.acks = acks;
         self
     }
 
     /// Compress each batch with the given codec.
     #[must_use]
-    pub fn compression(mut self, compression: Compression) -> Self {
+    pub fn with_compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
         self
     }
@@ -210,42 +210,42 @@ impl ProducerConfig {
     ///
     /// See [`ProducerConfig::delivery_timeout`].
     #[must_use]
-    pub fn delivery_timeout(mut self, timeout: Duration) -> Self {
+    pub fn with_delivery_timeout(mut self, timeout: Duration) -> Self {
         self.delivery_timeout = timeout;
         self
     }
 
     /// How long an open batch waits for company before it is sent.
     #[must_use]
-    pub fn linger(mut self, linger: Duration) -> Self {
+    pub fn with_linger(mut self, linger: Duration) -> Self {
         self.linger = linger;
         self
     }
 
     /// The size at which an open batch is closed and sent.
     #[must_use]
-    pub fn batch_size(mut self, bytes: usize) -> Self {
+    pub fn with_batch_size(mut self, bytes: usize) -> Self {
         self.batch_size = bytes;
         self
     }
 
     /// The ceiling on one partition's batch.
     #[must_use]
-    pub fn max_request_size(mut self, bytes: usize) -> Self {
+    pub fn with_max_request_size(mut self, bytes: usize) -> Self {
         self.max_request_size = bytes;
         self
     }
 
     /// How many bytes of unsent records may be buffered before `send` waits.
     #[must_use]
-    pub fn buffer_memory(mut self, bytes: usize) -> Self {
+    pub fn with_buffer_memory(mut self, bytes: usize) -> Self {
         self.buffer_memory = bytes;
         self
     }
 
     /// Whether to claim a producer id and number every record.
     #[must_use]
-    pub fn idempotent(mut self, idempotent: bool) -> Self {
+    pub fn with_idempotent(mut self, idempotent: bool) -> Self {
         self.idempotent = idempotent;
         self
     }
@@ -255,7 +255,7 @@ impl ProducerConfig {
     /// Implies idempotence, because a transaction is built on the same
     /// producer id and sequence numbers.
     #[must_use]
-    pub fn transactional_id(mut self, id: impl Into<String>) -> Self {
+    pub fn with_transactional_id(mut self, id: impl Into<String>) -> Self {
         self.transactional_id = Some(id.into());
         self.idempotent = true;
         self
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn an_absurd_delivery_timeout_saturates_rather_than_wrapping() {
-        let config = ProducerConfig::new().delivery_timeout(Duration::from_secs(u64::MAX));
+        let config = ProducerConfig::new().with_delivery_timeout(Duration::from_secs(u64::MAX));
         assert_eq!(config.delivery_timeout_ms(), i32::MAX);
     }
 }

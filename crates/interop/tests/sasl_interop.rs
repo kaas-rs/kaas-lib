@@ -59,7 +59,7 @@ fn our_connection(mechanism: SaslMechanism) -> ConnectionConfig {
     // `PLAIN` over an unencrypted socket needs the explicit opt-in, and a
     // fixture is where asking for it is reasonable.
     let sasl = if matches!(mechanism, SaslMechanism::Plain) {
-        sasl.allow_plaintext_password()
+        sasl.with_allow_plaintext_password()
     } else {
         sasl
     };
@@ -190,7 +190,7 @@ async fn oauthbearer_agrees_with_librdkafka() {
                 SaslConfig::oauth_bearer_token(testkit::unsecured_jws(USER, TOKEN_LIFETIME))
                     // The token is a reusable credential and this listener is
                     // deliberately unencrypted — the same opt-in PLAIN needs.
-                    .allow_plaintext_password(),
+                    .with_allow_plaintext_password(),
             ),
             ..ClusterConfig::default()
         },
@@ -288,7 +288,7 @@ async fn both_clients_resolve_to_the_same_oauthbearer_principal() {
         ClusterConfig {
             connection: ConnectionConfig::new().with_sasl(
                 SaslConfig::oauth_bearer_token(testkit::unsecured_jws(USER, TOKEN_LIFETIME))
-                    .allow_plaintext_password(),
+                    .with_allow_plaintext_password(),
             ),
             ..ClusterConfig::default()
         },

@@ -113,7 +113,7 @@ async fn check_18_substitutions(cluster: &Cluster, topic: &str) -> Result<()> {
     // Beyond every log end: each partition must announce OffsetBeyondLogEnd.
     let starts = collect_starts(
         cluster,
-        ScanSpec::new(topic).from(StartPosition::Offset(i64::MAX)),
+        ScanSpec::new(topic).with_from(StartPosition::Offset(i64::MAX)),
     )
     .await?;
     for (partition, substituted) in &starts {
@@ -132,7 +132,7 @@ async fn check_18_substitutions(cluster: &Cluster, topic: &str) -> Result<()> {
     let future = 4_102_444_800_000i64; // 2100-01-01, safely after any record
     let starts = collect_starts(
         cluster,
-        ScanSpec::new(topic).from(StartPosition::Timestamp(future)),
+        ScanSpec::new(topic).with_from(StartPosition::Timestamp(future)),
     )
     .await?;
     for (partition, substituted) in &starts {
@@ -148,8 +148,11 @@ async fn check_18_substitutions(cluster: &Cluster, topic: &str) -> Result<()> {
 
     // Below the log start, where the topic has one: OffsetBelowLogStart on
     // exactly the partitions whose earliest is above zero, honoured elsewhere.
-    let starts =
-        collect_starts(cluster, ScanSpec::new(topic).from(StartPosition::Offset(0))).await?;
+    let starts = collect_starts(
+        cluster,
+        ScanSpec::new(topic).with_from(StartPosition::Offset(0)),
+    )
+    .await?;
     let mut below = 0usize;
     for (partition, substituted) in &starts {
         let (earliest, _) = kafka_read::partition_bounds(cluster, topic, *partition).await?;
@@ -173,7 +176,7 @@ async fn collect_starts(
     cluster: &Cluster,
     spec: ScanSpec,
 ) -> Result<BTreeMap<i32, Option<StartSubstitution>>> {
-    let mut stream = Box::pin(kafka_read::scan(cluster, spec.limit(1)).await?);
+    let mut stream = Box::pin(kafka_read::scan(cluster, spec.with_limit(1)).await?);
     let mut starts = BTreeMap::new();
     while let Some(event) = stream.next().await {
         match event? {
@@ -195,8 +198,9 @@ async fn collect_starts(
 /// window sized from its own numbers; a single-partition scan under the same
 /// pressure reports zero, because within a partition order is exact.
 async fn check_19_reorder_window(cluster: &Cluster, topic: &str) -> Result<()> {
-    let mut wide = ScanSpec::new(topic).limit(2_000);
-    wide.max_buffered_records = 64;
+    let wide = ScanSpec::new(topic)
+        .with_limit(2_000)
+        .with_max_buffered_records(64);
     let done = scan_to_done(cluster, wide).await?;
     println!(
         "19.{topic}.wide: reorder_window={} partitions_planned={} partitions_active={}",
@@ -215,8 +219,10 @@ async fn check_19_reorder_window(cluster: &Cluster, topic: &str) -> Result<()> {
         bail!("#19: Done must still zero the active count");
     }
 
-    let mut narrow = ScanSpec::new(topic).partitions([0]).limit(2_000);
-    narrow.max_buffered_records = 64;
+    let narrow = ScanSpec::new(topic)
+        .with_partitions([0])
+        .with_limit(2_000)
+        .with_max_buffered_records(64);
     let done = scan_to_done(cluster, narrow).await?;
     if done.reorder_window != 0 {
         bail!(
@@ -303,7 +309,7 @@ async fn negotiate_and_consume(cluster: &Cluster, topic: &str, group: &str) -> R
     let mut consumer = NegotiatedConsumer::subscribe(
         cluster.clone(),
         ConsumerConfig::new()
-            .max_wait_ms(300)
+            .with_max_wait_ms(300)
             .with_group_protocol(GroupProtocol::Auto),
         group,
         [topic],

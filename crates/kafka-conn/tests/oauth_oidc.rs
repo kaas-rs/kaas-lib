@@ -369,7 +369,7 @@ async fn a_fetched_token_authenticates_against_a_real_broker() {
     .unwrap();
 
     let config = ConnectionConfig::new()
-        .with_sasl(SaslConfig::oauth_bearer(issuer.provider()).allow_plaintext_password());
+        .with_sasl(SaslConfig::oauth_bearer(issuer.provider()).with_allow_plaintext_password());
     let conn = Connection::connect(&broker.bootstrap()[0], config)
         .await
         .expect("a token fetched from the issuer authenticates");
@@ -414,7 +414,7 @@ async fn reauthentication_presents_a_token_fetched_after_the_first_one() {
     .unwrap();
 
     let config = ConnectionConfig::new()
-        .with_sasl(SaslConfig::oauth_bearer(issuer.provider()).allow_plaintext_password());
+        .with_sasl(SaslConfig::oauth_bearer(issuer.provider()).with_allow_plaintext_password());
     let conn = Connection::connect(&broker.bootstrap()[0], config)
         .await
         .unwrap();

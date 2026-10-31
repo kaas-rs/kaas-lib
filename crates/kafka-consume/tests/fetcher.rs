@@ -122,7 +122,7 @@ async fn twelve_partitions_across_two_topics_stream_in_order() {
 
     let mut consumer = Consumer::new(
         cluster.clone(),
-        ConsumerConfig::new().visibility(Visibility::All),
+        ConsumerConfig::new().with_visibility(Visibility::All),
     );
     let assignment: Vec<(String, i32)> = [TOPIC_A, TOPIC_B]
         .iter()
@@ -174,8 +174,8 @@ async fn a_steady_state_fetch_stops_re_sending_the_assignment() {
     let mut consumer = Consumer::new(
         cluster.clone(),
         ConsumerConfig::new()
-            .visibility(Visibility::All)
-            .max_wait_ms(100),
+            .with_visibility(Visibility::All)
+            .with_max_wait_ms(100),
     );
     consumer
         .assign(
@@ -234,8 +234,8 @@ async fn seek_pause_and_resume_change_the_stream_mid_flight() {
     let mut consumer = Consumer::new(
         cluster.clone(),
         ConsumerConfig::new()
-            .visibility(Visibility::All)
-            .max_wait_ms(100),
+            .with_visibility(Visibility::All)
+            .with_max_wait_ms(100),
     );
     consumer
         .assign(
@@ -338,9 +338,9 @@ async fn a_non_member_can_commit_and_resume_from_its_commit() {
 
     let assignment = vec![(TOPIC_A.to_owned(), 0), (TOPIC_A.to_owned(), 1)];
     let config = ConsumerConfig::new()
-        .visibility(Visibility::All)
-        .max_wait_ms(100)
-        .group_id(GROUP);
+        .with_visibility(Visibility::All)
+        .with_max_wait_ms(100)
+        .with_group_id(GROUP);
 
     let mut consumer = Consumer::new(cluster.clone(), config.clone());
     consumer

@@ -169,6 +169,7 @@ impl TlsConfig {
     }
 
     /// Present a client certificate.
+    #[must_use]
     pub fn with_client_certificate(
         mut self,
         chain_pem: impl Into<Vec<u8>>,

@@ -124,7 +124,7 @@ impl Target {
             .with_connect_timeout(Duration::from_secs(20))
             .with_request_timeout(Duration::from_secs(30));
         if read_only {
-            connection = connection.read_only();
+            connection = connection.with_read_only();
         }
 
         let tls = tls_from_env()?;
@@ -313,7 +313,7 @@ fn sasl_from_env(encrypted: bool) -> Result<Option<SaslConfig>> {
     // is encrypted — asked of the resolved configuration rather than of the
     // environment, so the two cannot disagree.
     let config = if matches!(mechanism, SaslMechanism::Plain) && !encrypted {
-        config.allow_plaintext_password()
+        config.with_allow_plaintext_password()
     } else {
         config
     };
@@ -341,7 +341,7 @@ fn oauth_bearer_from_env() -> Result<SaslConfig> {
     // one must never disagree about when it may go out in the clear.
     Ok(
         if std::env::var(CA_PEM_ENV).is_err() && std::env::var(CA_FILE_ENV).is_err() {
-            config.allow_plaintext_password()
+            config.with_allow_plaintext_password()
         } else {
             config
         },

@@ -218,7 +218,7 @@ impl SaslConfig {
     /// Permit a reusable credential — `PLAIN`'s password, `OAUTHBEARER`'s
     /// token — on an unencrypted socket.
     #[must_use]
-    pub fn allow_plaintext_password(mut self) -> Self {
+    pub fn with_allow_plaintext_password(mut self) -> Self {
         self.allow_plaintext_password = true;
         self
     }
@@ -229,7 +229,7 @@ impl SaslConfig {
             if !self.allow_plaintext_password {
                 return Err(Error::Authentication(format!(
                     "{} over an unencrypted connection would send a reusable credential in the \
-                     clear; use TLS or opt in with SaslConfig::allow_plaintext_password",
+                     clear; use TLS or opt in with SaslConfig::with_allow_plaintext_password",
                     self.mechanism
                 )));
             }
@@ -586,7 +586,7 @@ mod tests {
         assert!(cfg.check_encryption(true).is_ok());
         assert!(
             cfg.clone()
-                .allow_plaintext_password()
+                .with_allow_plaintext_password()
                 .check_encryption(false)
                 .is_ok()
         );
@@ -808,7 +808,7 @@ mod tests {
         assert!(cfg.check_encryption(true).is_ok());
         assert!(
             cfg.clone()
-                .allow_plaintext_password()
+                .with_allow_plaintext_password()
                 .check_encryption(false)
                 .is_ok()
         );

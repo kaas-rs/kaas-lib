@@ -325,10 +325,12 @@ async fn transactions_and_producers_describe() {
 #[testkit::integration_test]
 async fn a_read_only_client_rejects_every_mutating_api_key_before_opening_a_socket() {
     let fixture = testkit::single_broker().await.unwrap();
-    let connection =
-        Connection::connect(&fixture.bootstrap()[0], ConnectionConfig::new().read_only())
-            .await
-            .unwrap();
+    let connection = Connection::connect(
+        &fixture.bootstrap()[0],
+        ConnectionConfig::new().with_read_only(),
+    )
+    .await
+    .unwrap();
 
     let before = connection.stats_snapshot();
     let mut mutating = 0;

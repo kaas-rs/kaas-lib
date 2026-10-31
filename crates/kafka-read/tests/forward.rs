@@ -74,7 +74,7 @@ async fn ten_thousand_records_across_six_partitions_with_mixed_codecs() {
     let mut stream = Box::pin(
         kafka_read::scan(
             &cluster,
-            ScanSpec::new("scanned").from(StartPosition::Earliest),
+            ScanSpec::new("scanned").with_from(StartPosition::Earliest),
         )
         .await
         .expect("scan starts"),
@@ -249,10 +249,10 @@ async fn truncating_a_fetch_mid_batch_produces_no_malformed_events() {
     produce(&fixture, "truncated", 1, 2000, "none").await;
 
     let cluster = admin.cluster().clone();
-    let mut spec = ScanSpec::new("truncated");
     // Small enough that almost every fetch ends mid-batch.
-    spec.partition_max_bytes = 512;
-    spec.fetch_max_bytes = 512;
+    let spec = ScanSpec::new("truncated")
+        .with_partition_max_bytes(512)
+        .with_fetch_max_bytes(512);
 
     let mut stream = Box::pin(kafka_read::scan(&cluster, spec).await.expect("scan starts"));
 
@@ -275,7 +275,7 @@ async fn a_limited_scan_stops_early_and_a_filter_narrows_it() {
     produce(&fixture, "scanned", 1, 1000, "none").await;
 
     let mut stream = Box::pin(
-        kafka_read::scan(&cluster, ScanSpec::new("scanned").limit(10))
+        kafka_read::scan(&cluster, ScanSpec::new("scanned").with_limit(10))
             .await
             .unwrap(),
     );
@@ -289,7 +289,7 @@ async fn a_limited_scan_stops_early_and_a_filter_narrows_it() {
 
     let filtered = kafka_read::scan(
         &cluster,
-        ScanSpec::new("scanned").filter(kafka_read::RecordFilter::ValueContains(
+        ScanSpec::new("scanned").with_filter(kafka_read::RecordFilter::ValueContains(
             bytes::Bytes::from_static(b"999"),
         )),
     )
@@ -320,7 +320,7 @@ async fn a_scan_from_a_timestamp_skips_what_came_before() {
     let mut stream = Box::pin(
         kafka_read::scan(
             &cluster,
-            ScanSpec::new("scanned").from(StartPosition::Timestamp(cutoff)),
+            ScanSpec::new("scanned").with_from(StartPosition::Timestamp(cutoff)),
         )
         .await
         .unwrap(),
@@ -351,9 +351,9 @@ async fn a_scan_from_an_offset_never_emits_records_before_it() {
             kafka_read::scan(
                 &cluster,
                 ScanSpec::new("scanned")
-                    .partitions([0])
-                    .from(StartPosition::Offset(start))
-                    .limit(20),
+                    .with_partitions([0])
+                    .with_from(StartPosition::Offset(start))
+                    .with_limit(20),
             )
             .await
             .unwrap(),
@@ -391,8 +391,8 @@ async fn a_following_scan_waits_at_the_log_end_and_sees_what_arrives_next() {
         kafka_read::scan(
             &cluster,
             ScanSpec::new("scanned")
-                .from(StartPosition::Latest)
-                .following(),
+                .with_from(StartPosition::Latest)
+                .with_follow(),
         )
         .await
         .unwrap(),
@@ -449,8 +449,8 @@ async fn following_does_not_stall_behind_an_idle_partition() {
         kafka_read::scan(
             &cluster,
             ScanSpec::new("scanned")
-                .from(StartPosition::Earliest)
-                .following(),
+                .with_from(StartPosition::Earliest)
+                .with_follow(),
         )
         .await
         .unwrap(),
@@ -483,7 +483,7 @@ async fn dropping_a_following_scan_stops_it() {
 
     for _ in 0..2 {
         let mut stream = Box::pin(
-            kafka_read::scan(&cluster, ScanSpec::new("scanned").following())
+            kafka_read::scan(&cluster, ScanSpec::new("scanned").with_follow())
                 .await
                 .unwrap(),
         );
@@ -495,7 +495,7 @@ async fn dropping_a_following_scan_stops_it() {
     let before = cluster.pool().live_connections().await;
     {
         let mut stream = Box::pin(
-            kafka_read::scan(&cluster, ScanSpec::new("scanned").following())
+            kafka_read::scan(&cluster, ScanSpec::new("scanned").with_follow())
                 .await
                 .unwrap(),
         );

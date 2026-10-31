@@ -59,8 +59,8 @@ async fn await_topic(admin: &Admin, topic: &str) {
 /// Read a whole topic back through `kafka-read`.
 async fn read_topic(cluster: &Cluster, topic: &str, partitions: i32) -> Vec<kafka_read::Record> {
     let spec = ScanSpec::new(topic)
-        .partitions(0..partitions)
-        .from(StartPosition::Earliest);
+        .with_partitions(0..partitions)
+        .with_from(StartPosition::Earliest);
     let mut stream = Box::pin(kafka_read::scan(cluster, spec).await.expect("scan"));
 
     let mut records = Vec::new();
@@ -163,7 +163,7 @@ async fn fifty_thousand_records_arrive_in_under_five_hundred_requests() {
     // happened" a property of the accumulator rather than of the runner.
     let producer = Producer::new(
         cluster.clone(),
-        ProducerConfig::new().linger(Duration::from_millis(25)),
+        ProducerConfig::new().with_linger(Duration::from_millis(25)),
     );
 
     // Captured once and reused for both ends of the measurement — see
@@ -248,7 +248,7 @@ async fn one_oversized_record_among_a_thousand_fails_alone() {
     let (_fixture, cluster, _admin) = setup(TOPIC, 3).await;
     let producer = Producer::new(
         cluster.clone(),
-        ProducerConfig::new().max_request_size(LIMIT),
+        ProducerConfig::new().with_max_request_size(LIMIT),
     );
 
     let mut outcomes = Vec::with_capacity(RECORDS);
@@ -304,7 +304,10 @@ async fn codec_round_trips_a_whole_batch(codec: Compression, topic: &str) {
     const RECORDS: usize = 2_000;
 
     let (_fixture, cluster, _admin) = setup(topic, PARTITIONS).await;
-    let producer = Producer::new(cluster.clone(), ProducerConfig::new().compression(codec));
+    let producer = Producer::new(
+        cluster.clone(),
+        ProducerConfig::new().with_compression(codec),
+    );
 
     let mut pending = Vec::with_capacity(RECORDS);
     for i in 0..RECORDS {
@@ -365,7 +368,7 @@ async fn flush_waits_for_records_nobody_awaited() {
     // empty rather than merely late.
     let producer = Producer::new(
         cluster.clone(),
-        ProducerConfig::new().linger(Duration::from_secs(60)),
+        ProducerConfig::new().with_linger(Duration::from_secs(60)),
     );
 
     for i in 0..RECORDS {
@@ -401,7 +404,7 @@ async fn a_tiny_buffer_applies_backpressure_rather_than_dropping_records() {
         cluster.clone(),
         // 64 KiB of buffer for roughly 400 KiB of records: every enqueue past
         // the first few hundred has to wait for an acknowledgement.
-        ProducerConfig::new().buffer_memory(64 * 1024),
+        ProducerConfig::new().with_buffer_memory(64 * 1024),
     );
 
     let mut pending = Vec::with_capacity(RECORDS);

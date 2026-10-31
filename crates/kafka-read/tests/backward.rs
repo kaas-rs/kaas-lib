@@ -355,7 +355,7 @@ async fn an_offset_anchored_tail_includes_the_anchor_and_stops_there() {
     let anchor = 40_000i64;
     let tails = kafka_read::tail(
         &cluster,
-        &TailSpec::new("anchored", 500).ending_at(TailAnchor::Offset(anchor)),
+        &TailSpec::new("anchored", 500).with_anchor(TailAnchor::Offset(anchor)),
     )
     .await
     .expect("anchored tail");
@@ -403,7 +403,7 @@ async fn a_partition_whose_log_end_is_below_the_anchor_yields_its_own_tail() {
         Duration::from_secs(30),
         kafka_read::tail(
             &cluster,
-            &TailSpec::new("shortanchor", 10).ending_at(TailAnchor::Offset(9_000_000)),
+            &TailSpec::new("shortanchor", 10).with_anchor(TailAnchor::Offset(9_000_000)),
         ),
     )
     .await
@@ -450,7 +450,7 @@ async fn an_anchor_below_the_log_start_is_an_empty_result() {
         Duration::from_secs(30),
         kafka_read::tail(
             &cluster,
-            &TailSpec::new("expired", 10).ending_at(TailAnchor::Offset(-1)),
+            &TailSpec::new("expired", 10).with_anchor(TailAnchor::Offset(-1)),
         ),
     )
     .await
@@ -525,7 +525,7 @@ async fn an_anchored_tail_converges_on_a_compacted_topic() {
         Duration::from_secs(60),
         kafka_read::tail(
             &cluster,
-            &TailSpec::new("compactedanchor", 100).ending_at(TailAnchor::Offset(anchor)),
+            &TailSpec::new("compactedanchor", 100).with_anchor(TailAnchor::Offset(anchor)),
         ),
     )
     .await
@@ -583,7 +583,7 @@ async fn a_timestamp_anchor_stops_at_or_before_the_instant() {
 
     let tails = kafka_read::tail(
         &cluster,
-        &TailSpec::new("timed", 50).ending_at(TailAnchor::Timestamp(boundary)),
+        &TailSpec::new("timed", 50).with_anchor(TailAnchor::Timestamp(boundary)),
     )
     .await
     .expect("timestamp-anchored tail");
@@ -627,7 +627,7 @@ async fn a_timestamp_anchor_after_every_record_reads_the_whole_tail() {
 
     let tails = kafka_read::tail(
         &cluster,
-        &TailSpec::new("timedpast", 10).ending_at(TailAnchor::Timestamp(far_future)),
+        &TailSpec::new("timedpast", 10).with_anchor(TailAnchor::Timestamp(far_future)),
     )
     .await
     .unwrap();

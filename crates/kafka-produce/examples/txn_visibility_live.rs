@@ -22,9 +22,9 @@ const RECORDS: usize = 100;
 
 async fn read(cluster: &Cluster, topic: &str, visibility: Visibility) -> Vec<kafka_read::Record> {
     let spec = ScanSpec::new(topic)
-        .partitions([0])
-        .from(StartPosition::Earliest)
-        .visibility(visibility);
+        .with_partitions([0])
+        .with_from(StartPosition::Earliest)
+        .with_visibility(visibility);
     let mut stream = Box::pin(kafka_read::scan(cluster, spec).await.expect("scan"));
 
     let mut records = Vec::new();
@@ -93,7 +93,7 @@ async fn main() {
     let cluster = admin.cluster().clone();
     let producer = Producer::new(
         cluster.clone(),
-        ProducerConfig::new().transactional_id(format!("{topic}-producer")),
+        ProducerConfig::new().with_transactional_id(format!("{topic}-producer")),
     );
     producer.init_transactions().await.expect("init");
 

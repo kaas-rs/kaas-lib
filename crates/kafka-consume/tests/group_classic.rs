@@ -62,8 +62,8 @@ async fn setup() -> KafkaCluster {
 /// instead, at the layer that owns the test's patience.
 fn config() -> ConsumerConfig {
     ConsumerConfig::new()
-        .visibility(Visibility::All)
-        .max_wait_ms(200)
+        .with_visibility(Visibility::All)
+        .with_max_wait_ms(200)
 }
 
 /// How long a single `poll` may block before the test calls it a failure.
@@ -327,7 +327,7 @@ org.apache.kafka.clients.consumer.CooperativeStickyAssignor \
         .expect("subscribe")
         // Advertising only this one makes the intersection a single protocol:
         // the group forms on cooperative-sticky or it fails loudly.
-        .assignors([Assignor::CooperativeSticky]);
+        .with_assignors([Assignor::CooperativeSticky]);
 
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && ours.assignment().is_empty() {
@@ -371,7 +371,7 @@ async fn a_cooperative_rebalance_keeps_what_it_can() {
         ClassicConsumer::subscribe(cluster, config(), group, [TOPIC])
             .await
             .expect("subscribe")
-            .assignors([Assignor::CooperativeSticky])
+            .with_assignors([Assignor::CooperativeSticky])
     }
 
     let mut a = cooperative(&fixture, group).await;
@@ -464,7 +464,7 @@ async fn a_static_member_does_not_trigger_a_rebalance_on_restart() {
     let mut first = ClassicConsumer::subscribe(cluster, config(), group, [TOPIC])
         .await
         .expect("subscribe")
-        .instance_id("static-1");
+        .with_instance_id("static-1");
 
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && first.assignment().is_empty() {
@@ -490,7 +490,7 @@ async fn a_static_member_does_not_trigger_a_rebalance_on_restart() {
     let mut restarted = ClassicConsumer::subscribe(cluster, config(), group, [TOPIC])
         .await
         .expect("subscribe")
-        .instance_id("static-1");
+        .with_instance_id("static-1");
 
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline && restarted.assignment().is_empty() {

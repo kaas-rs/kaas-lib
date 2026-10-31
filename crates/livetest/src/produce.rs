@@ -208,7 +208,7 @@ async fn run(cluster: &Cluster, admin: &Admin, topic: &str, report: &mut Report)
     ] {
         let codec_producer = Producer::new(
             cluster.clone(),
-            ProducerConfig::new().compression(compression),
+            ProducerConfig::new().with_compression(compression),
         );
         codec_producer
             .send(
@@ -373,8 +373,8 @@ async fn group(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<()
     let group_id = format!("kaaslib-live-group-{}", run_token());
     let config = || {
         ConsumerConfig::new()
-            .visibility(Visibility::All)
-            .max_wait_ms(200)
+            .with_visibility(Visibility::All)
+            .with_max_wait_ms(200)
     };
 
     let mut first = GroupConsumer::subscribe(cluster.clone(), config(), &group_id, [topic]).await?;
@@ -530,9 +530,9 @@ async fn consume(cluster: &Cluster, topic: &str, report: &mut Report) -> Result<
     let mut consumer = Consumer::new(
         cluster.clone(),
         ConsumerConfig::new()
-            .visibility(Visibility::All)
-            .max_wait_ms(200)
-            .group_id(format!("kaaslib-live-consume-{}", run_token())),
+            .with_visibility(Visibility::All)
+            .with_max_wait_ms(200)
+            .with_group_id(format!("kaaslib-live-consume-{}", run_token())),
     );
     consumer
         .assign(assignment.clone(), Position::Earliest)
@@ -616,7 +616,7 @@ async fn transactions(cluster: &Cluster, topic: &str, report: &mut Report) -> Re
     let marker = format!("m15-{token}");
     let producer = Producer::new(
         cluster.clone(),
-        ProducerConfig::new().transactional_id(format!("kaaslib-live-txn-{token}")),
+        ProducerConfig::new().with_transactional_id(format!("kaaslib-live-txn-{token}")),
     );
 
     producer.init_transactions().await?;
@@ -745,9 +745,9 @@ async fn exactly_once(cluster: &Cluster, topic: &str, report: &mut Report) -> Re
     let mut consumer = Consumer::new(
         cluster.clone(),
         ConsumerConfig::new()
-            .group_id(&group)
-            .visibility(Visibility::All)
-            .max_wait_ms(200),
+            .with_group_id(&group)
+            .with_visibility(Visibility::All)
+            .with_max_wait_ms(200),
     );
     consumer
         .assign([(topic.to_owned(), 2)], Position::Latest)
@@ -773,7 +773,7 @@ async fn exactly_once(cluster: &Cluster, topic: &str, report: &mut Report) -> Re
 
     let producer = Producer::new(
         cluster.clone(),
-        ProducerConfig::new().transactional_id(format!("kaaslib-live-eos-{token}")),
+        ProducerConfig::new().with_transactional_id(format!("kaaslib-live-eos-{token}")),
     );
     producer.init_transactions().await?;
 
@@ -852,15 +852,15 @@ async fn exactly_once_as_member(cluster: &Cluster, topic: &str, report: &mut Rep
     let mut consumer = GroupConsumer::subscribe(
         cluster.clone(),
         ConsumerConfig::new()
-            .visibility(Visibility::All)
-            .max_wait_ms(200),
+            .with_visibility(Visibility::All)
+            .with_max_wait_ms(200),
         &group,
         [topic],
     )
     .await?
     // The transaction owns these offsets; an auto-commit would write them
     // outside it, which is the split KIP-447 exists to remove.
-    .auto_commit(false);
+    .with_auto_commit(false);
 
     // A fresh group has nothing committed, so the member starts at the earliest
     // retained offset and reads what the earlier sections wrote.
@@ -882,7 +882,7 @@ async fn exactly_once_as_member(cluster: &Cluster, topic: &str, report: &mut Rep
 
     let producer = Producer::new(
         cluster.clone(),
-        ProducerConfig::new().transactional_id(format!("kaaslib-live-eos-member-{token}")),
+        ProducerConfig::new().with_transactional_id(format!("kaaslib-live-eos-member-{token}")),
     );
     producer.init_transactions().await?;
 
@@ -1232,9 +1232,9 @@ async fn read_partition_with(
     visibility: Visibility,
 ) -> Result<Vec<kafka_read::Record>> {
     let spec = ScanSpec::new(topic)
-        .partitions([partition])
-        .from(StartPosition::Earliest)
-        .visibility(visibility);
+        .with_partitions([partition])
+        .with_from(StartPosition::Earliest)
+        .with_visibility(visibility);
     let mut stream = Box::pin(kafka_read::scan(cluster, spec).await?);
 
     let mut records = Vec::new();

@@ -1,6 +1,6 @@
 //! The admin client.
 
-use kafka_conn::{ApiKey, ConnectionConfig, Result};
+use kafka_conn::{ApiKey, Result};
 use kafka_meta::{Cluster, ClusterConfig};
 
 /// Admin RPCs over a routed, retrying, pooled connection.
@@ -34,10 +34,7 @@ impl Admin {
         bootstrap: impl IntoIterator<Item = impl Into<String>>,
         mut config: ClusterConfig,
     ) -> Result<Self> {
-        config.connection = ConnectionConfig {
-            read_only: true,
-            ..config.connection
-        };
+        config.connection = config.connection.with_read_only();
         Self::connect(bootstrap, config).await
     }
 

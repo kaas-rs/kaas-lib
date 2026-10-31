@@ -144,8 +144,8 @@ async fn a_thousand_consumer_lifecycles_return_to_baseline() {
         let mut consumer = Consumer::new(
             cluster.clone(),
             ConsumerConfig::new()
-                .visibility(Visibility::All)
-                .max_wait_ms(500),
+                .with_visibility(Visibility::All)
+                .with_max_wait_ms(500),
         );
         if consumer
             .assign(
@@ -197,7 +197,7 @@ async fn group_members_that_vanish_do_not_poison_the_group() {
     for cycle in 0..MEMBERS {
         let mut member = GroupConsumer::subscribe(
             cluster.clone(),
-            ConsumerConfig::new().visibility(Visibility::All),
+            ConsumerConfig::new().with_visibility(Visibility::All),
             "leak-group",
             [TOPIC],
         )
@@ -217,7 +217,7 @@ async fn group_members_that_vanish_do_not_poison_the_group() {
     // A member that joins after all that must still get an assignment.
     let mut survivor = GroupConsumer::subscribe(
         cluster.clone(),
-        ConsumerConfig::new().visibility(Visibility::All),
+        ConsumerConfig::new().with_visibility(Visibility::All),
         "leak-group",
         [TOPIC],
     )

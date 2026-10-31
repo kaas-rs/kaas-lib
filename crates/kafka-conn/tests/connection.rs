@@ -164,9 +164,12 @@ async fn dropping_a_request_future_leaves_the_connection_consistent() {
 #[testkit::integration_test]
 async fn a_read_only_client_refuses_before_opening_a_socket() {
     let broker = testkit::single_broker().await.unwrap();
-    let conn = Connection::connect(&broker.bootstrap()[0], ConnectionConfig::new().read_only())
-        .await
-        .unwrap();
+    let conn = Connection::connect(
+        &broker.bootstrap()[0],
+        ConnectionConfig::new().with_read_only(),
+    )
+    .await
+    .unwrap();
 
     let before = conn.stats_snapshot();
     let err = conn

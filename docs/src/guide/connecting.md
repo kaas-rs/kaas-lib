@@ -241,7 +241,7 @@ use kafka_meta::ClusterConfig;
 
 # fn example() {
 let config = ClusterConfig {
-    connection: ConnectionConfig::new().read_only(),
+    connection: ConnectionConfig::new().with_read_only(),
     ..ClusterConfig::default()
 };
 # }

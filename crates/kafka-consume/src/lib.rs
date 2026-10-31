@@ -13,7 +13,7 @@
 //! KIP-848 and the classic `JoinGroup`/`SyncGroup`/`Heartbeat` path.
 //!
 //! It does borrow a group's *offset storage*: set
-//! [`ConsumerConfig::group_id`] and [`Consumer::commit`] stores positions
+//! [`ConsumerConfig::with_group_id`] and [`Consumer::commit`] stores positions
 //! under it using the non-member sentinel. Borrowing the storage is not
 //! joining the group.
 //!

@@ -133,7 +133,7 @@ use kafka_consume::{Consumer, ConsumerConfig, Position};
 
 # fn handle(record: &kafka_consume::Record) -> kafka_consume::Result<()> { Ok(()) }
 # async fn example(cluster: kafka_consume::Cluster) -> kafka_consume::Result<()> {
-let mut consumer = Consumer::new(cluster, ConsumerConfig::new().group_id("reporting"));
+let mut consumer = Consumer::new(cluster, ConsumerConfig::new().with_group_id("reporting"));
 consumer.assign([("orders".to_owned(), 0)], Position::Earliest).await?;
 
 // Resume where the last run stopped, rather than where `assign` started.
@@ -215,8 +215,8 @@ use kafka_consume::{ConsumerConfig, GroupConsumer};
 let mut consumer =
     GroupConsumer::subscribe(cluster, ConsumerConfig::new(), "billing", ["orders", "refunds"])
         .await?
-        .auto_commit(true)                    // the default
-        .instance_id("billing-pod-3");        // static membership, optional
+        .with_auto_commit(true)               // the default
+        .with_instance_id("billing-pod-3");   // static membership, optional
 
 while still_running() {
     for record in consumer.poll().await? {
@@ -320,7 +320,7 @@ impl RebalanceListener for FlushOnRevoke {
 let consumer =
     GroupConsumer::subscribe(cluster, ConsumerConfig::new(), "billing", ["orders"])
         .await?
-        .on_rebalance(FlushOnRevoke);
+        .with_rebalance_listener(FlushOnRevoke);
 # Ok(())
 # }
 ```
@@ -356,7 +356,7 @@ use kafka_consume::{Assignor, ClassicConsumer, ConsumerConfig};
 let mut consumer =
     ClassicConsumer::subscribe(cluster, ConsumerConfig::new(), "billing", ["orders"])
         .await?
-        .assignors([Assignor::CooperativeSticky, Assignor::Range]);
+        .with_assignors([Assignor::CooperativeSticky, Assignor::Range]);
 
 for record in consumer.poll().await? {
     println!("{}-{} @{}", record.topic, record.partition, record.offset);
@@ -419,15 +419,10 @@ use kafka_consume::{ConsumerConfig, Visibility};
 
 # fn example() {
 let config = ConsumerConfig::new()
-    .group_id("reporting")
-    .visibility(Visibility::All)
-    .max_wait_ms(200);
-
-// The rest are public fields on an owned type:
-let tuned = ConsumerConfig {
-    partition_max_bytes: 4 * 1024 * 1024,
-    ..ConsumerConfig::new()
-};
+    .with_group_id("reporting")
+    .with_visibility(Visibility::All)
+    .with_max_wait_ms(200)
+    .with_partition_max_bytes(4 * 1024 * 1024);
 # }
 ```
 
@@ -437,12 +432,6 @@ records a transaction abandoned; a scan is usually a human looking at what is
 actually in the log. `read_committed` does not mean the broker filters for
 you — it sends the records plus an `AbortedTransactions` list and the client
 does the work.
-
-`ConsumerConfig` and `ProducerConfig` still use bare setter names
-(`.group_id(…)`, not `.with_group_id(…)`). The rest of the workspace uses the
-`with_` prefix, and these predate it; renaming them breaks callers, so it is
-a deliberate future pass rather than a trickle. See
-[STYLE.md](https://github.com/kaas-rs/kaas-lib/blob/main/STYLE.md).
 
 ## Fetch sessions, for free
 

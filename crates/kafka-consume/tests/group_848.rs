@@ -60,8 +60,8 @@ async fn setup() -> (KafkaCluster, Cluster) {
 
 fn config() -> ConsumerConfig {
     ConsumerConfig::new()
-        .visibility(Visibility::All)
-        .max_wait_ms(200)
+        .with_visibility(Visibility::All)
+        .with_max_wait_ms(200)
 }
 
 fn owned(members: &[&GroupConsumer]) -> Vec<BTreeSet<(String, i32)>> {
@@ -294,7 +294,7 @@ async fn a_listener_is_told_what_it_is_losing_before_it_loses_it() {
     let mut a = GroupConsumer::subscribe(cluster.clone(), config(), group, [TOPIC])
         .await
         .expect("a")
-        .on_rebalance(Watcher {
+        .with_rebalance_listener(Watcher {
             seen: Arc::clone(&seen),
         });
 

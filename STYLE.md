@@ -46,10 +46,20 @@ not a `ProducerRecordBuilder` awaiting a `.build()`.
 
 ## Why these three properties are load-bearing
 
-**Validity is structural.** Because `new()` takes the required data and every
-`with_*` returns a complete value, an invalid instance cannot be expressed.
-That is what removes `build() -> Result<T>` — there is no deferred failure to
-report, so there is no error path, so callers do not handle one.
+**Validity is structural — one setting at a time.** Because `new()` takes the
+required data and every `with_*` returns a complete value, no instance is ever
+missing something it needs. That is what removes `build() -> Result<T>` —
+there is no deferred failure to report, so there is no error path, so callers
+do not handle one.
+
+It does not reach *across* settings. A setter that implies another — turning
+on a transactional id also turns on idempotence, because transactions are
+built on it — holds only until a later call undoes it, because the last call
+wins: `.with_transactional_id("t").with_idempotent(false)` compiles and
+contradicts itself. Public fields skip the setters altogether. So a rule that
+relates two settings needs checking where the value is *used*; the implying
+setter is a convenience, not the guarantee. When those rules multiply, that
+is the first case under [Where this is the wrong tool](#where-this-is-the-wrong-tool).
 
 **`#[must_use]` is not decoration.** The single failure mode of a consuming
 builder is this:
@@ -60,15 +70,26 @@ record.with_key("k");   // compiles, does nothing, silently loses the key
 ```
 
 `#[must_use]` turns that into a warning, and with `-D warnings` into a build
-failure. Apply it to *every* builder or the style has a hole. This workspace
-has 58 consuming builders and 58 `#[must_use]` attributes; that ratio is the
-invariant, and it is worth grepping for in review.
+failure. Apply it to *every* builder or the style has a hole. The ratio of
+consuming builders to `#[must_use]` attributes is the invariant, and it is
+worth grepping for in review: this workspace is at 91 of 91, but only since
+0.12.0, when a count found `TlsConfig::with_client_certificate` had gone
+without one since 0.1.0. Nothing else would have caught it.
 
 **Total prefix discipline beats locally-better names.** `with_read_only()`
 reads slightly worse than `read_only()`. The trade is that a caller never has
 to know which module a type came from to guess what its setters are called.
 One convention that is occasionally clumsy beats two that each read well in
 isolation.
+
+**The prefix keeps the bare name free for the getter.** Rust's API guidelines
+name a getter after its field — `fn limit(&self) -> Option<usize>` (C-GETTER).
+A type whose *setter* is `limit(mut self, …)` can never make that field
+private and keep the obvious accessor; it has to pick an awkward name for one
+of the two, forever. The bare-name builders in the ecosystem get away with it
+because a separate builder struct has no getters. A type that is its own
+builder does, so here the prefix is not taste — it is what keeps a private
+field reachable.
 
 ## Naming: the cases that come up
 
@@ -157,8 +178,11 @@ not the answer, because it is not.
 **Decide before 1.0.** The prefix rule costs nothing on day one and is
 expensive afterwards: applying it to a single type here meant renaming seven
 published methods and roughly forty call sites, and it broke every downstream
-caller. Renaming is also the one part of this that cannot be done gradually
-without breaking people twice.
+caller. The other six types followed eight releases later — 32 methods, about
+130 call sites in Rust and another thirty lines of documentation — and *seven* of
+those were methods that had been renamed the other way, from `with_*` to
+bare, the day before the rule was written. Renaming is also the one part of
+this that cannot be done gradually without breaking people twice.
 
 **Rename from the compiler, not from a text search.** `.key(`, `.value(`,
 `.timestamp(` and `.partition(` are all live method or field names on other

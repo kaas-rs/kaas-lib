@@ -90,7 +90,7 @@
 //! timeout or a connection that died in flight can never be re-sent — the
 //! records may already be in the log — so an ordinary leader election surfaces
 //! to the caller as a delivery failure. With it, the producer rides the
-//! election out. [`ProducerConfig::idempotent`] turns it off for brokers that
+//! election out. [`ProducerConfig::with_idempotent`] turns it off for brokers that
 //! cannot issue a producer id; it does not make the producer faster, it makes
 //! it lossier.
 //!

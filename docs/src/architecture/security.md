@@ -58,7 +58,7 @@ both go through one gate rather than two rules:
 `SaslMechanism::sends_reusable_credential` lets the connection layer reason
 about the combination of mechanism and transport, and refuses it on a
 plaintext socket unless the caller opted in with
-`SaslConfig::allow_plaintext_password`. SCRAM sends proofs instead and is not
+`SaslConfig::with_allow_plaintext_password`. SCRAM sends proofs instead and is not
 gated.
 
 ## SASLprep is not `trim()`

@@ -83,8 +83,8 @@ fn advertises_but_refuses() -> BrokerConfig {
 
 fn config() -> ConsumerConfig {
     ConsumerConfig::new()
-        .visibility(Visibility::All)
-        .max_wait_ms(200)
+        .with_visibility(Visibility::All)
+        .with_max_wait_ms(200)
 }
 
 /// The fixture's load-bearing property, measured on a fresh bare connection:

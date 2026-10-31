@@ -118,7 +118,7 @@ impl TailSpec {
 
     /// Restrict to specific partitions.
     #[must_use]
-    pub fn partitions(mut self, partitions: impl IntoIterator<Item = i32>) -> Self {
+    pub fn with_partitions(mut self, partitions: impl IntoIterator<Item = i32>) -> Self {
         self.partitions = Some(partitions.into_iter().collect());
         self
     }
@@ -129,22 +129,62 @@ impl TailSpec {
     /// step to grow across offset gaps for exactly the same reason the log end
     /// does.
     #[must_use]
-    pub fn ending_at(mut self, anchor: TailAnchor) -> Self {
+    pub fn with_anchor(mut self, anchor: TailAnchor) -> Self {
         self.anchor = anchor;
         self
     }
 
     /// Filter records after decoding.
     #[must_use]
-    pub fn filter(mut self, filter: RecordFilter) -> Self {
+    pub fn with_filter(mut self, filter: RecordFilter) -> Self {
         self.filter = Some(filter);
         self
     }
 
     /// Show or hide aborted-transaction records.
     #[must_use]
-    pub fn visibility(mut self, visibility: Visibility) -> Self {
+    pub fn with_visibility(mut self, visibility: Visibility) -> Self {
         self.visibility = visibility;
+        self
+    }
+
+    /// Per-partition byte budget for one chunk. 1 MiB unless set.
+    #[must_use]
+    pub fn with_partition_max_bytes(mut self, bytes: i32) -> Self {
+        self.partition_max_bytes = bytes;
+        self
+    }
+
+    /// Whole-response byte budget. 8 MiB unless set.
+    #[must_use]
+    pub fn with_fetch_max_bytes(mut self, bytes: i32) -> Self {
+        self.fetch_max_bytes = bytes;
+        self
+    }
+
+    /// Ceiling on a single batch's decompressed size. 64 MiB unless set.
+    #[must_use]
+    pub fn with_max_decompressed_bytes(mut self, bytes: usize) -> Self {
+        self.max_decompressed_bytes = bytes;
+        self
+    }
+
+    /// How many offsets to step back on the first chunk.
+    ///
+    /// Unset, it is derived from the limit — twice the per-partition share,
+    /// and at least 64. It still grows when a chunk under-delivers, and is
+    /// still capped by [`with_max_step`](Self::with_max_step).
+    #[must_use]
+    pub fn with_initial_step(mut self, offsets: i64) -> Self {
+        self.initial_step = offsets;
+        self
+    }
+
+    /// Never step back more than this in one chunk, so a single fetch stays
+    /// bounded. 100 000 unless set.
+    #[must_use]
+    pub fn with_max_step(mut self, offsets: i64) -> Self {
+        self.max_step = offsets;
         self
     }
 
@@ -655,8 +695,7 @@ mod tests {
 
     #[test]
     fn an_explicit_step_wins() {
-        let mut spec = TailSpec::new("orders", 500);
-        spec.initial_step = 4096;
+        let spec = TailSpec::new("orders", 500).with_initial_step(4096);
         assert_eq!(spec.first_step(6), 4096);
     }
 

@@ -51,9 +51,9 @@ async fn await_topic(admin: &Admin, topic: &str) {
 
 async fn read(cluster: &Cluster, topic: &str, visibility: Visibility) -> Vec<kafka_read::Record> {
     let spec = ScanSpec::new(topic)
-        .partitions([0])
-        .from(StartPosition::Earliest)
-        .visibility(visibility);
+        .with_partitions([0])
+        .with_from(StartPosition::Earliest)
+        .with_visibility(visibility);
     let mut stream = Box::pin(kafka_read::scan(cluster, spec).await.expect("scan"));
 
     let mut records = Vec::new();
@@ -99,7 +99,7 @@ async fn a_committed_transaction_is_visible_and_an_aborted_one_is_not() {
     let (_fixture, cluster, _admin) = setup(TOPIC).await;
     let producer = Producer::new(
         cluster.clone(),
-        ProducerConfig::new().transactional_id("txn-visibility-1"),
+        ProducerConfig::new().with_transactional_id("txn-visibility-1"),
     );
     producer.init_transactions().await.expect("init");
 
@@ -187,8 +187,8 @@ async fn consumed_offsets_move_with_the_transaction_and_only_with_it() {
     let mut consumer = GroupConsumer::subscribe(
         cluster.clone(),
         ConsumerConfig::new()
-            .visibility(Visibility::All)
-            .max_wait_ms(200),
+            .with_visibility(Visibility::All)
+            .with_max_wait_ms(200),
         GROUP,
         [INPUT],
     )
@@ -196,7 +196,7 @@ async fn consumed_offsets_move_with_the_transaction_and_only_with_it() {
     .expect("subscribe")
     // The transaction owns these offsets now. Auto-commit would write them
     // outside it, which is the bug this test exists to catch.
-    .auto_commit(false);
+    .with_auto_commit(false);
 
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut consumed = Vec::new();
@@ -211,7 +211,7 @@ async fn consumed_offsets_move_with_the_transaction_and_only_with_it() {
 
     let producer = Producer::new(
         cluster.clone(),
-        ProducerConfig::new().transactional_id("txn-eos-writer"),
+        ProducerConfig::new().with_transactional_id("txn-eos-writer"),
     );
     producer.init_transactions().await.expect("init");
 
@@ -314,13 +314,19 @@ async fn a_fenced_producer_fails_terminally_rather_than_retrying() {
 
     let (_fixture, cluster, _admin) = setup(TOPIC).await;
 
-    let first = Producer::new(cluster.clone(), ProducerConfig::new().transactional_id(ID));
+    let first = Producer::new(
+        cluster.clone(),
+        ProducerConfig::new().with_transactional_id(ID),
+    );
     first.init_transactions().await.expect("first init");
 
     // The second claim bumps the epoch, which is exactly what a transactional
     // id is for: a restarted application takes over from the instance it
     // replaced.
-    let second = Producer::new(cluster.clone(), ProducerConfig::new().transactional_id(ID));
+    let second = Producer::new(
+        cluster.clone(),
+        ProducerConfig::new().with_transactional_id(ID),
+    );
     second.init_transactions().await.expect("second init");
 
     first.begin_transaction().expect("begin");
@@ -382,7 +388,7 @@ async fn the_transaction_api_refuses_an_impossible_order() {
     // A transactional id, but no `init_transactions`.
     let uninitialised = Producer::new(
         cluster.clone(),
-        ProducerConfig::new().transactional_id("txn-order-1"),
+        ProducerConfig::new().with_transactional_id("txn-order-1"),
     );
     assert!(
         uninitialised.begin_transaction().is_err(),

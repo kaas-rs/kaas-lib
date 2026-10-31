@@ -296,7 +296,8 @@ impl Producer {
     fn transactional(&self) -> Result<&Arc<Transactions>> {
         self.transactions.as_ref().ok_or_else(|| {
             Error::InvalidRequest(
-                "this producer has no transactional id; set one with                  ProducerConfig::transactional_id"
+                "this producer has no transactional id; set one with \
+                 ProducerConfig::with_transactional_id"
                     .to_owned(),
             )
         })

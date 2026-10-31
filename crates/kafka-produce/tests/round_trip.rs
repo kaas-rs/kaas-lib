@@ -58,8 +58,8 @@ async fn await_topic(admin: &Admin, topic: &str) {
 /// Read a whole partition back through `kafka-read`.
 async fn read_partition(cluster: &Cluster, topic: &str, partition: i32) -> Vec<kafka_read::Record> {
     let spec = ScanSpec::new(topic)
-        .partitions([partition])
-        .from(StartPosition::Earliest);
+        .with_partitions([partition])
+        .with_from(StartPosition::Earliest);
     let mut stream = Box::pin(kafka_read::scan(cluster, spec).await.expect("scan"));
 
     let mut records = Vec::new();
@@ -176,7 +176,7 @@ async fn every_codec_round_trips() {
     {
         let producer = Producer::new(
             cluster.clone(),
-            ProducerConfig::new().compression(compression),
+            ProducerConfig::new().with_compression(compression),
         );
         producer
             .send(
@@ -275,7 +275,10 @@ async fn an_unkeyed_record_sticks_to_one_partition() {
 #[testkit::integration_test]
 async fn acks_leader_is_acknowledged_before_the_record_is_readable() {
     let (_fixture, cluster, _admin) = setup("acked", 1).await;
-    let producer = Producer::new(cluster.clone(), ProducerConfig::new().acks(Acks::Leader));
+    let producer = Producer::new(
+        cluster.clone(),
+        ProducerConfig::new().with_acks(Acks::Leader),
+    );
 
     let metadata = producer
         .send(ProducerRecord::new("acked").with_value("v"))

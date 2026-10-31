@@ -32,7 +32,7 @@ for tail in &tails {
 }
 
 // Or narrow it.
-let spec = TailSpec::new("orders", 100).partitions([0, 3]);
+let spec = TailSpec::new("orders", 100).with_partitions([0, 3]);
 let tails = kafka_read::tail(cluster, &spec).await?;
 # Ok(())
 # }
@@ -63,9 +63,9 @@ use kafka_read::{ScanEvent, ScanSpec, StartPosition};
 
 # async fn example(cluster: &kafka_meta::Cluster) -> kafka_read::Result<()> {
 let spec = ScanSpec::new("orders")
-    .from(StartPosition::Earliest)
-    .partitions([0, 1, 2])
-    .limit(10_000);
+    .with_from(StartPosition::Earliest)
+    .with_partitions([0, 1, 2])
+    .with_limit(10_000);
 
 let mut stream = Box::pin(kafka_read::scan(cluster, spec).await?);
 while let Some(event) = stream.next().await {
@@ -149,10 +149,10 @@ use kafka_read::{ScanSpec, Visibility};
 
 # fn example() {
 // Default: read_uncommitted. Aborted records are visible.
-let all = ScanSpec::new("orders").visibility(Visibility::All);
+let all = ScanSpec::new("orders").with_visibility(Visibility::All);
 
 // read_committed. Aborted records filtered client-side.
-let committed = ScanSpec::new("orders").visibility(Visibility::CommittedOnly);
+let committed = ScanSpec::new("orders").with_visibility(Visibility::CommittedOnly);
 # }
 ```
 
@@ -165,7 +165,7 @@ That is Kafka's design, not a shortcut here.
 ```rust,no_run
 # use kafka_read::{RecordFilter, ScanSpec};
 # fn example(filter: RecordFilter) {
-let spec = ScanSpec::new("orders").filter(filter);
+let spec = ScanSpec::new("orders").with_filter(filter);
 # }
 ```
 

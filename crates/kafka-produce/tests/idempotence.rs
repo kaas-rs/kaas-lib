@@ -56,8 +56,8 @@ async fn await_topic(admin: &Admin, topic: &str) {
 
 async fn read_partition(cluster: &Cluster, topic: &str, partition: i32) -> Vec<kafka_read::Record> {
     let spec = ScanSpec::new(topic)
-        .partitions([partition])
-        .from(StartPosition::Earliest);
+        .with_partitions([partition])
+        .with_from(StartPosition::Earliest);
     let mut stream = Box::pin(kafka_read::scan(cluster, spec).await.expect("scan"));
 
     let mut records = Vec::new();
@@ -204,7 +204,7 @@ async fn a_non_idempotent_producer_clamps_its_connections_to_one_in_flight() {
     let lossy = Producer::connect(
         fixture.bootstrap().to_vec(),
         ClusterConfig::default(),
-        ProducerConfig::new().idempotent(false),
+        ProducerConfig::new().with_idempotent(false),
     )
     .await
     .expect("producer");

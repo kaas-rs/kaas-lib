@@ -97,7 +97,7 @@ async fn what_we_produce_rdkafka_can_consume_through_every_codec() {
         let (fixture, cluster) = setup(topic, 1).await;
         let bootstrap = fixture.bootstrap()[0].clone();
 
-        let producer = Producer::new(cluster, ProducerConfig::new().compression(codec));
+        let producer = Producer::new(cluster, ProducerConfig::new().with_compression(codec));
         let mut pending = Vec::with_capacity(RECORDS);
         for i in 0..RECORDS {
             pending.push(

@@ -11,6 +11,41 @@ reader of this file is looking for.
 
 ## Unreleased
 
+**Breaking, at compile time only.** The last 32 setters without the `with_`
+prefix have it now, so every optional setting in the workspace is spelled
+the same way (CLAUDE.md rule 7, STYLE.md). Each is the same method under a
+new name — nothing does anything different, and an old name is a compile
+error, never a silent change. Three also take the name of the field they
+set, where `with_` plus the old name read badly:
+
+| Type | Old | New |
+|---|---|---|
+| `ProducerConfig` | `retry` `acks` `compression` `delivery_timeout` `linger` `batch_size` `max_request_size` `buffer_memory` `idempotent` `transactional_id` | `with_` + the same |
+| `ConsumerConfig` | `group_id` `visibility` `max_wait_ms` | `with_` + the same |
+| `GroupConsumer`, `ClassicConsumer` | `instance_id` `auto_commit`, and `assignors` on `ClassicConsumer` | `with_` + the same |
+| `GroupConsumer`, `ClassicConsumer` | `on_rebalance` | `with_rebalance_listener`, as `NegotiatedConsumer` already spelled it |
+| `ScanSpec` | `partitions` `from` `limit` `filter` `visibility` | `with_` + the same |
+| `ScanSpec` | `following()` | `with_follow()` |
+| `TailSpec` | `partitions` `filter` `visibility` | `with_` + the same |
+| `TailSpec` | `ending_at` | `with_anchor` |
+| `ConnectionConfig` | `read_only()` | `with_read_only()` |
+| `SaslConfig` | `allow_plaintext_password()` | `with_allow_plaintext_password()` |
+
+Alongside it, additive: a setter for each of the 16 settings that could only
+be reached by writing the field — `with_partition_max_bytes`,
+`with_fetch_max_bytes` and `with_max_decompressed_bytes` on `ScanSpec`,
+`TailSpec` and `ConsumerConfig`; `with_max_wait_ms` and
+`with_max_buffered_records` on `ScanSpec`; `with_initial_step` and
+`with_max_step` on `TailSpec`; `with_max_bytes` on `ConsumerConfig`; and
+`with_client_software_name`, `with_client_software_version` and
+`with_max_frame_bytes` on `ConnectionConfig`. The fields are still public, so
+code that writes one keeps compiling.
+
+`TlsConfig::with_client_certificate` is now `#[must_use]`, like every other
+builder. A call that drops the result was a client certificate that was
+never presented; it is now a warning, and an error under `-D warnings`. Two
+error messages that told the caller which setter to use name the new one.
+
 Additive. A mutation ceiling finer than read-only, at two layers:
 
 - `ConnectionConfig::with_allowed_mutations(keys)` admits only the named

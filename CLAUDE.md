@@ -111,7 +111,7 @@ When any of these blocks a milestone, that is an honest blocker (rule 3) — say
 
    Note this is *not* the `.with_*()` on `kafka_protocol` structs — those are upstream's generated builders, mandated by `#[non_exhaustive]` (see the traps below). Rule 7 is about our own owned types. The two happen to agree, which is convenient rather than meaningful.
 
-   **Rule 7 is not yet true of the whole workspace.** `ProducerRecord` conforms as of 0.4.0; **32 setters do not** — `ProducerConfig` (10), `ConsumerConfig` (10), `ScanSpec` (6), `TailSpec` (4), and one flag each on `ConnectionConfig` (`read_only`) and `SaslConfig` (`allow_plaintext_password`). Renaming them breaks callers again, so it wants one deliberate pass in a single minor rather than a trickle. Do not add new bare setters in the meantime.
+   **The setter half is true as of 0.12.0; the field half is not.** 0.12.0 renamed the last 32 bare setters (`ProducerConfig` 10, `ConsumerConfig` 3, `GroupConsumer` 3, `ClassicConsumer` 4, `ScanSpec` 6, `TailSpec` 4, and `read_only` / `allow_plaintext_password` on `ConnectionConfig` / `SaslConfig`) and added a setter for each of the 16 settings that had none, so no caller has to write a field. But every field on those six types is still `pub`, and none is `#[non_exhaustive]`. Making them private means a getter for everything a caller reads, which is its own breaking release and a decision that has not been made. Until then, a new field on one of them ships with its `with_*` setter in the same commit, and the docs show the setter, never the field or struct-update syntax.
 
 ## Protocol traps — read before writing wire code
 

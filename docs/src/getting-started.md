@@ -162,7 +162,7 @@ group protocols sit on.
 use kafka_consume::{Consumer, ConsumerConfig, Position};
 
 # async fn example(cluster: kafka_consume::Cluster) -> kafka_consume::Result<()> {
-let mut consumer = Consumer::new(cluster, ConsumerConfig::new().group_id("reporting"));
+let mut consumer = Consumer::new(cluster, ConsumerConfig::new().with_group_id("reporting"));
 
 consumer
     .assign(
@@ -248,7 +248,7 @@ let tails = kafka_read::tail(cluster, &TailSpec::new("orders", 500)).await?;
 
 // Or browse forwards from the start.
 let mut stream = Box::pin(
-    kafka_read::scan(cluster, ScanSpec::new("orders").from(StartPosition::Earliest)).await?,
+    kafka_read::scan(cluster, ScanSpec::new("orders").with_from(StartPosition::Earliest)).await?,
 );
 while let Some(event) = stream.next().await {
     match event? {

@@ -170,7 +170,7 @@ compute the same answer outside a producer.
 use kafka_produce::{Acks, ProducerConfig};
 
 # fn example() {
-let config = ProducerConfig::new().acks(Acks::Leader);
+let config = ProducerConfig::new().with_acks(Acks::Leader);
 # }
 ```
 
@@ -212,7 +212,7 @@ sequence numbers and you duplicate a record on every timeout, with no error
 anywhere; retry nothing and an ordinary leader election becomes a delivery
 failure.
 
-Rejections are retried under `ProducerConfig::retry` after refreshing the
+Rejections are retried under `ProducerConfig::with_retry` after refreshing the
 metadata that made us ask the wrong broker. The delay is the point rather
 than the count — three *immediate* retries all re-read the same stale answer
 and fail identically.
@@ -225,7 +225,7 @@ instead of appending it twice. That is what makes an ambiguous failure
 retriable, and it is why an ordinary leader election is something the
 producer rides out rather than something the caller sees.
 
-`ProducerConfig::idempotent(false)` is for brokers that cannot issue a
+`ProducerConfig::with_idempotent(false)` is for brokers that cannot issue a
 producer id. It does not make the producer faster; it makes it lossier.
 
 ## Compression
@@ -234,7 +234,7 @@ producer id. It does not make the producer faster; it makes it lossier.
 use kafka_produce::{Compression, ProducerConfig};
 
 # fn example() {
-let config = ProducerConfig::new().compression(Compression::Zstd);
+let config = ProducerConfig::new().with_compression(Compression::Zstd);
 # }
 ```
 
@@ -262,7 +262,7 @@ use kafka_produce::{Producer, ProducerConfig, ProducerRecord};
 # async fn example(cluster: kafka_produce::Cluster) -> kafka_produce::Result<()> {
 let producer = Producer::new(
     cluster,
-    ProducerConfig::new().transactional_id("billing-writer-1"),
+    ProducerConfig::new().with_transactional_id("billing-writer-1"),
 );
 
 // Once, before any transaction: claims the id and fences the previous holder.
@@ -325,7 +325,7 @@ loop {
 Four things this depends on, each of which is a silent bug if you get it
 wrong:
 
-- **Turn auto-commit off** (`GroupConsumer::auto_commit(false)`). The
+- **Turn auto-commit off** (`GroupConsumer::with_auto_commit(false)`). The
   transaction owns the offsets now; an auto-commit writes them *outside* it,
   which is exactly the split this API removes.
 - **`positions()` is the next offset to read**, which is what a committed
